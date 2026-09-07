@@ -156,7 +156,16 @@ class MockVulkanContextBuilder {
     return *this;
   }
 
+  /// Inject an image allocation refusal without replacing normal mock creation.
+  MockVulkanContextBuilder& SetImageAllocationFailureCallback(
+      std::function<bool(const VkImageCreateInfo&)> callback) {
+    image_allocation_failure_callback_ = std::move(callback);
+    return *this;
+  }
+
  private:
+  std::function<bool(const VkImageCreateInfo&)>
+      image_allocation_failure_callback_;
   std::function<void(ContextVK::Settings&)> settings_callback_;
   std::vector<std::string> instance_extensions_;
   std::vector<std::string> instance_layers_;

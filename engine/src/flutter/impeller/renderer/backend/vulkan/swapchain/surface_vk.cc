@@ -24,6 +24,18 @@ std::unique_ptr<SurfaceVK> SurfaceVK::WrapSwapchainImage(
   }
 
   const auto enable_msaa = transients->IsMSAAEnabled();
+  // Materialization is one pre-submit transaction. In particular, never pass a
+  // missing pooled depth texture to SetupDepthStencilAttachments: nullptr there
+  // requests a second, uncached allocation rather than representing failure.
+  const auto msaa_texture =
+      enable_msaa ? transients->GetMSAATexture() : nullptr;
+  if (enable_msaa && !msaa_texture) {
+    return nullptr;
+  }
+  const auto depth_stencil_texture = transients->GetDepthStencilTexture();
+  if (!depth_stencil_texture) {
+    return nullptr;
+  }
 
   const auto swapchain_tex_desc = swapchain_image->GetTextureDescriptor();
 
@@ -49,7 +61,7 @@ std::unique_ptr<SurfaceVK> SurfaceVK::WrapSwapchainImage(
   color0.clear_color = Color::DarkSlateGray();
   color0.load_action = LoadAction::kClear;
   if (enable_msaa) {
-    color0.texture = transients->GetMSAATexture();
+    color0.texture = msaa_texture;
     color0.store_action = StoreAction::kMultisampleResolve;
     color0.resolve_texture = resolve_tex;
   } else {
@@ -66,8 +78,8 @@ std::unique_ptr<SurfaceVK> SurfaceVK::WrapSwapchainImage(
       /*msaa=*/enable_msaa,                            //
       /*label=*/"Onscreen",                            //
       /*stencil_attachment_config=*/
-      RenderTarget::kDefaultStencilAttachmentConfig,                  //
-      /*depth_stencil_texture=*/transients->GetDepthStencilTexture()  //
+      RenderTarget::kDefaultStencilAttachmentConfig,   //
+      /*depth_stencil_texture=*/depth_stencil_texture  //
   );
 
   // The constructor is private. So make_unique may not be used.

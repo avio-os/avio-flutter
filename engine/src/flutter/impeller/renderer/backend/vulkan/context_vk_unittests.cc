@@ -14,8 +14,10 @@
 #include "impeller/renderer/backend/vulkan/command_pool_vk.h"
 #include "impeller/renderer/backend/vulkan/context_vk.h"
 #include "impeller/renderer/backend/vulkan/pipeline_library_vk.h"
+#include "impeller/renderer/backend/vulkan/swapchain/surface_vk.h"
 #include "impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.h"
 #include "impeller/renderer/backend/vulkan/test/mock_vulkan.h"
+#include "impeller/renderer/backend/vulkan/texture_vk.h"
 #include "vulkan/vulkan_core.h"
 
 namespace impeller {
@@ -71,6 +73,68 @@ TEST(ContextVKTest, DeletesCommandPools) {
   }
   ASSERT_FALSE(weak_pool.lock());
   ASSERT_FALSE(weak_context.lock());
+}
+
+// Exercise the real allocator and surface builder. A failed cached attachment
+// must not escape into the generic render-target helper's allocation fallback.
+static void CheckRequiredSurfaceAllocationFailure(bool fail_depth, bool msaa) {
+  ScopedValidationDisable disable_validation;
+  bool fail_allocations = false;
+  size_t failed_attempts = 0u;
+  auto context =
+      MockVulkanContextBuilder()
+          .SetImageAllocationFailureCallback(
+              [&](const VkImageCreateInfo& info) {
+                const bool is_depth =
+                    info.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+                if (fail_allocations && is_depth == fail_depth) {
+                  failed_attempts++;
+                  return true;
+                }
+                return false;
+              })
+          .Build();
+  ASSERT_TRUE(context);
+  TextureDescriptor desc;
+  desc.size = ISize(640, 34);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+  desc.usage = TextureUsage::kRenderTarget;
+  desc.storage_mode = StorageMode::kDevicePrivate;
+  auto resolve = context->GetResourceAllocator()->CreateTexture(desc);
+  ASSERT_TRUE(resolve);
+  auto source = std::const_pointer_cast<TextureSourceVK>(
+      TextureVK::Cast(*resolve).GetTextureSource());
+  auto pool = context->GetSwapchainTransientsPool();
+  auto transients = pool->Acquire(desc, msaa);
+  ASSERT_TRUE(transients);
+  fail_allocations = true;
+  auto failed =
+      SurfaceVK::WrapSwapchainImage(transients, source, [] { return true; });
+  EXPECT_FALSE(failed);
+  EXPECT_EQ(failed_attempts, 1u);
+  EXPECT_TRUE(GetMockVulkanQueueSubmitBatchCounts().empty());
+
+  // A later opportunity retries this same cached entry after pressure clears.
+  fail_allocations = false;
+  auto recovered =
+      SurfaceVK::WrapSwapchainImage(transients, source, [] { return true; });
+  ASSERT_TRUE(recovered);
+  EXPECT_TRUE(recovered->IsValid());
+  EXPECT_TRUE(recovered->GetRenderTarget().GetDepthAttachment().has_value());
+  EXPECT_TRUE(recovered->GetRenderTarget().GetStencilAttachment().has_value());
+  EXPECT_EQ(pool->GetUsage().entries, 1u);
+}
+
+TEST(ContextVKTest, SurfaceRejectsFailedMultisampleColorAllocation) {
+  CheckRequiredSurfaceAllocationFailure(false, true);
+}
+
+TEST(ContextVKTest, SurfaceRejectsFailedMultisampleDepthAllocation) {
+  CheckRequiredSurfaceAllocationFailure(true, true);
+}
+
+TEST(ContextVKTest, SurfaceRejectsFailedSingleSampleDepthAllocation) {
+  CheckRequiredSurfaceAllocationFailure(true, false);
 }
 
 TEST(ContextVKTest, TransientsPoolDoesNotReuseLeasedEntries) {

@@ -188,6 +188,8 @@ void MockPhysicalDevice::DestroyDevice(
 }
 
 struct MockVulkanState {
+  std::function<bool(const VkImageCreateInfo&)>
+      image_allocation_failure_callback;
   std::vector<std::string> instance_extensions;
   std::vector<std::string> instance_layers;
   std::vector<std::string> device_extensions;
@@ -512,6 +514,11 @@ VkResult vkCreateImage(VkDevice device,
                        const VkAllocationCallbacks* pAllocator,
                        VkImage* pImage) {
   MockDevice::Unwrap(device)->AddCalledFunction("vkCreateImage");
+  if (g_mock_vulkan_state &&
+      g_mock_vulkan_state->image_allocation_failure_callback &&
+      g_mock_vulkan_state->image_allocation_failure_callback(*pCreateInfo)) {
+    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+  }
   // Simulate VK_ERROR_COMPRESSION_EXHAUSTED_EXT for fixed-rate-compressed image
   // creates (the spec only returns this error for compression requests).
   if (g_mock_vulkan_state &&
@@ -1452,6 +1459,8 @@ std::shared_ptr<ContextVK> MockVulkanContextBuilder::Build() {
     settings_callback_(settings);
   }
   g_mock_vulkan_state.reset(new MockVulkanState());
+  g_mock_vulkan_state->image_allocation_failure_callback =
+      image_allocation_failure_callback_;
   g_mock_vulkan_state->instance_extensions = instance_extensions_;
   g_mock_vulkan_state->instance_layers = instance_layers_;
   g_mock_vulkan_state->device_extensions = device_extensions_;
