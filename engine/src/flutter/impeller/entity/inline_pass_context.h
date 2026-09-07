@@ -71,6 +71,7 @@ class InlinePassContext {
   std::shared_ptr<RenderPass> pass_;
   uint32_t pass_count_ = 0;
   bool honor_declared_load_action_ = false;
+  bool failed_ = false;
 
   InlinePassContext(const InlinePassContext&) = delete;
 

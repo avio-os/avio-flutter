@@ -343,7 +343,7 @@ class CanvasDlDispatcher : public DlDispatcherBase {
   }
   using DlDispatcherBase::saveLayer;
 
-  void FinishRecording() { canvas_.EndReplay(); }
+  bool FinishRecording() { return canvas_.EndReplay(); }
 
   // |flutter::DlOpReceiver|
   void drawVertices(const std::shared_ptr<flutter::DlVertices>& vertices,

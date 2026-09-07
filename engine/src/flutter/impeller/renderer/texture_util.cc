@@ -38,7 +38,15 @@ fml::Status AddMipmapGeneration(
     const std::shared_ptr<CommandBuffer>& command_buffer,
     const std::shared_ptr<Context>& context,
     const std::shared_ptr<Texture>& texture) {
+  if (!command_buffer || !texture) {
+    return fml::Status(fml::StatusCode::kInvalidArgument,
+                       "Missing mipmap resource");
+  }
   std::shared_ptr<BlitPass> blit_pass = command_buffer->CreateBlitPass();
+  if (!blit_pass) {
+    return fml::Status(fml::StatusCode::kUnknown,
+                       "Could not create mipmap blit pass");
+  }
   bool success = blit_pass->GenerateMipmap(texture);
   if (!success) {
     return fml::Status(fml::StatusCode::kUnknown, "");

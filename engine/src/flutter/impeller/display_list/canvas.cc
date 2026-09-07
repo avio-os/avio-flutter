@@ -1340,16 +1340,20 @@ void Canvas::ClipGeometry(const Geometry& geometry,
           /*clip_height_floor=*/GetClipHeightFloor(),        //
           /*is_aa=*/is_aa);
 
-  if (clip_state_result.clip_did_change) {
-    // We only need to update the pass scissor if the clip state has changed.
-    SetClipScissor(
-        clip_coverage_stack_.CurrentClipCoverage(),
-        *render_passes_.back().GetInlinePassContext()->GetRenderPass(),
-        GetGlobalPassPosition());
-  }
-
   ++transform_stack_.back().clip_height;
   ++transform_stack_.back().num_clips;
+  if (!clip_state_result.clip_did_change && !clip_state_result.should_render) {
+    return;
+  }
+  auto clip_pass = GetCurrentRenderPass();
+  if (!clip_pass) {
+    return;
+  }
+  if (clip_state_result.clip_did_change) {
+    // We only need to update the pass scissor if the clip state has changed.
+    SetClipScissor(clip_coverage_stack_.CurrentClipCoverage(), *clip_pass,
+                   GetGlobalPassPosition());
+  }
 
   if (!clip_state_result.should_render) {
     return;
@@ -1363,18 +1367,17 @@ void Canvas::ClipGeometry(const Geometry& geometry,
   entity.SetTransform(clip_transform);
   entity.SetClipDepth(clip_depth);
 
-  GeometryResult geometry_result = geometry.GetPositionBuffer(
-      renderer_,                                                      //
-      entity,                                                         //
-      *render_passes_.back().GetInlinePassContext()->GetRenderPass()  //
+  GeometryResult geometry_result = geometry.GetPositionBuffer(renderer_,  //
+                                                              entity,     //
+                                                              *clip_pass  //
   );
   clip_contents.SetGeometry(geometry_result);
   clip_coverage_stack_.GetLastReplayResult().clip_contents.SetGeometry(
       geometry_result);
 
-  clip_contents.Render(
-      renderer_, *render_passes_.back().GetInlinePassContext()->GetRenderPass(),
-      clip_depth);
+  if (!clip_contents.Render(renderer_, *clip_pass, clip_depth)) {
+    rendering_failed_ = true;
+  }
 }
 
 void Canvas::DrawPoints(const Point points[],
@@ -1682,7 +1685,7 @@ void Canvas::Save(uint32_t total_content_depth) {
   transform_stack_.push_back(entry);
 }
 
-std::optional<Rect> Canvas::GetLocalCoverageLimit() const {
+std::optional<Rect> Canvas::GetLocalCoverageLimit() {
   if (!clip_coverage_stack_.HasCoverage()) {
     // The current clip is empty. This means the pass texture won't be
     // visible, so skip it.
@@ -1701,8 +1704,10 @@ std::optional<Rect> Canvas::GetLocalCoverageLimit() const {
   const LazyRenderingConfig& back_render_pass = render_passes_.back();
   std::shared_ptr<Texture> back_texture =
       back_render_pass.GetInlinePassContext()->GetTexture();
-  FML_CHECK(back_texture) << "Context is valid:"
-                          << back_render_pass.GetInlinePassContext()->IsValid();
+  if (!back_texture) {
+    rendering_failed_ = true;
+    return std::nullopt;
+  }
 
   // The maximum coverage of the subpass. Subpasses textures should never
   // extend outside the parent pass texture or the current clip coverage.
@@ -1846,7 +1851,9 @@ void Canvas::SaveLayer(const Paint& paint,
           /*should_use_onscreen=*/should_use_onscreen             //
       );
       if (!input_texture) {
-        // Validation failures are logged in FlipBackdrop.
+        // The failed save still owns its matching Restore.
+        rendering_failed_ = true;
+        SkipUntilMatchingRestore(total_content_depth);
         return;
       }
 
@@ -1897,7 +1904,10 @@ void Canvas::SaveLayer(const Paint& paint,
         backdrop_entity.SetClipDepth(++current_depth_);
         backdrop_entity.SetBlendMode(paint.blend_mode);
 
-        backdrop_entity.Render(renderer_, GetCurrentRenderPass());
+        auto pass = GetCurrentRenderPass();
+        if (pass && !backdrop_entity.Render(renderer_, *pass)) {
+          rendering_failed_ = true;
+        }
         Save(0);
         return;
       }
@@ -1948,7 +1958,10 @@ void Canvas::SaveLayer(const Paint& paint,
   backdrop_entity.SetTransform(
       Matrix::MakeTranslation(Vector3(-local_position)));
   backdrop_entity.SetClipDepth(std::numeric_limits<uint32_t>::max());
-  backdrop_entity.Render(renderer_, GetCurrentRenderPass());
+  auto pass = GetCurrentRenderPass();
+  if (pass && !backdrop_entity.Render(renderer_, *pass)) {
+    rendering_failed_ = true;
+  }
 }
 
 bool Canvas::Restore() {
@@ -1986,20 +1999,27 @@ bool Canvas::Restore() {
     auto lazy_render_pass = std::move(render_passes_.back());
     render_passes_.pop_back();
     // Force the render pass to be constructed if it never was.
-    lazy_render_pass.GetInlinePassContext()->GetRenderPass();
+    if (!lazy_render_pass.GetInlinePassContext()->GetRenderPass()) {
+      rendering_failed_ = true;
+    }
 
     SaveLayerState save_layer_state = save_layer_state_.back();
     save_layer_state_.pop_back();
     auto global_pass_position = GetGlobalPassPosition();
 
+    auto subpass_texture =
+        lazy_render_pass.GetInlinePassContext()->GetTexture();
+    const bool ended = lazy_render_pass.GetInlinePassContext()->EndPass();
+    if (!subpass_texture || !ended) {
+      rendering_failed_ = true;
+      clip_coverage_stack_.PopSubpass();
+      transform_stack_.pop_back();
+      return true;
+    }
     std::shared_ptr<Contents> contents = CreateContentsForSubpassTarget(
-        renderer_, save_layer_state.paint,                         //
-        lazy_render_pass.GetInlinePassContext()->GetTexture(),     //
-        Matrix::MakeTranslation(Vector3{-global_pass_position}) *  //
-            transform_stack_.back().transform                      //
-    );
-
-    lazy_render_pass.GetInlinePassContext()->EndPass();
+        renderer_, save_layer_state.paint, subpass_texture,
+        Matrix::MakeTranslation(Vector3{-global_pass_position}) *
+            transform_stack_.back().transform);
 
     // Round the subpass texture position for pixel alignment with the parent
     // pass render target. By default, we draw subpass textures with nearest
@@ -2042,7 +2062,10 @@ bool Canvas::Restore() {
         // all the previous commands in the active pass).
         auto input_texture = FlipBackdrop(GetGlobalPassPosition());
         if (!input_texture) {
-          return false;
+          rendering_failed_ = true;
+          clip_coverage_stack_.PopSubpass();
+          transform_stack_.pop_back();
+          return true;
         }
 
         FilterInput::Vector inputs = {
@@ -2057,10 +2080,10 @@ bool Canvas::Restore() {
       }
     }
 
-    element_entity.Render(
-        renderer_,                                                      //
-        *render_passes_.back().GetInlinePassContext()->GetRenderPass()  //
-    );
+    auto pass = GetCurrentRenderPass();
+    if (pass && !element_entity.Render(renderer_, *pass)) {
+      rendering_failed_ = true;
+    }
     clip_coverage_stack_.PopSubpass();
     transform_stack_.pop_back();
 
@@ -2082,11 +2105,10 @@ bool Canvas::Restore() {
     FML_DCHECK(!clip_state_result.should_render);
     if (clip_state_result.clip_did_change) {
       // We only need to update the pass scissor if the clip state has changed.
-      SetClipScissor(
-          clip_coverage_stack_.CurrentClipCoverage(),                      //
-          *render_passes_.back().GetInlinePassContext()->GetRenderPass(),  //
-          GetGlobalPassPosition()                                          //
-      );
+      if (auto pass = GetCurrentRenderPass()) {
+        SetClipScissor(clip_coverage_stack_.CurrentClipCoverage(), *pass,
+                       GetGlobalPassPosition());
+      }
     }
   }
 
@@ -2336,8 +2358,13 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
   // conditionally update the backdrop color to its solid color value blended
   // with the current backdrop.
   if (render_passes_.back().IsApplyingClearColor()) {
-    std::optional<Color> maybe_color = entity.AsBackgroundColor(
-        render_passes_.back().GetInlinePassContext()->GetTexture()->GetSize());
+    auto texture = render_passes_.back().GetInlinePassContext()->GetTexture();
+    if (!texture) {
+      rendering_failed_ = true;
+      return;
+    }
+    std::optional<Color> maybe_color =
+        entity.AsBackgroundColor(texture->GetSize());
     if (maybe_color.has_value()) {
       Color color = maybe_color.value();
       RenderTarget& render_target = render_passes_.back()
@@ -2404,8 +2431,7 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
     }
   }
 
-  const std::shared_ptr<RenderPass>& result =
-      render_passes_.back().GetInlinePassContext()->GetRenderPass();
+  const auto result = GetCurrentRenderPass();
   if (!result) {
     // Failure to produce a render pass should be explained by specific errors
     // in `InlinePassContext::GetRenderPass()`, so avoid log spam and don't
@@ -2413,11 +2439,17 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
     return;
   }
 
-  entity.Render(renderer_, *result);
+  if (!entity.Render(renderer_, *result)) {
+    rendering_failed_ = true;
+  }
 }
 
-RenderPass& Canvas::GetCurrentRenderPass() const {
-  return *render_passes_.back().GetInlinePassContext()->GetRenderPass();
+std::shared_ptr<RenderPass> Canvas::GetCurrentRenderPass() {
+  auto pass = render_passes_.back().GetInlinePassContext()->GetRenderPass();
+  if (!pass) {
+    rendering_failed_ = true;
+  }
+  return pass;
 }
 
 void Canvas::SetBackdropData(
@@ -2447,6 +2479,7 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
   // instead of ending the pass.
   rendering_config.GetInlinePassContext()->GetRenderPass();
   if (!rendering_config.GetInlinePassContext()->EndPass()) {
+    rendering_failed_ = true;
     VALIDATION_LOG
         << "Failed to end the current render pass in order to read from "
            "the backdrop texture and apply an advanced blend or backdrop "
@@ -2462,6 +2495,7 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
       rendering_config.GetInlinePassContext()->GetTexture();
 
   if (!input_texture) {
+    rendering_failed_ = true;
     VALIDATION_LOG << "Failed to fetch the color texture in order to "
                       "apply an advanced blend or backdrop filter.";
 
@@ -2499,8 +2533,11 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
       render_passes_.back().GetEntityPassTarget()->RemoveSecondary();
     }
   }
-  RenderPass& current_render_pass =
-      *render_passes_.back().GetInlinePassContext()->GetRenderPass();
+  auto pass = GetCurrentRenderPass();
+  if (!pass) {
+    return nullptr;
+  }
+  RenderPass& current_render_pass = *pass;
 
   // Eagerly restore the BDF contents.
 
@@ -2521,6 +2558,7 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
   msaa_backdrop_entity.SetBlendMode(BlendMode::kSrc);
   msaa_backdrop_entity.SetClipDepth(std::numeric_limits<uint32_t>::max());
   if (!msaa_backdrop_entity.Render(renderer_, current_render_pass)) {
+    rendering_failed_ = true;
     VALIDATION_LOG << "Failed to render MSAA backdrop entity.";
     return nullptr;
   }
@@ -2539,6 +2577,7 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
                    global_pass_position);
     if (!replay.clip_contents.Render(renderer_, current_render_pass,
                                      replay.clip_depth)) {
+      rendering_failed_ = true;
       VALIDATION_LOG << "Failed to render entity for clip restore.";
     }
   }
@@ -2556,6 +2595,9 @@ bool Canvas::SupportsBlitToOnscreen() const {
 
 bool Canvas::BlitToOnscreen(bool is_onscreen) {
   auto command_buffer = renderer_.GetContext()->CreateCommandBuffer();
+  if (!command_buffer) {
+    return false;
+  }
   command_buffer->SetLabel("EntityPass Root Command Buffer");
   auto offscreen_target = render_passes_.back()
                               .GetInlinePassContext()
@@ -2563,14 +2605,20 @@ bool Canvas::BlitToOnscreen(bool is_onscreen) {
                               .GetRenderTarget();
   if (SupportsBlitToOnscreen()) {
     auto blit_pass = command_buffer->CreateBlitPass();
-    blit_pass->AddCopy(offscreen_target.GetRenderTargetTexture(),
-                       render_target_.GetRenderTargetTexture());
+    if (!blit_pass ||
+        !blit_pass->AddCopy(offscreen_target.GetRenderTargetTexture(),
+                            render_target_.GetRenderTargetTexture())) {
+      return false;
+    }
     if (!blit_pass->EncodeCommands()) {
       VALIDATION_LOG << "Failed to encode root pass blit command.";
       return false;
     }
   } else {
     auto render_pass = command_buffer->CreateRenderPass(render_target_);
+    if (!render_pass) {
+      return false;
+    }
     render_pass->SetLabel("EntityPass Root Render Pass");
 
     {
@@ -2617,29 +2665,36 @@ bool Canvas::EnsureFinalMipmapGeneration() const {
   if (!blit_pass) {
     return false;
   }
-  blit_pass->GenerateMipmap(render_target_.GetRenderTargetTexture());
-  blit_pass->EncodeCommands();
+  if (!blit_pass->GenerateMipmap(render_target_.GetRenderTargetTexture()) ||
+      !blit_pass->EncodeCommands()) {
+    return false;
+  }
   return renderer_.GetContext()->EnqueueCommandBuffer(std::move(cmd_buffer));
 }
 
-void Canvas::EndReplay() {
+bool Canvas::EndReplay() {
   FML_DCHECK(render_passes_.size() == 1u);
-  render_passes_.back().GetInlinePassContext()->GetRenderPass();
-  render_passes_.back().GetInlinePassContext()->EndPass(
-      /*is_onscreen=*/!requires_readback_ && is_onscreen_);
+  if (!GetCurrentRenderPass()) {
+    rendering_failed_ = true;
+  }
+  if (!render_passes_.back().GetInlinePassContext()->EndPass(
+          /*is_onscreen=*/!requires_readback_ && is_onscreen_)) {
+    rendering_failed_ = true;
+  }
   backdrop_data_.clear();
 
-  // If requires_readback_ was true, then we rendered to an offscreen texture
-  // instead of to the onscreen provided in the render target. Now we need to
-  // draw or blit the offscreen back to the onscreen.
-  if (requires_readback_) {
-    BlitToOnscreen(/*is_onscreen_=*/is_onscreen_);
+  if (!rendering_failed_ && requires_readback_ &&
+      !BlitToOnscreen(/*is_onscreen=*/is_onscreen_)) {
+    rendering_failed_ = true;
   }
-  if (!EnsureFinalMipmapGeneration()) {
+  if (!rendering_failed_ && !EnsureFinalMipmapGeneration()) {
+    rendering_failed_ = true;
     VALIDATION_LOG << "Failed to generate onscreen mipmaps.";
   }
+  // Earlier passes may already have queued work. Drain it even after a later
+  // failure, so it cannot be submitted as part of an unrelated future frame.
   if (!renderer_.GetContext()->FlushCommandBuffers()) {
-    // Not much we can do.
+    rendering_failed_ = true;
     VALIDATION_LOG << "Failed to submit command buffers";
   }
   render_passes_.clear();
@@ -2648,6 +2703,7 @@ void Canvas::EndReplay() {
 
   Reset();
   Initialize(initial_cull_rect_);
+  return !rendering_failed_;
 }
 
 bool Canvas::IsCompatibleWithSDFRendering(const Paint& paint) {

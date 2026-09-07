@@ -1308,7 +1308,9 @@ std::shared_ptr<Texture> DisplayListToTexture(
   });
 
   display_list->Dispatch(impeller_dispatcher, cull_rect);
-  impeller_dispatcher.FinishRecording();
+  if (!impeller_dispatcher.FinishRecording()) {
+    return nullptr;
+  }
 
   return target.GetRenderTargetTexture();
 }
@@ -1341,10 +1343,10 @@ bool RenderToTarget(ContentContext& context,
   });
 
   display_list->Dispatch(impeller_dispatcher, cull_rect);
-  impeller_dispatcher.FinishRecording();
+  const bool rendered = impeller_dispatcher.FinishRecording();
   context.GetLazyGlyphAtlas()->ResetTextFrames();
 
-  return true;
+  return rendered;
 }
 
 bool RenderToTarget(ContentContext& context,

@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <unordered_map>
+#include "flutter/display_list/dl_builder.h"
 #include "flutter/display_list/dl_tile_mode.h"
 #include "flutter/display_list/effects/dl_image_filter.h"
 #include "flutter/display_list/geometry/dl_geometry_types.h"
@@ -12,17 +13,236 @@
 #include "impeller/core/texture_descriptor.h"
 #include "impeller/display_list/aiks_unittests.h"
 #include "impeller/display_list/canvas.h"
+#include "impeller/display_list/dl_dispatcher.h"
 #include "impeller/display_list/dl_image_impeller.h"
 #include "impeller/display_list/dl_runtime_effect_impeller.h"
 #include "impeller/display_list/dl_vertices_geometry.h"
+#include "impeller/entity/geometry/rect_geometry.h"
+#include "impeller/entity/inline_pass_context.h"
 #include "impeller/geometry/geometry_asserts.h"
 #include "impeller/playground/playground.h"
 #include "impeller/playground/widgets.h"
 #include "impeller/renderer/render_target.h"
+#include "impeller/renderer/testing/mocks.h"
 #include "third_party/abseil-cpp/absl/status/status_matchers.h"
 
 namespace impeller {
 namespace testing {
+
+namespace {
+class FailingFrameContext : public MockImpellerContext {
+ public:
+  bool reject_enqueue = false;
+  bool reject_flush = false;
+  size_t flushes = 0;
+  std::vector<std::shared_ptr<CommandBuffer>> queued;
+
+  bool EnqueueCommandBuffer(std::shared_ptr<CommandBuffer> buffer) override {
+    if (reject_enqueue) {
+      return false;
+    }
+    queued.push_back(std::move(buffer));
+    return true;
+  }
+
+  bool FlushCommandBuffers() override {
+    flushes++;
+    queued.clear();
+    return !reject_flush;
+  }
+};
+
+// Exercise the real Canvas/pass/dispatcher ownership without a GPU. Pipeline
+// setup is intentionally unavailable: these tests submit clear-only targets.
+class CanvasFailureTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    using ::testing::_;
+    using ::testing::Return;
+    using ::testing::ReturnRef;
+    context = std::make_shared<::testing::NiceMock<FailingFrameContext>>();
+    auto allocator = std::make_shared<::testing::NiceMock<MockAllocator>>();
+    auto capabilities =
+        std::make_shared<::testing::NiceMock<MockCapabilities>>();
+    capabilities_ = capabilities;
+    ON_CALL(*capabilities, GetDefaultDepthStencilFormat())
+        .WillByDefault(Return(PixelFormat::kD24UnormS8Uint));
+    ON_CALL(*capabilities, GetDefaultColorFormat())
+        .WillByDefault(Return(PixelFormat::kR8G8B8A8UNormInt));
+    ON_CALL(*context, GetCapabilities())
+        .WillByDefault(ReturnRef(capabilities_));
+    ON_CALL(*context, GetResourceAllocator()).WillByDefault(Return(allocator));
+    ON_CALL(*allocator, GetMaxTextureSizeSupported())
+        .WillByDefault(Return(ISize{4096, 4096}));
+    ON_CALL(*allocator, OnCreateBuffer(_)).WillByDefault([](const auto& desc) {
+      return std::make_shared<::testing::NiceMock<MockDeviceBuffer>>(desc);
+    });
+    ON_CALL(*allocator, OnCreateTexture(_, _))
+        .WillByDefault([](const TextureDescriptor& desc, bool) {
+          auto texture =
+              std::make_shared<::testing::NiceMock<MockTexture>>(desc);
+          ON_CALL(*texture, GetSize()).WillByDefault(Return(desc.size));
+          ON_CALL(*texture, IsValid()).WillByDefault(Return(true));
+          return texture;
+        });
+    // Invalid skips eager pipeline setup, while the pass code uses the real
+    // allocator, capabilities and command-buffer methods supplied above.
+    ON_CALL(*context, IsValid()).WillByDefault(Return(false));
+    content = std::make_unique<ContentContext>(context, nullptr);
+    ON_CALL(*context, CreateCommandBuffer()).WillByDefault([this]() {
+      creations++;
+      if (fail_creation) {
+        return std::shared_ptr<CommandBuffer>();
+      }
+      auto command =
+          std::make_shared<::testing::NiceMock<MockCommandBuffer>>(context);
+      ON_CALL(*command, IsValid()).WillByDefault(Return(true));
+      ON_CALL(*command, OnCreateRenderPass(_))
+          .WillByDefault([this](RenderTarget target) {
+            auto pass = std::make_shared<::testing::NiceMock<MockRenderPass>>(
+                context, target);
+            ON_CALL(*pass, IsValid()).WillByDefault(Return(true));
+            ON_CALL(*pass, OnEncodeCommands(_))
+                .WillByDefault([this](const Context&) {
+                  encodes++;
+                  return !fail_encode;
+                });
+            return pass;
+          });
+      return std::shared_ptr<CommandBuffer>(command);
+    });
+    TextureDescriptor desc;
+    desc.size = {100, 100};
+    desc.storage_mode = StorageMode::kDevicePrivate;
+    desc.format = PixelFormat::kR8G8B8A8UNormInt;
+    desc.usage = TextureUsage::kRenderTarget;
+    ColorAttachment color;
+    color.texture = allocator->CreateTexture(desc);
+    color.load_action = LoadAction::kClear;
+    color.store_action = StoreAction::kStore;
+    target.SetColorAttachment(color, 0);
+    target.SetupDepthStencilAttachments(*context, *allocator, desc.size, false,
+                                        "test");
+  }
+
+  std::shared_ptr<FailingFrameContext> context;
+  std::shared_ptr<const Capabilities> capabilities_;
+  std::unique_ptr<ContentContext> content;
+  RenderTarget target;
+  size_t creations = 0;
+  size_t encodes = 0;
+  bool fail_creation = false;
+  bool fail_encode = false;
+};
+
+TEST_F(CanvasFailureTest, FailedPassIsConsumedAndNeverRetriedByDestruction) {
+  fail_encode = true;
+  EntityPassTarget pass_target(target, false, false);
+  {
+    InlinePassContext pass(*content, pass_target, true);
+    ASSERT_TRUE(pass.GetRenderPass());
+    EXPECT_FALSE(pass.EndPass());
+    EXPECT_FALSE(pass.IsActive());
+    EXPECT_FALSE(pass.GetRenderPass());
+    EXPECT_FALSE(pass.EndPass());
+  }
+  EXPECT_EQ(encodes, 1u);
+  EXPECT_EQ(creations, 1u);
+  EXPECT_TRUE(context->queued.empty());
+}
+
+TEST_F(CanvasFailureTest, FailedCreationRemainsFailedAtEndPass) {
+  fail_creation = true;
+  EntityPassTarget pass_target(target, false, false);
+  InlinePassContext pass(*content, pass_target, true);
+  EXPECT_FALSE(pass.GetRenderPass());
+  EXPECT_FALSE(pass.GetRenderPass());
+  EXPECT_FALSE(pass.EndPass());
+  EXPECT_EQ(creations, 1u);
+}
+
+TEST_F(CanvasFailureTest, FailedMipmapPassIsConsumedWithoutSubmitting) {
+  auto color = target.GetColorAttachment(0);
+  auto desc = color.texture->GetTextureDescriptor();
+  desc.mip_count = 2;
+  color.texture = context->GetResourceAllocator()->CreateTexture(desc);
+  target.SetColorAttachment(color, 0);
+  EntityPassTarget pass_target(target, false, false);
+  {
+    InlinePassContext pass(*content, pass_target, true);
+    ASSERT_TRUE(pass.GetRenderPass());
+    // The mock command buffer cannot create the requested mipmap blit pass.
+    EXPECT_FALSE(pass.EndPass());
+    EXPECT_FALSE(pass.EndPass());
+  }
+  EXPECT_EQ(encodes, 1u);
+  EXPECT_TRUE(context->queued.empty());
+}
+
+TEST_F(CanvasFailureTest, EncodeFailureStillFlushesAndNextReplayCanSucceed) {
+  fail_encode = true;
+  {
+    Canvas canvas(*content, target, false, false);
+    EXPECT_FALSE(canvas.EndReplay());
+  }
+  EXPECT_EQ(encodes, 1u);
+  EXPECT_EQ(context->flushes, 1u);
+  EXPECT_TRUE(context->queued.empty());
+  fail_encode = false;
+  Canvas next(*content, target, false, false);
+  EXPECT_TRUE(next.EndReplay());
+  EXPECT_EQ(encodes, 2u);
+  EXPECT_EQ(context->flushes, 2u);
+  EXPECT_TRUE(context->queued.empty());
+}
+
+TEST_F(CanvasFailureTest, EnqueueAndFlushFailuresReachRenderToTarget) {
+  const auto display_list = flutter::DisplayListBuilder().Build();
+  context->reject_enqueue = true;
+  EXPECT_FALSE(RenderToTarget(*content, target, display_list,
+                              Rect::MakeSize(target.GetRenderTargetSize()),
+                              false, false));
+  EXPECT_EQ(context->flushes, 1u);
+  context->reject_enqueue = false;
+  context->reject_flush = true;
+  EXPECT_FALSE(RenderToTarget(*content, target, display_list,
+                              Rect::MakeSize(target.GetRenderTargetSize()),
+                              false, false));
+  EXPECT_EQ(context->flushes, 2u);
+  EXPECT_TRUE(context->queued.empty());
+}
+
+TEST_F(CanvasFailureTest, FailedSaveLayerIsNotHiddenBySuccessfulRootPass) {
+  Canvas canvas(*content, target, false, false);
+  canvas.SaveLayer({}, Rect::MakeXYWH(2, 2, 30, 30), nullptr,
+                   ContentBoundsPromise::kContainsContents, 1);
+  EXPECT_EQ(canvas.GetSaveCount(), 2u);
+  fail_creation = true;
+  EXPECT_TRUE(canvas.Restore());
+  EXPECT_EQ(canvas.GetSaveCount(), 1u);
+  EXPECT_EQ(encodes, 0u);
+  fail_creation = false;
+  EXPECT_FALSE(canvas.EndReplay());
+  EXPECT_EQ(encodes, 1u);
+  EXPECT_EQ(context->flushes, 1u);
+  EXPECT_TRUE(context->queued.empty());
+}
+
+TEST_F(CanvasFailureTest, FailedClippingPassDoesNotDereferenceNull) {
+  fail_creation = true;
+  Canvas canvas(*content, target, false, false);
+  canvas.ClipGeometry(FillRectGeometry(Rect::MakeXYWH(2, 2, 30, 30)),
+                      Entity::ClipOperation::kIntersect, true);
+  canvas.DrawRect(Rect::MakeXYWH(3, 3, 20, 20), {.color = Color::Red()});
+  canvas.SaveLayer({}, Rect::MakeXYWH(2, 2, 30, 30));
+  EXPECT_EQ(canvas.GetSaveCount(), 2u);
+  EXPECT_TRUE(canvas.Restore());
+  EXPECT_EQ(canvas.GetSaveCount(), 1u);
+  EXPECT_FALSE(canvas.EndReplay());
+  EXPECT_EQ(creations, 1u);
+  EXPECT_EQ(context->flushes, 1u);
+}
+}  // namespace
 
 std::unique_ptr<Canvas> CreateTestCanvas(
     ContentContext& context,

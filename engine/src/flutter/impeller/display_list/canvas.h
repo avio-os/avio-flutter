@@ -152,7 +152,7 @@ class Canvas {
 
   /// @brief Return the culling bounds of the current render target, or nullopt
   ///        if there is no coverage.
-  std::optional<Rect> GetLocalCoverageLimit() const;
+  std::optional<Rect> GetLocalCoverageLimit();
 
   void Save(uint32_t total_content_depth = kMaxDepth);
 
@@ -256,7 +256,7 @@ class Canvas {
                     Entity::ClipOperation clip_op,
                     bool is_aa = true);
 
-  void EndReplay();
+  bool EndReplay();
 
   uint64_t GetOpDepth() const { return current_depth_; }
 
@@ -306,6 +306,8 @@ class Canvas {
   RenderTarget render_target_;
   const bool is_onscreen_;
   bool requires_readback_;
+  // Sticky for this replay, including subpasses removed during Restore.
+  bool rendering_failed_ = false;
   EntityPassClipStack clip_coverage_stack_;
 
   std::deque<CanvasStackEntry> transform_stack_;
@@ -449,7 +451,7 @@ class Canvas {
       Entity& entity,
       const Paint& paint);
 
-  RenderPass& GetCurrentRenderPass() const;
+  std::shared_ptr<RenderPass> GetCurrentRenderPass();
 
   Canvas(const Canvas&) = delete;
 

@@ -39,7 +39,7 @@ InlinePassContext::~InlinePassContext() {
 }
 
 bool InlinePassContext::IsValid() const {
-  return pass_target_.IsValid();
+  return !failed_ && pass_target_.IsValid();
 }
 
 bool InlinePassContext::IsActive() const {
@@ -54,34 +54,39 @@ std::shared_ptr<Texture> InlinePassContext::GetTexture() {
 }
 
 bool InlinePassContext::EndPass(bool is_onscreen) {
-  if (!IsActive()) {
-    return true;
-  }
-  FML_DCHECK(command_buffer_);
-
-  if (!pass_->EncodeCommands()) {
-    VALIDATION_LOG << "Failed to encode and submit command buffer while ending "
-                      "render pass.";
+  // Consume exactly once, including failures. A destructor must never retry
+  // encoding or submitting the same failed pass.
+  auto pass = std::exchange(pass_, nullptr);
+  auto command_buffer = std::exchange(command_buffer_, nullptr);
+  if (failed_) {
     return false;
   }
-
-  const std::shared_ptr<Texture>& target_texture =
+  if (!pass) {
+    return true;
+  }
+  FML_DCHECK(command_buffer);
+  if (!pass->EncodeCommands()) {
+    VALIDATION_LOG
+        << "Failed to encode command buffer while ending render pass.";
+    failed_ = true;
+    return false;
+  }
+  const auto& target_texture =
       GetPassTarget().GetRenderTarget().GetRenderTargetTexture();
-  if (target_texture->GetMipCount() > 1) {
-    fml::Status mip_status = AddMipmapGeneration(
-        command_buffer_, renderer_.GetContext(), target_texture);
-    if (!mip_status.ok()) {
-      return false;
-    }
+  if (target_texture->GetMipCount() > 1 &&
+      !AddMipmapGeneration(command_buffer, renderer_.GetContext(),
+                           target_texture)
+           .ok()) {
+    failed_ = true;
+    return false;
   }
-
-  pass_ = nullptr;
-  if (is_onscreen) {
-    return renderer_.GetContext()->SubmitOnscreen(std::move(command_buffer_));
-  } else {
-    return renderer_.GetContext()->EnqueueCommandBuffer(
-        std::move(command_buffer_));
-  }
+  const bool submitted =
+      is_onscreen
+          ? renderer_.GetContext()->SubmitOnscreen(std::move(command_buffer))
+          : renderer_.GetContext()->EnqueueCommandBuffer(
+                std::move(command_buffer));
+  failed_ = !submitted;
+  return submitted;
 }
 
 EntityPassTarget& InlinePassContext::GetPassTarget() const {
@@ -89,7 +94,7 @@ EntityPassTarget& InlinePassContext::GetPassTarget() const {
 }
 
 const std::shared_ptr<RenderPass>& InlinePassContext::GetRenderPass() {
-  if (IsActive()) {
+  if (failed_ || IsActive()) {
     return pass_;
   }
 
@@ -100,6 +105,7 @@ const std::shared_ptr<RenderPass>& InlinePassContext::GetRenderPass() {
   command_buffer_ = renderer_.GetContext()->CreateCommandBuffer();
   if (!command_buffer_) {
     VALIDATION_LOG << "Could not create command buffer.";
+    failed_ = true;
     return pass_;
   }
 
@@ -111,7 +117,11 @@ const std::shared_ptr<RenderPass>& InlinePassContext::GetRenderPass() {
         pass_target_.GetRenderTarget().GetColorAttachment(0).resolve_texture !=
         nullptr;
     if (pass_count_ > 0 && is_msaa) {
-      pass_target_.Flip(renderer_);
+      if (!pass_target_.Flip(renderer_)) {
+        failed_ = true;
+        command_buffer_.reset();
+        return pass_;
+      }
     }
   }
 
@@ -130,6 +140,8 @@ const std::shared_ptr<RenderPass>& InlinePassContext::GetRenderPass() {
   if (!depth.has_value()) {
     VALIDATION_LOG << "Depth attachment unexpectedly missing from the "
                       "EntityPass render target.";
+    failed_ = true;
+    command_buffer_.reset();
     return pass_;
   }
   depth->load_action = LoadAction::kClear;
@@ -140,6 +152,8 @@ const std::shared_ptr<RenderPass>& InlinePassContext::GetRenderPass() {
   if (!depth.has_value() || !stencil.has_value()) {
     VALIDATION_LOG << "Stencil/Depth attachment unexpectedly missing from the "
                       "EntityPass render target.";
+    failed_ = true;
+    command_buffer_.reset();
     return pass_;
   }
   stencil->load_action = LoadAction::kClear;
@@ -153,6 +167,8 @@ const std::shared_ptr<RenderPass>& InlinePassContext::GetRenderPass() {
   pass_ = command_buffer_->CreateRenderPass(pass_target_.GetRenderTarget());
   if (!pass_) {
     VALIDATION_LOG << "Could not create render pass.";
+    failed_ = true;
+    command_buffer_.reset();
     return pass_;
   }
   pass_->SetLabel("EntityPass Render Pass");
