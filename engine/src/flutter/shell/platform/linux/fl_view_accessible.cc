@@ -22,7 +22,7 @@ extern "C" {
 static constexpr int32_t kRootSemanticsNodeId = 0;
 
 struct _FlViewAccessible {
-  AtkPlug parent_instance;
+  GtkContainerAccessible parent_instance;
 
   GWeakRef engine;
 
@@ -35,7 +35,9 @@ struct _FlViewAccessible {
   gboolean root_node_created;
 };
 
-G_DEFINE_TYPE(FlViewAccessible, fl_view_accessible, ATK_TYPE_PLUG)
+G_DEFINE_TYPE(FlViewAccessible,
+              fl_view_accessible,
+              GTK_TYPE_CONTAINER_ACCESSIBLE)
 
 // Enum copied from ATK 2.50, as the version we are building against doesn't
 // have this.
@@ -119,13 +121,6 @@ static AtkRole fl_view_accessible_get_role(AtkObject* accessible) {
   return ATK_ROLE_PANEL;
 }
 
-// Implements AtkObject::ref_state_set
-static AtkStateSet* fl_view_accessible_ref_state_set(AtkObject* accessible) {
-  FlViewAccessible* self = FL_VIEW_ACCESSIBLE(accessible);
-  FlAccessibleNode* node = lookup_node(self, 0);
-  return node != nullptr ? atk_object_ref_state_set(ATK_OBJECT(node)) : nullptr;
-}
-
 static void fl_view_accessible_dispose(GObject* object) {
   FlViewAccessible* self = FL_VIEW_ACCESSIBLE(object);
 
@@ -140,12 +135,12 @@ static void fl_view_accessible_class_init(FlViewAccessibleClass* klass) {
   ATK_OBJECT_CLASS(klass)->get_n_children = fl_view_accessible_get_n_children;
   ATK_OBJECT_CLASS(klass)->ref_child = fl_view_accessible_ref_child;
   ATK_OBJECT_CLASS(klass)->get_role = fl_view_accessible_get_role;
-  ATK_OBJECT_CLASS(klass)->ref_state_set = fl_view_accessible_ref_state_set;
 
   G_OBJECT_CLASS(klass)->dispose = fl_view_accessible_dispose;
 }
 
 static void fl_view_accessible_init(FlViewAccessible* self) {
+  g_weak_ref_init(&self->engine, nullptr);
   self->semantics_nodes_by_id = g_hash_table_new_full(
       g_direct_hash, g_direct_equal, nullptr, g_object_unref);
 }
@@ -154,9 +149,17 @@ FlViewAccessible* fl_view_accessible_new(FlEngine* engine,
                                          FlutterViewId view_id) {
   FlViewAccessible* self =
       FL_VIEW_ACCESSIBLE(g_object_new(fl_view_accessible_get_type(), nullptr));
-  g_weak_ref_init(&self->engine, engine);
-  self->view_id = view_id;
+  fl_view_accessible_set_engine(self, engine, view_id);
   return self;
+}
+
+void fl_view_accessible_set_engine(FlViewAccessible* self,
+                                   FlEngine* engine,
+                                   FlutterViewId view_id) {
+  g_return_if_fail(FL_IS_VIEW_ACCESSIBLE(self));
+  g_return_if_fail(FL_IS_ENGINE(engine));
+  g_weak_ref_set(&self->engine, engine);
+  self->view_id = view_id;
 }
 
 void fl_view_accessible_handle_update_semantics(

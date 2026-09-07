@@ -19,7 +19,6 @@
 #include "flutter/shell/platform/linux/fl_plugin_registrar_private.h"
 #include "flutter/shell/platform/linux/fl_pointer_manager.h"
 #include "flutter/shell/platform/linux/fl_scrolling_manager.h"
-#include "flutter/shell/platform/linux/fl_socket_accessible.h"
 #include "flutter/shell/platform/linux/fl_touch_manager.h"
 #include "flutter/shell/platform/linux/fl_view_accessible.h"
 #include "flutter/shell/platform/linux/fl_view_private.h"
@@ -699,15 +698,18 @@ static void fl_view_class_init(FlViewClass* klass) {
                    NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   gtk_widget_class_set_accessible_type(GTK_WIDGET_CLASS(klass),
-                                       fl_socket_accessible_get_type());
+                                       fl_view_accessible_get_type());
 }
 
 // Engine related construction.
 static void setup_engine(FlView* self) {
-  self->view_accessible = fl_view_accessible_new(self->engine, self->view_id);
-  fl_socket_accessible_embed(
-      FL_SOCKET_ACCESSIBLE(gtk_widget_get_accessible(GTK_WIDGET(self))),
-      atk_plug_get_id(ATK_PLUG(self->view_accessible)));
+  // Keep the semantic tree on the GTK accessibility object. Routing an
+  // in-process tree through AtkSocket/AtkPlug synchronously calls back into
+  // this same UI thread when an AT-SPI client asks for component bounds.
+  self->view_accessible = FL_VIEW_ACCESSIBLE(
+      g_object_ref(gtk_widget_get_accessible(GTK_WIDGET(self))));
+  fl_view_accessible_set_engine(self->view_accessible, self->engine,
+                                self->view_id);
 
   self->pointer_manager = fl_pointer_manager_new(self->view_id, self->engine);
 
