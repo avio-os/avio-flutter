@@ -28,6 +28,8 @@ class TestVulkanContext : public fml::RefCountedThreadSafe<TestVulkanContext> {
 
   VkDevice GetDeviceHandle() const;
 
+  uint32_t GetGraphicsQueueIndex() const;
+
   VkImageView CreateImageView(VkImage image,
                               VkFormat format,
                               const SkISize& size) const;

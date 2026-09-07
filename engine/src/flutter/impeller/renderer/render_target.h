@@ -87,6 +87,12 @@ class RenderTarget final {
           RenderTarget::kDefaultStencilAttachmentConfig,
       const std::shared_ptr<Texture>& depth_stencil_texture = nullptr);
 
+  // An explicitly bounded pass preserves attachment contents outside this
+  // region. Currently implemented only by Vulkan; callers must negotiate that
+  // backend capability before choosing a partial repaint during preroll.
+  bool SetRenderArea(IRect area);
+  const std::optional<IRect>& GetRenderArea() const { return render_area_; }
+
   SampleCount GetSampleCount() const;
 
   bool HasColorAttachment(size_t index) const;
@@ -135,6 +141,7 @@ class RenderTarget final {
   RenderTargetConfig ToConfig() const;
 
  private:
+  std::optional<IRect> render_area_;
   std::optional<ColorAttachment> color0_;
   std::optional<DepthAttachment> depth_;
   std::optional<StencilAttachment> stencil_;

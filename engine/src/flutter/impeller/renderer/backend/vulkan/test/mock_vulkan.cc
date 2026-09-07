@@ -31,6 +31,8 @@ struct MockCommandBuffer {
   std::shared_ptr<std::vector<std::string>> called_functions_;
   std::vector<VkImageMemoryBarrier> image_memory_barriers_;
   std::vector<VkViewport> recorded_viewports_;
+  std::vector<VkRect2D> recorded_render_areas_;
+  std::vector<VkRect2D> recorded_scissors_;
 };
 
 class MockQueue {
@@ -752,6 +754,14 @@ void vkCmdSetStencilReference(VkCommandBuffer commandBuffer,
   mock_command_buffer->called_functions_->push_back("vkCmdSetStencilReference");
 }
 
+void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
+                          const VkRenderPassBeginInfo* info,
+                          VkSubpassContents contents) {
+  auto* buffer = reinterpret_cast<MockCommandBuffer*>(commandBuffer);
+  buffer->called_functions_->push_back("vkCmdBeginRenderPass");
+  buffer->recorded_render_areas_.push_back(info->renderArea);
+}
+
 void vkCmdSetScissor(VkCommandBuffer commandBuffer,
                      uint32_t firstScissor,
                      uint32_t scissorCount,
@@ -759,6 +769,9 @@ void vkCmdSetScissor(VkCommandBuffer commandBuffer,
   MockCommandBuffer* mock_command_buffer =
       reinterpret_cast<MockCommandBuffer*>(commandBuffer);
   mock_command_buffer->called_functions_->push_back("vkCmdSetScissor");
+  for (uint32_t i = 0; i < scissorCount; ++i) {
+    mock_command_buffer->recorded_scissors_.push_back(pScissors[i]);
+  }
 }
 
 void vkCmdSetViewport(VkCommandBuffer commandBuffer,
@@ -1337,6 +1350,8 @@ PFN_vkVoidFunction GetMockVulkanProcAddress(VkInstance instance,
     return reinterpret_cast<PFN_vkVoidFunction>(vkCmdPipelineBarrier);
   } else if (strcmp("vkCmdSetStencilReference", pName) == 0) {
     return reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetStencilReference);
+  } else if (strcmp("vkCmdBeginRenderPass", pName) == 0) {
+    return reinterpret_cast<PFN_vkVoidFunction>(vkCmdBeginRenderPass);
   } else if (strcmp("vkCmdSetScissor", pName) == 0) {
     return reinterpret_cast<PFN_vkVoidFunction>(vkCmdSetScissor);
   } else if (strcmp("vkCmdSetViewport", pName) == 0) {
@@ -1531,6 +1546,14 @@ const std::vector<VkViewport>& GetRecordedViewports(VkCommandBuffer buffer) {
   MockCommandBuffer* mock_command_buffer =
       reinterpret_cast<MockCommandBuffer*>(buffer);
   return mock_command_buffer->recorded_viewports_;
+}
+
+const std::vector<VkRect2D>& GetRecordedRenderAreas(VkCommandBuffer buffer) {
+  return reinterpret_cast<MockCommandBuffer*>(buffer)->recorded_render_areas_;
+}
+
+const std::vector<VkRect2D>& GetRecordedScissors(VkCommandBuffer buffer) {
+  return reinterpret_cast<MockCommandBuffer*>(buffer)->recorded_scissors_;
 }
 
 }  // namespace testing

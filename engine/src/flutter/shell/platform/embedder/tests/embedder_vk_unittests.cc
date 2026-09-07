@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,6 +19,7 @@
 #include "flutter/fml/synchronization/count_down_latch.h"
 #include "flutter/shell/platform/embedder/tests/embedder_config_builder.h"
 #include "flutter/shell/platform/embedder/tests/embedder_test.h"
+#include "flutter/shell/platform/embedder/tests/embedder_test_backingstore_producer_vulkan.h"
 #include "flutter/shell/platform/embedder/tests/embedder_test_context_vulkan.h"
 #include "flutter/shell/platform/embedder/tests/embedder_unittests_util.h"
 #include "flutter/testing/testing.h"
@@ -39,7 +42,8 @@ constexpr FlutterAvioExtensionFeatures kExactSelectedTargetFeatures =
     kFlutterAvioExtensionFeatureExactVsyncCancellation |
     kFlutterAvioExtensionFeatureFrameOpportunityOutcomes |
     kFlutterAvioExtensionFeatureRenderDeadline |
-    kFlutterAvioExtensionFeatureSelectedTargetDamage;
+    kFlutterAvioExtensionFeatureSelectedTargetDamage |
+    kFlutterAvioExtensionFeaturePreSubmitFailure;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Notice: Other Vulkan unit tests exist in embedder_gl_unittests.cc.
@@ -47,6 +51,38 @@ constexpr FlutterAvioExtensionFeatures kExactSelectedTargetFeatures =
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace {
+
+bool RasterImagesMatchOutsideRegion(const sk_sp<SkImage>& before,
+                                    const sk_sp<SkImage>& after,
+                                    const FlutterRect& region) {
+  if (!before || !after || before->dimensions() != after->dimensions()) {
+    return false;
+  }
+  const auto info =
+      SkImageInfo::MakeN32Premul(before->width(), before->height());
+  const size_t row_bytes = info.minRowBytes();
+  std::vector<uint8_t> before_pixels(info.computeMinByteSize());
+  std::vector<uint8_t> after_pixels(info.computeMinByteSize());
+  if (!before->readPixels(nullptr, info, before_pixels.data(), row_bytes, 0,
+                          0) ||
+      !after->readPixels(nullptr, info, after_pixels.data(), row_bytes, 0, 0)) {
+    return false;
+  }
+  for (int y = 0; y < before->height(); y++) {
+    for (int x = 0; x < before->width(); x++) {
+      if (x >= region.left && x < region.right && y >= region.top &&
+          y < region.bottom) {
+        continue;
+      }
+      const size_t offset = y * row_bytes + x * sizeof(uint32_t);
+      if (std::memcmp(before_pixels.data() + offset,
+                      after_pixels.data() + offset, sizeof(uint32_t)) != 0) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 struct VulkanProcInfo {
   PFN_vkGetInstanceProcAddr get_instance_proc_addr = nullptr;
@@ -65,8 +101,11 @@ struct SelectedTargetTestContext {
   };
 
   explicit SelectedTargetTestContext(EmbedderTestCompositor& compositor,
-                                     size_t target_count = 1u)
-      : compositor(compositor), target_count(target_count) {
+                                     size_t target_count = 1u,
+                                     bool external_handoff = true)
+      : compositor(compositor),
+        target_count(target_count),
+        external_handoff(external_handoff) {
     FML_CHECK(target_count > 0u && target_count <= targets.size());
     for (size_t index = 0; index < targets.size(); index++) {
       targets[index].content_state = {
@@ -102,6 +141,11 @@ struct SelectedTargetTestContext {
       target.backing_store.vulkan.destruction_callback = [](void*) {};
       target.created = true;
     }
+    if (external_handoff &&
+        !EmbedderTestBackingStoreProducerVulkan::PrepareForExternalRendering(
+            &target.backing_store)) {
+      return false;
+    }
     target.backing_store.content_state = &target.content_state;
     *backing_store_out = target.backing_store;
     create_count++;
@@ -127,6 +171,12 @@ struct SelectedTargetTestContext {
       return true;
     }
 
+    if (external_handoff &&
+        !EmbedderTestBackingStoreProducerVulkan::CompleteExternalRendering(
+            info.backing_store,
+            info.backing_store_present_info->render_complete_sync_fd)) {
+      return false;
+    }
     FlutterLayer layer = {
         .struct_size = sizeof(FlutterLayer),
         .type = kFlutterLayerContentTypeBackingStore,
@@ -208,6 +258,7 @@ struct SelectedTargetTestContext {
   };
   std::array<Target, 3> targets;
   const size_t target_count;
+  const bool external_handoff;
   size_t create_count = 0;
   size_t collect_count = 0;
   size_t present_count = 0;
@@ -639,8 +690,9 @@ TEST_F(EmbedderTest,
   event.pixel_ratio = 1.0;
   ASSERT_EQ(FlutterEngineSendWindowMetricsEvent(engine.get(), &event),
             kSuccess);
-  result_ready.Wait();
-  target_collected.Wait();
+  ASSERT_FALSE(result_ready.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_FALSE(
+      target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
   auto full_repaint_image = full_repaint_scene.get();
   ASSERT_TRUE(full_repaint_image);
   selected_target.PreserveWithCatchUpDamage(0u);
@@ -648,8 +700,9 @@ TEST_F(EmbedderTest,
   auto second_target_scene = context.GetNextSceneImage();
   ASSERT_EQ(FlutterEngineSendWindowMetricsEvent(engine.get(), &event),
             kSuccess);
-  result_ready.Wait();
-  target_collected.Wait();
+  ASSERT_FALSE(result_ready.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_FALSE(
+      target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
   auto second_target_image = second_target_scene.get();
   ASSERT_TRUE(second_target_image);
   EXPECT_TRUE(RasterImagesAreSame(full_repaint_image, second_target_image,
@@ -659,8 +712,9 @@ TEST_F(EmbedderTest,
   auto third_target_scene = context.GetNextSceneImage();
   ASSERT_EQ(FlutterEngineSendWindowMetricsEvent(engine.get(), &event),
             kSuccess);
-  result_ready.Wait();
-  target_collected.Wait();
+  ASSERT_FALSE(result_ready.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_FALSE(
+      target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
   auto third_target_image = third_target_scene.get();
   ASSERT_TRUE(third_target_image);
   EXPECT_TRUE(RasterImagesAreSame(full_repaint_image, third_target_image,
@@ -669,8 +723,9 @@ TEST_F(EmbedderTest,
   auto partial_repaint_scene = context.GetNextSceneImage();
   ASSERT_EQ(FlutterEngineSendWindowMetricsEvent(engine.get(), &event),
             kSuccess);
-  result_ready.Wait();
-  target_collected.Wait();
+  ASSERT_FALSE(result_ready.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_FALSE(
+      target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
   auto partial_repaint_image = partial_repaint_scene.get();
   ASSERT_TRUE(partial_repaint_image);
   EXPECT_TRUE(RasterImagesAreSame(full_repaint_image, partial_repaint_image,
@@ -678,8 +733,9 @@ TEST_F(EmbedderTest,
 
   ASSERT_EQ(FlutterEngineSendWindowMetricsEvent(engine.get(), &event),
             kSuccess);
-  result_ready.Wait();
-  target_collected.Wait();
+  ASSERT_FALSE(result_ready.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_FALSE(
+      target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
 
   EXPECT_EQ(statuses, (std::vector<FlutterPresentRenderTargetStatus>{
                           kFlutterPresentRenderTargetStatusPresented,
@@ -690,11 +746,9 @@ TEST_F(EmbedderTest,
                       }));
   EXPECT_EQ(target_identifiers, (std::vector<uint64_t>{7u, 8u, 9u, 7u, 8u}));
   EXPECT_EQ(frame_damage_counts, (std::vector<int64_t>{1, 0, 0, 0, -1}));
-  // Logical frame damage above is per-frame and stays sparse. Buffer damage
-  // is the rectangle the raster honored, and a multisampled root pass honors
-  // none: it resolves over every pixel of whichever target it was handed,
-  // including the preserved one reacquired on the fourth frame.
-  EXPECT_EQ(buffer_damage_counts, (std::vector<int64_t>{-1, -1, -1, -1, -1}));
+  // The first three unknown targets require full repaint. The fourth frame
+  // reuses preserved pixels and must actually honor the catch-up rectangle.
+  EXPECT_EQ(buffer_damage_counts, (std::vector<int64_t>{-1, -1, -1, 1, -1}));
   EXPECT_EQ(selected_target.create_count, 5u);
   EXPECT_EQ(selected_target.collect_count, 5u);
   engine.reset();
@@ -810,11 +864,10 @@ TEST_F(EmbedderTest,
                       }));
   ASSERT_EQ(frame_damage_counts.size(), 3u);
   ASSERT_EQ(buffer_damage_counts.size(), 3u);
-  // The blur's removal is real, sparse frame damage. No frame honors a
-  // rectangle, because the multisampled root pass resolves over the whole
-  // target whether or not the target preserved its contents.
+  // Removing the old blur must clear its former coverage while preserving
+  // the rest of the image, with the same pixels as a forced full repaint.
   EXPECT_GT(frame_damage_counts[1], 0);
-  EXPECT_EQ(buffer_damage_counts[1], -1);
+  EXPECT_EQ(buffer_damage_counts[1], 1);
   EXPECT_EQ(buffer_damage_counts[2], -1);
   EXPECT_EQ(selected_target.collect_count, 3u);
   engine.reset();
@@ -939,11 +992,9 @@ TEST_F(EmbedderTest,
                       }));
   ASSERT_EQ(frame_damage_counts.size(), 4u);
   ASSERT_EQ(buffer_damage_counts.size(), 4u);
-  // Removing the scene is sparse frame damage, and the frame that removes it
-  // still has to run: it is the pass that clears those pixels. It honors no
-  // rectangle while doing so -- a multisampled root pass never does.
+  // Removing the scene clears its prior coverage in one bounded MSAA pass.
   EXPECT_GT(frame_damage_counts[1], 0);
-  EXPECT_EQ(buffer_damage_counts[1], -1);
+  EXPECT_EQ(buffer_damage_counts[1], 1);
   EXPECT_EQ(buffer_damage_counts[2], -1);
   EXPECT_EQ(buffer_damage_counts[3], -1);
   EXPECT_EQ(selected_target.collect_count, 4u);
@@ -1152,10 +1203,28 @@ TEST_F(EmbedderTest,
   EXPECT_GT(frame_damage_counts[1], 1);
   ASSERT_GT(frame_damage_rects[1].size(), 1u);
 
-  // No frame honors a damage rectangle: the root pass is multisampled, so it
-  // resolves over every pixel of the target and reports no narrower update.
-  EXPECT_EQ(buffer_damage_counts, (std::vector<int64_t>{-1, -1, -1}));
-  EXPECT_TRUE(buffer_damage_rects[1].empty());
+  // Raster damage is exactly the union bounds, while logical damage remains
+  // sparse. The translucent gap is repainted once, not blended over old pixels.
+  EXPECT_EQ(buffer_damage_counts, (std::vector<int64_t>{-1, 1, -1}));
+  ASSERT_EQ(buffer_damage_rects[1].size(), 1u);
+  const auto& raster_bounds = buffer_damage_rects[1][0];
+  for (const auto& logical : frame_damage_rects[1]) {
+    EXPECT_LE(raster_bounds.left, logical.left);
+    EXPECT_LE(raster_bounds.top, logical.top);
+    EXPECT_GE(raster_bounds.right, logical.right);
+    EXPECT_GE(raster_bounds.bottom, logical.bottom);
+  }
+  EXPECT_LT((raster_bounds.right - raster_bounds.left) *
+                (raster_bounds.bottom - raster_bounds.top),
+            800.0 * 600.0);
+
+  EXPECT_TRUE(RasterImagesMatchOutsideRegion(initial_image, partial_image,
+                                             raster_bounds));
+  RecordProperty("bounded_raster_rect",
+                 std::to_string(raster_bounds.left) + "," +
+                     std::to_string(raster_bounds.top) + "," +
+                     std::to_string(raster_bounds.right) + "," +
+                     std::to_string(raster_bounds.bottom));
 
   // The gap between the two damaged regions is translucent, so a frame that
   // failed to repaint it -- or repainted it over stale contents -- would not
@@ -1232,6 +1301,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageFullFallbackClearsPreservedTarget) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(initial_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto initial_image = initial_scene.get();
   ASSERT_TRUE(initial_image);
 
@@ -1243,6 +1314,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageFullFallbackClearsPreservedTarget) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(fallback_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto fallback_image = fallback_scene.get();
   ASSERT_TRUE(fallback_image);
 
@@ -1254,6 +1327,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageFullFallbackClearsPreservedTarget) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(full_reference_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto full_reference_image = full_reference_scene.get();
   ASSERT_TRUE(full_reference_image);
 
@@ -1340,6 +1415,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageClearsRecycledSaveLayerTargets) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(initial_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto initial_image = initial_scene.get();
   ASSERT_TRUE(initial_image);
 
@@ -1354,6 +1431,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageClearsRecycledSaveLayerTargets) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(partial_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto partial_image = partial_scene.get();
   ASSERT_TRUE(partial_image);
 
@@ -1367,6 +1446,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageClearsRecycledSaveLayerTargets) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(full_reference_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto full_reference_image = full_reference_scene.get();
   ASSERT_TRUE(full_reference_image);
 
@@ -1379,11 +1460,10 @@ TEST_F(EmbedderTest, SelectedTargetDamageClearsRecycledSaveLayerTargets) {
                           kFlutterPresentRenderTargetStatusPresented,
                           kFlutterPresentRenderTargetStatusPresented,
                       }));
-  // Every frame resolves over its whole target, so none of them honors a
-  // damage rectangle. The recycled save-layer target is the point of the
-  // comparison above: it must not arrive carrying its previous tenant.
+  // Parent damage stays bounded even though the save-layer's private target
+  // clears fully. Recycled private storage cannot retain its previous tenant.
   ASSERT_EQ(buffer_damage_counts.size(), 3u);
-  EXPECT_EQ(buffer_damage_counts, (std::vector<int64_t>{-1, -1, -1}));
+  EXPECT_EQ(buffer_damage_counts, (std::vector<int64_t>{-1, 1, -1}));
   engine.reset();
 }
 
@@ -1456,6 +1536,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageRefusedWhenRootPassNeedsReadback) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(initial_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto initial_image = initial_scene.get();
   ASSERT_TRUE(initial_image);
 
@@ -1470,6 +1552,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageRefusedWhenRootPassNeedsReadback) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(readback_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto readback_image = readback_scene.get();
   ASSERT_TRUE(readback_image);
 
@@ -1483,6 +1567,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageRefusedWhenRootPassNeedsReadback) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(full_reference_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto full_reference_image = full_reference_scene.get();
   ASSERT_TRUE(full_reference_image);
 
@@ -1507,7 +1593,9 @@ namespace {
 // rastering multisampled and resolving, so their presence is the observable
 // consequence of a multisampled root pass and their absence is the observable
 // consequence of a single-sample one.
-size_t CountPartiallyCoveredPixels(const sk_sp<SkImage>& image) {
+size_t CountPartiallyCoveredPixels(
+    const sk_sp<SkImage>& image,
+    std::optional<SkIRect> region = std::nullopt) {
   if (!image) {
     return 0u;
   }
@@ -1519,11 +1607,15 @@ size_t CountPartiallyCoveredPixels(const sk_sp<SkImage>& image) {
     return 0u;
   }
 
+  SkIRect bounds = SkIRect::MakeWH(image->width(), image->height());
+  if (region && !bounds.intersect(*region)) {
+    return 0u;
+  }
   size_t partial = 0u;
-  for (int y = 0; y < image->height(); y++) {
+  for (int y = bounds.top(); y < bounds.bottom(); y++) {
     const uint32_t* row =
         reinterpret_cast<const uint32_t*>(pixels.data() + y * row_bytes);
-    for (int x = 0; x < image->width(); x++) {
+    for (int x = bounds.left(); x < bounds.right(); x++) {
       const uint32_t alpha = SkColorGetA(row[x]);
       if (alpha != 0u && alpha != 255u) {
         partial++;
@@ -1541,9 +1633,8 @@ size_t CountPartiallyCoveredPixels(const sk_sp<SkImage>& image) {
 // frames were correct, just unantialiased -- so the only way to catch a
 // regression is to look at the pixels along an edge only multisampling can
 // cover partially.
-TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
-  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
-
+void CheckPreservedTargetMultisampling(EmbedderTestContextVulkan& context,
+                                       bool external_handoff) {
   EmbedderConfigBuilder builder(context);
   builder.AddCommandLineArgument("--enable-impeller");
   builder.SetDartEntrypoint("render_selected_target_ready");
@@ -1559,7 +1650,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
   builder.SetRenderTargetType(
       EmbedderTestBackingStoreProducer::RenderTargetType::kVulkanImage);
 
-  SelectedTargetTestContext selected_target(context.GetCompositor());
+  SelectedTargetTestContext selected_target(context.GetCompositor(), 1u,
+                                            external_handoff);
   builder.GetCompositor().user_data = &selected_target;
   builder.GetCompositor().acquire_render_target_callback =
       AcquireSelectedTarget;
@@ -1577,10 +1669,20 @@ TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
   fml::AutoResetWaitableEvent result_ready;
   fml::AutoResetWaitableEvent target_collected;
   std::vector<FlutterPresentRenderTargetStatus> statuses;
+  std::vector<int64_t> buffer_damage_counts;
+  std::vector<FlutterRect> honored_rects;
   context.GetCompositor().AddOnCollectRenderTargetCallback(
       [&] { target_collected.Signal(); });
   selected_target.on_result = [&](const FlutterPresentRenderTargetInfo& info) {
     statuses.push_back(info.status);
+    const auto* damage = info.backing_store_present_info
+                             ? info.backing_store_present_info->buffer_damage
+                             : nullptr;
+    buffer_damage_counts.push_back(
+        damage ? static_cast<int64_t>(damage->rects_count) : -1);
+    if (damage && damage->rects_count == 1u) {
+      honored_rects.push_back(damage->rects[0]);
+    }
     result_ready.Signal();
     return true;
   };
@@ -1603,13 +1705,16 @@ TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(unpreserved_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto unpreserved_image = unpreserved_scene.get();
   ASSERT_TRUE(unpreserved_image);
 
-  // Hand the same target back preserved. This is the state that used to select
-  // a single-sample root pass; the scene is unchanged, so full catch-up damage
-  // is what gives the frame something to raster.
-  selected_target.PreserveWithFullCatchUpDamage();
+  // Repaint a bounded region through the diagonal AA edge, leaving pixels
+  // elsewhere intact. Legacy targets without the layout handoff stay full.
+  selected_target.catch_up_rects[0] = FlutterRect{180, 140, 600, 430};
+  selected_target.catch_up_region.rects_count = 1;
+  selected_target.PreserveWithCatchUpDamage();
   auto preserved_scene = context.GetNextSceneImage();
   ASSERT_EQ(FlutterEngineSendWindowMetricsEvent(engine.get(), &event),
             kSuccess);
@@ -1617,6 +1722,8 @@ TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
   ASSERT_EQ(statuses.back(), kFlutterPresentRenderTargetStatusPresented);
   ASSERT_FALSE(
       target_collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(preserved_scene.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
   auto preserved_image = preserved_scene.get();
   ASSERT_TRUE(preserved_image);
 
@@ -1629,12 +1736,45 @@ TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
   const size_t preserved_partial = CountPartiallyCoveredPixels(preserved_image);
   EXPECT_GT(unpreserved_partial, 100u);
   EXPECT_GT(preserved_partial, 100u);
+  EXPECT_GT(CountPartiallyCoveredPixels(preserved_image,
+                                        SkIRect::MakeLTRB(180, 140, 600, 430)),
+            100u);
+  EXPECT_EQ(buffer_damage_counts,
+            (std::vector<int64_t>{-1, external_handoff ? 1 : -1}));
+  EXPECT_TRUE(RasterImagesMatchOutsideRegion(
+      unpreserved_image, preserved_image, selected_target.catch_up_rects[0]));
+  if (external_handoff) {
+    ASSERT_EQ(honored_rects.size(), 1u);
+    const auto& bounds = honored_rects[0];
+    EXPECT_EQ(bounds.left, 180);
+    EXPECT_EQ(bounds.top, 140);
+    EXPECT_EQ(bounds.right, 600);
+    EXPECT_EQ(bounds.bottom, 430);
+    EXPECT_LT((bounds.right - bounds.left) * (bounds.bottom - bounds.top),
+              800.0 * 600.0);
+    ::testing::Test::RecordProperty(
+        "bounded_raster_rect",
+        std::to_string(bounds.left) + "," + std::to_string(bounds.top) + "," +
+            std::to_string(bounds.right) + "," + std::to_string(bounds.bottom));
+  } else {
+    EXPECT_TRUE(honored_rects.empty());
+  }
 
   // Same scene, same coverage: preserving a target changes nothing about how
   // its frame is rastered.
   EXPECT_TRUE(RasterImagesAreSame(unpreserved_image, preserved_image,
                                   /*allowable_different_pixels=*/0));
   engine.reset();
+}
+
+TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
+  CheckPreservedTargetMultisampling(
+      GetEmbedderContext<EmbedderTestContextVulkan>(), true);
+}
+
+TEST_F(EmbedderTest, SelectedTargetWithoutLayoutHandoffKeepsFullMSAARepaint) {
+  CheckPreservedTargetMultisampling(
+      GetEmbedderContext<EmbedderTestContextVulkan>(), false);
 }
 
 }  // namespace testing

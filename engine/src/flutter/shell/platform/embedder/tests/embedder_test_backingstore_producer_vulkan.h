@@ -20,6 +20,15 @@ class EmbedderTestBackingStoreProducerVulkan
 
   virtual ~EmbedderTestBackingStoreProducerVulkan();
 
+  // Transfer the test image between Skia and Impeller in a known GENERAL
+  // layout on their shared graphics queue. This is a real same-family handoff,
+  // not a claim that the image belongs to a foreign process.
+  static bool PrepareForExternalRendering(
+      const FlutterBackingStore* backing_store);
+  static bool CompleteExternalRendering(
+      const FlutterBackingStore* backing_store,
+      int render_complete_sync_fd);
+
   bool Create(const FlutterBackingStoreConfig* config,
               FlutterBackingStore* backing_store_out) override;
 

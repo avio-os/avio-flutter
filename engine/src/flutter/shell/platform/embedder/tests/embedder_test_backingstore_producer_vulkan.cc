@@ -4,12 +4,16 @@
 
 #include "flutter/shell/platform/embedder/tests/embedder_test_backingstore_producer_vulkan.h"
 
+#include <poll.h>
+#include <cerrno>
+
 #include "flutter/fml/logging.h"
 #include "third_party/skia/include/core/SkColorSpace.h"
 #include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
 #include "third_party/skia/include/gpu/ganesh/SkSurfaceGanesh.h"
 #include "third_party/skia/include/gpu/ganesh/vk/GrVkBackendSurface.h"
 #include "third_party/skia/include/gpu/ganesh/vk/GrVkTypes.h"
+#include "third_party/skia/include/gpu/vk/VulkanMutableTextureState.h"
 
 namespace flutter::testing {
 
@@ -24,6 +28,7 @@ struct UserData {
   }
 
   sk_sp<SkSurface> surface;
+  GrBackendTexture backend_texture;
   FlutterVulkanImage* image;
   VkImageView image_view;
   fml::RefPtr<TestVulkanContext> vulkan_context;
@@ -63,6 +68,7 @@ bool EmbedderTestBackingStoreProducerVulkan::Create(
                           VK_IMAGE_USAGE_SAMPLED_BIT,
       .fSampleCount = 1,
       .fLevelCount = 1,
+      .fCurrentQueueFamily = test_vulkan_context_->GetGraphicsQueueIndex(),
   };
   auto backend_texture = GrBackendTextures::MakeVk(
       surface_size.width, surface_size.height, image_info);
@@ -91,9 +97,13 @@ bool EmbedderTestBackingStoreProducerVulkan::Create(
   }
   backing_store_out->type = kFlutterBackingStoreTypeVulkan;
 
-  FlutterVulkanImage* image = new FlutterVulkanImage();
-  image->image = reinterpret_cast<uint64_t>(image_info.fImage);
-  image->format = VK_FORMAT_R8G8B8A8_UNORM;
+  auto image = new FlutterVulkanImage{
+      .struct_size = sizeof(FlutterVulkanImage),
+      .image = reinterpret_cast<uint64_t>(image_info.fImage),
+      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .has_external_queue_family_ownership = false,
+      .external_queue_family_index = VK_QUEUE_FAMILY_IGNORED,
+  };
   backing_store_out->vulkan.image = image;
 
   // Create a VkImageView for Impeller use via the proc table.
@@ -101,6 +111,7 @@ bool EmbedderTestBackingStoreProducerVulkan::Create(
       image_info.fImage, VK_FORMAT_R8G8B8A8_UNORM,
       SkISize::Make(surface_size.width, surface_size.height));
   if (image_view == VK_NULL_HANDLE) {
+    delete image;
     FML_LOG(ERROR) << "Could not create VkImageView for test backing store.";
     return false;
   }
@@ -111,6 +122,7 @@ bool EmbedderTestBackingStoreProducerVulkan::Create(
   {
     auto user_data = new UserData{
         .surface = surface,
+        .backend_texture = backend_texture,
         .image = image,
         .image_view = image_view,
         .vulkan_context = test_vulkan_context_,
@@ -122,6 +134,47 @@ bool EmbedderTestBackingStoreProducerVulkan::Create(
     };
   }
 
+  return true;
+}
+
+bool EmbedderTestBackingStoreProducerVulkan::PrepareForExternalRendering(
+    const FlutterBackingStore* backing_store) {
+  auto* data = reinterpret_cast<UserData*>(backing_store->user_data);
+  auto context = data->vulkan_context->GetGrDirectContext();
+  const uint32_t queue = data->vulkan_context->GetGraphicsQueueIndex();
+  // Invalidate cached snapshots before a foreign writer changes the image.
+  data->surface->notifyContentWillChange(SkSurface::kRetain_ContentChangeMode);
+  const auto state =
+      skgpu::MutableTextureStates::MakeVulkan(VK_IMAGE_LAYOUT_GENERAL, queue);
+  context->flush(data->surface.get(), GrFlushInfo{}, &state);
+  if (!context->submit(GrSyncCpu::kYes)) {
+    return false;
+  }
+  data->image->has_external_queue_family_ownership = true;
+  data->image->external_queue_family_index = queue;
+  return true;
+}
+
+bool EmbedderTestBackingStoreProducerVulkan::CompleteExternalRendering(
+    const FlutterBackingStore* backing_store,
+    int render_complete_sync_fd) {
+  if (render_complete_sync_fd >= 0) {
+    pollfd completion{
+        .fd = render_complete_sync_fd, .events = POLLIN, .revents = 0};
+    int result;
+    do {
+      result = poll(&completion, 1, 5000);
+    } while (result < 0 && errno == EINTR);
+    if (result <= 0 || (completion.revents & POLLIN) == 0 ||
+        (completion.revents & (POLLERR | POLLNVAL)) != 0) {
+      return false;
+    }
+  }
+  auto* data = reinterpret_cast<UserData*>(backing_store->user_data);
+  // The engine's completed release leaves this image in GENERAL. Notify Skia
+  // of that actual state; do not encode a transition from its stale old layout.
+  data->backend_texture.setMutableState(skgpu::MutableTextureStates::MakeVulkan(
+      VK_IMAGE_LAYOUT_GENERAL, data->vulkan_context->GetGraphicsQueueIndex()));
   return true;
 }
 

@@ -172,7 +172,11 @@ SharedHandleVK<vk::RenderPass> RenderPassVK::CreateVKRenderPass(
         attachment.load_action,                                               //
         attachment.store_action,                                              //
         /*current_layout=*/TextureVK::Cast(*attachment.texture).GetLayout(),  //
-        /*is_swapchain=*/is_swapchain);
+        /*is_swapchain=*/is_swapchain,
+        render_target_.GetRenderArea() && attachment.resolve_texture
+            ? std::make_optional(
+                  TextureVK::Cast(*attachment.resolve_texture).GetLayout())
+            : std::nullopt);
     return true;
   });
 
@@ -239,11 +243,23 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
     EncodeExternalImageAcquire(
         *frame_data_source, *ownership, command_buffer_vk_,
         static_cast<uint32_t>(vk_context.GetGraphicsQueue()->GetIndex().family),
-        !resolve_image_vk_ && color0.load_action == LoadAction::kLoad);
+        render_target_.GetRenderArea().has_value() ||
+            (!resolve_image_vk_ && color0.load_action == LoadAction::kLoad));
     frame_data_texture.SetLayoutWithoutEncoding(ownership->interchange_layout);
   }
-  frame_data = frame_data_texture.GetCachedFrameData(
-      sample_count, cache_mip_level, cache_slice);
+  // The existing cache key does not encode resolve preservation/load policy.
+  // Bounded passes must neither consume nor overwrite a full-pass cache entry.
+  if (!render_target_.GetRenderArea()) {
+    frame_data = frame_data_texture.GetCachedFrameData(
+        sample_count, cache_mip_level, cache_slice);
+  }
+  if (render_target_.GetRenderArea() &&
+      frame_data_texture.GetLayout() == vk::ImageLayout::eUndefined) {
+    // Unknown contents require a full repaint, decided before preroll culling.
+    // Never silently widen the pass after that decision.
+    is_valid_ = false;
+    return;
+  }
 
   const auto& target_size = render_target_.GetRenderTargetSize();
 
@@ -273,8 +289,10 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
   frame_data.framebuffer = framebuffer;
   frame_data.render_pass = render_pass_;
 
-  frame_data_texture.SetCachedFrameData(frame_data, sample_count,
-                                        cache_mip_level, cache_slice);
+  if (!render_target_.GetRenderArea()) {
+    frame_data_texture.SetCachedFrameData(frame_data, sample_count,
+                                          cache_mip_level, cache_slice);
+  }
 
   // If the resolve image exists and has mipmaps, transition mip levels besides
   // the base to shader read only in preparation for mipmap generation.
@@ -300,9 +318,10 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
   vk::RenderPassBeginInfo pass_info;
   pass_info.renderPass = *render_pass_;
   pass_info.framebuffer = *framebuffer;
-  pass_info.renderArea.extent.width = static_cast<uint32_t>(target_size.width);
-  pass_info.renderArea.extent.height =
-      static_cast<uint32_t>(target_size.height);
+  const IRect area =
+      render_target_.GetRenderArea().value_or(IRect::MakeSize(target_size));
+  pass_info.renderArea.offset = vk::Offset2D(area.GetX(), area.GetY());
+  pass_info.renderArea.extent = vk::Extent2D(area.GetWidth(), area.GetHeight());
   pass_info.setPClearValues(clears.data());
   pass_info.setClearValueCount(clear_count);
 
@@ -335,12 +354,7 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
   command_buffer_vk_.setViewport(0, 1, &viewport);
 
   // Set the initial scissor.
-  const auto sc = IRect32::MakeSize(target_size);
-  vk::Rect2D scissor =
-      vk::Rect2D()
-          .setOffset(vk::Offset2D(sc.GetX(), sc.GetY()))
-          .setExtent(vk::Extent2D(sc.GetWidth(), sc.GetHeight()));
-  command_buffer_vk_.setScissor(0, 1, &scissor);
+  SetScissor(IRect32::MakeSize(target_size));
 
   // Set the initial stencil reference.
   command_buffer_vk_.setStencilReference(vk::StencilFaceFlagBits::eFrontAndBack,
@@ -483,6 +497,10 @@ void RenderPassVK::SetViewport(Viewport viewport) {
 
 // |RenderPass|
 void RenderPassVK::SetScissor(IRect32 scissor) {
+  if (const auto& area = render_target_.GetRenderArea()) {
+    scissor = scissor.IntersectionOrEmpty(IRect32::MakeLTRB(
+        area->GetLeft(), area->GetTop(), area->GetRight(), area->GetBottom()));
+  }
   vk::Rect2D scissor_vk =
       vk::Rect2D()
           .setOffset(vk::Offset2D(scissor.GetX(), scissor.GetY()))

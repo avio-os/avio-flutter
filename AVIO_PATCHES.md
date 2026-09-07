@@ -245,26 +245,21 @@ and supplies either exact catch-up damage for preserved pixels or unknown
 history for a mandatory full repaint. The engine keeps logical frame damage
 separate from selected-buffer damage in `FlutterBackingStorePresentInfo`.
 
-The root pass is always multisampled. Impeller antialiases geometry by
-rastering it multisampled and resolving, with no analytic coverage path for a
-clip edge or an arbitrary path, so a single-sample root pass renders every such
-edge in the frame hard. Multisampling therefore outranks partial repaint, and a
-multisampled pass cannot partially repaint: it rasters into its own attachment
-and resolves that attachment over every pixel of the target, so nothing the
-target preserved survives it. Such a frame narrows nothing and reports no
-buffer damage — there is no rectangle it honored — while logical frame damage
-stays exact and sparse, which is what accumulates catch-up damage across the
-embedder's other buffers.
+The root pass prefers multisampling. Impeller relies on it for arbitrary path
+and clip-edge antialiasing; disabling it to obtain partial repaint loses visual
+quality. For selected Vulkan images with an explicit external ownership and
+GENERAL layout contract, the engine now bounds MSAA clear, raster and resolve
+to the exact rounded damage rectangle. The resolved image preserves pixels
+outside that region because its initial layout is known, not UNDEFINED.
+Every scissor is intersected with the render area, and viewport/scene coordinates
+stay unchanged. The factory advertises this ability before materialization and
+preroll. Other Vulkan embedders and backends still use the full-target path.
 
-Restricting the resolve to the damage is not available: Impeller's Vulkan
-backend begins every render pass over the whole target
-(`render_pass_vk.cc` `pass_info.renderArea`), has no render-area plumbing on
-`RenderTarget` or `RenderPass`, and uses render pass objects rather than
-`VK_KHR_dynamic_rendering`. The Metal backend's alternative — resolve into a
-scratch texture and blit only the damage — would move the write to the
-embedder's image out of the render pass, which is where this patch's
-external-image queue-family acquire and its render-complete semaphore both
-live; neither has a blit-pass equivalent. See "Deferred" below.
+Bounded passes bypass the existing framebuffer/render-pass cache because its
+key omits resolve preservation policy. They neither consume nor overwrite a
+full-pass entry. Unknown contents and root readback require a full repaint
+before culling; a bounded pass may never silently widen afterward. There is no
+scratch-copy path or second image-ownership mechanism.
 
 If the transients budget cannot seat a multisample reservation, the frame
 degrades to a single-sample pass rather than failing: a refused reservation
@@ -294,13 +289,11 @@ acquire barrier and the render pass's incoming dependency declare color
 attachment read access alongside write access. Clear targets remain
 write-only.
 
-Deferred: partial repaint under multisampling, by resolving into a pooled
-scratch texture and blitting only the damage rect to the embedder's image, as
-`surface_mtl.mm` does for Metal drawables. It needs the external-image
-queue-family acquire and release (patch #27) and the render-complete semaphore
-(patch #8) to work from a blit pass as well as a render pass, plus a scratch
-texture per concurrently live target. Until then a frame that would have
-partially repainted pays a full layer-tree paint and a full-frame resolve.
+Deferred: reducing attachment dimensions. Bounded rendering avoids work, but
+MSAA and depth attachments still have the full target dimensions. A smaller
+scratch attachment would require explicit origin, clipping, readback, copy and
+completion contracts. The attachment-size comparison with a single-sample,
+color-only compositor is not a measured whole-desktop memory or speed ratio.
 
 Logical frame damage remains sparse. The renderer's one rectangular canvas and
 Impeller dispatch are lowered once to an explicit raster/replacement region;
@@ -752,3 +745,18 @@ materialization failures emit at most one process-level diagnostic; repeated
 evidence remains in the trace counter. Successful multisample targets add no
 new diagnostic event. Sample-count reporting follows surface validation and
 never claims that attachment creation proves a successful render.
+
+## Post-acquisition rendering result and failure propagation (2026-09-07)
+
+The accepted terminal result is distinct from successful target acquisition.
+Deferred refusal keeps the last painted layer tree and requests another
+opportunity without a second terminal callback. Rejected callbacks cannot
+advance paint-region history. Required color and depth allocations form one
+pre-submit transaction; a missing pooled depth attachment cannot trigger an
+uncached retry in the generic attachment helper.
+
+Canvas reports explicit render/encode/enqueue/flush failure through the
+DisplayList dispatcher. Cleanup still drains earlier queued work, and a failed
+inline pass is consumed exactly once so destruction cannot retry its commands.
+Those failures retain the conservative raster-failed classification; only
+factory failure before any GPU work carries pre-submit proof.

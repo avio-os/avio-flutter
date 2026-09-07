@@ -32,7 +32,20 @@ RenderTarget::RenderTarget() = default;
 
 RenderTarget::~RenderTarget() = default;
 
+bool RenderTarget::SetRenderArea(IRect area) {
+  if (area.IsEmpty() ||
+      !IRect::MakeSize(GetRenderTargetSize()).Contains(area)) {
+    return false;
+  }
+  render_area_ = area;
+  return true;
+}
+
 bool RenderTarget::IsValid() const {
+  if (render_area_ &&
+      !IRect::MakeSize(GetRenderTargetSize()).Contains(*render_area_)) {
+    return false;
+  }
   // Validate that there is a color attachment at zero index.
   if (!HasColorAttachment(0u)) {
     VALIDATION_LOG

@@ -156,14 +156,13 @@ EmbedderExternalView::RenderResult EmbedderExternalView::Render(
     impeller::RenderTarget target = *impeller_target;
     auto color = target.GetColorAttachment(0u);
     color.clear_color = impeller::Color::BlackTransparent();
-    // A multisampled pass rasters into its own attachment and resolves that
-    // attachment over every pixel of the target. It can neither carry the
-    // target's preserved contents into the frame nor honor a damage
-    // rectangle, whatever the caller asked for.
-    const bool replaces_whole_target = color.resolve_texture != nullptr;
+    // A bounded Vulkan MSAA pass resolves only the damage region and retains
+    // the selected image outside it. Other factories still require full raster.
+    const bool replaces_whole_target =
+        render_target.RasterReplacesWholeTarget();
     const bool honors_damage =
         buffer_damage.has_value() && !replaces_whole_target;
-    if (!honors_damage) {
+    if (!honors_damage || color.resolve_texture) {
       color.load_action = impeller::LoadAction::kClear;
     }
     target.SetColorAttachment(color, 0u);
@@ -186,7 +185,7 @@ EmbedderExternalView::RenderResult EmbedderExternalView::Render(
         damage_rects.push_back(
             SkIRect::MakeLTRB(rounded.GetLeft(), rounded.GetTop(),
                               rounded.GetRight(), rounded.GetBottom()));
-        if (clear_surface && honors_damage) {
+        if (clear_surface && honors_damage && !color.resolve_texture) {
           dl_builder.DrawRect(DlRect::Make(rounded), clear_paint);
         }
       }
@@ -195,6 +194,18 @@ EmbedderExternalView::RenderResult EmbedderExternalView::Render(
         // the target still holds exactly its previous contents; saying
         // otherwise would let the caller record this frame as its history.
         return RenderResult::kNoVisualChange;
+      }
+    }
+    if (honors_damage && color.resolve_texture) {
+      // Dispatch uses one bounding rectangle for disjoint damage. The Vulkan
+      // render area and every dynamic scissor must use exactly that same union.
+      SkIRect area = damage_rects.front();
+      for (const auto& rect : damage_rects) {
+        area.join(rect);
+      }
+      if (!target.SetRenderArea(impeller::IRect::MakeLTRB(
+              area.left(), area.top(), area.right(), area.bottom()))) {
+        return RenderResult::kFailed;
       }
     }
     dl_builder.SetTransform(render_transform);

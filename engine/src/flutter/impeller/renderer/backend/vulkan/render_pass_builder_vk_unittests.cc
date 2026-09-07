@@ -12,6 +12,23 @@
 namespace impeller {
 namespace testing {
 
+TEST(RenderPassBuilder, BoundedResolvePreservesOutsideWithoutLoadingMSAA) {
+  RenderPassBuilderVK builder;
+  builder.SetColorAttachment(
+      0, PixelFormat::kR8G8B8A8UNormInt, SampleCount::kCount4,
+      LoadAction::kClear, StoreAction::kMultisampleResolve,
+      vk::ImageLayout::eGeneral, true, vk::ImageLayout::eGeneral);
+  ASSERT_TRUE(builder.GetColor0());
+  ASSERT_TRUE(builder.GetColor0Resolve());
+  EXPECT_EQ(builder.GetColor0()->initialLayout, vk::ImageLayout::eUndefined);
+  EXPECT_EQ(builder.GetColor0()->loadOp, vk::AttachmentLoadOp::eClear);
+  EXPECT_EQ(builder.GetColor0Resolve()->initialLayout,
+            vk::ImageLayout::eGeneral);
+  EXPECT_EQ(builder.GetColor0Resolve()->loadOp,
+            vk::AttachmentLoadOp::eDontCare);
+  EXPECT_EQ(builder.GetColor0Resolve()->storeOp, vk::AttachmentStoreOp::eStore);
+}
+
 TEST(RenderPassBuilder, CreatesRenderPassWithNoDepthStencil) {
   RenderPassBuilderVK builder = RenderPassBuilderVK();
   auto const context = MockVulkanContextBuilder().Build();

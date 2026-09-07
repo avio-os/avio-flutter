@@ -194,6 +194,8 @@ std::vector<VkImageMemoryBarrier>& GetImageMemoryBarriers(
 /// @brief Returns the viewports passed to `vkCmdSetViewport` calls on the
 ///        given command buffer, in call order.
 const std::vector<VkViewport>& GetRecordedViewports(VkCommandBuffer buffer);
+const std::vector<VkRect2D>& GetRecordedScissors(VkCommandBuffer buffer);
+const std::vector<VkRect2D>& GetRecordedRenderAreas(VkCommandBuffer buffer);
 
 }  // namespace testing
 }  // namespace impeller

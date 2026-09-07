@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <cassert>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 
@@ -25,14 +26,23 @@ namespace flutter::testing {
 
 TestVulkanContext::TestVulkanContext() {
   // ---------------------------------------------------------------------------
-  // Initialize basic Vulkan state using the Swiftshader ICD.
+  // Default to SwiftShader for deterministic tests. An explicit library
+  // override allows the system loader and VK_DRIVER_FILES to select a native
+  // ICD for cross-driver pixel validation without changing normal test runs.
   // ---------------------------------------------------------------------------
 
-  const char* vulkan_icd = VULKAN_SO_PATH;
+  const char* override_library = std::getenv("FLUTTER_TEST_VULKAN_LIBRARY");
+  const bool has_override = override_library && override_library[0] != '\0';
+  const char* vulkan_icd = has_override ? override_library : VULKAN_SO_PATH;
 
   // TODO(96949): Clean this up and pass a native library directly to
   //              VulkanProcTable.
-  if (!fml::NativeLibrary::Create(VULKAN_SO_PATH)) {
+  if (!fml::NativeLibrary::Create(vulkan_icd)) {
+    if (has_override) {
+      FML_LOG(ERROR) << "Could not load requested Vulkan test library: "
+                     << vulkan_icd;
+      return;
+    }
     FML_LOG(ERROR) << "Couldn't find Vulkan ICD \"" << vulkan_icd
                    << "\", trying \"libvulkan.so\" instead.";
     vulkan_icd = "libvulkan.so";
@@ -63,6 +73,14 @@ TestVulkanContext::TestVulkanContext() {
     FML_LOG(ERROR) << "Failed to create compatible logical device.";
     return;
   }
+
+  VkPhysicalDeviceProperties properties = {};
+  auto get_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+      vk_->GetInstanceProcAddr(application_->GetInstance(),
+                               "vkGetPhysicalDeviceProperties"));
+  FML_CHECK(get_properties);
+  get_properties(device_->GetPhysicalDeviceHandle(), &properties);
+  FML_LOG(INFO) << "Vulkan test device: " << properties.deviceName;
 
   // ---------------------------------------------------------------------------
   // Create a Skia context.
@@ -184,6 +202,10 @@ std::optional<TestVulkanImage> TestVulkanContext::CreateImage(
 
 sk_sp<GrDirectContext> TestVulkanContext::GetGrDirectContext() const {
   return context_;
+}
+
+uint32_t TestVulkanContext::GetGraphicsQueueIndex() const {
+  return device_->GetGraphicsQueueIndex();
 }
 
 VkDevice TestVulkanContext::GetDeviceHandle() const {

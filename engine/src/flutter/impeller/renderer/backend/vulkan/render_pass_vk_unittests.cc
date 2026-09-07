@@ -4,6 +4,7 @@
 
 #include "flutter/testing/testing.h"  // IWYU pragma: keep
 #include "gtest/gtest.h"
+#include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/renderer/backend/vulkan/command_buffer_vk.h"
 #include "impeller/renderer/backend/vulkan/render_pass_builder_vk.h"
@@ -38,6 +39,85 @@ class ExternalRenderTargetSourceVK final : public TextureSourceVK {
   vk::Image image_;
   vk::ImageView image_view_;
 };
+
+TEST(RenderPassVK, BoundedMSAARestrictsClearResolveAndEveryScissor) {
+  auto context = MockVulkanContextBuilder().Build();
+  RenderTargetAllocator allocator(context->GetResourceAllocator());
+  auto target = allocator.CreateOffscreenMSAA(*context, {100, 100}, 1);
+  auto resolve = target.GetColorAttachment(0).resolve_texture;
+  ASSERT_TRUE(resolve);
+  TextureVK::Cast(*resolve).SetLayoutWithoutEncoding(vk::ImageLayout::eGeneral);
+  EXPECT_FALSE(target.SetRenderArea(IRect::MakeXYWH(-1, 0, 5, 5)));
+  EXPECT_FALSE(target.SetRenderArea(IRect::MakeXYWH(0, 0, 0, 5)));
+  EXPECT_FALSE(target.SetRenderArea(IRect::MakeXYWH(95, 95, 10, 10)));
+  ASSERT_TRUE(target.SetRenderArea(IRect::MakeXYWH(20, 30, 40, 50)));
+  auto buffer = context->CreateCommandBuffer();
+  auto pass = buffer->CreateRenderPass(target);
+  ASSERT_TRUE(pass);
+  auto raw = CommandBufferVK::Cast(*buffer).GetCommandBuffer();
+  const auto& areas = GetRecordedRenderAreas(raw);
+  ASSERT_EQ(areas.size(), 1u);
+  EXPECT_EQ(areas[0].offset.x, 20);
+  EXPECT_EQ(areas[0].offset.y, 30);
+  EXPECT_EQ(areas[0].extent.width, 40u);
+  EXPECT_EQ(areas[0].extent.height, 50u);
+  pass->SetScissor(IRect32::MakeSize(ISize(100, 100)));
+  pass->SetScissor(IRect32::MakeXYWH(40, 50, 50, 50));
+  const auto& scissors = GetRecordedScissors(raw);
+  ASSERT_EQ(scissors.size(), 3u);
+  EXPECT_EQ(scissors[0].offset.x, 20);
+  EXPECT_EQ(scissors[1].extent.width, 40u);
+  EXPECT_EQ(scissors[2].offset.x, 40);
+  EXPECT_EQ(scissors[2].offset.y, 50);
+  EXPECT_EQ(scissors[2].extent.width, 20u);
+  EXPECT_EQ(scissors[2].extent.height, 30u);
+  EXPECT_EQ(target.GetSampleCount(), SampleCount::kCount4);
+  EXPECT_EQ(target.GetRenderTargetSize(), ISize(100, 100));
+  EXPECT_TRUE(pass->EncodeCommands());
+}
+
+TEST(RenderPassVK, BoundedPassRejectsUnknownContentsWithoutWidening) {
+  ScopedValidationDisable validation;
+  auto context = MockVulkanContextBuilder().Build();
+  RenderTargetAllocator allocator(context->GetResourceAllocator());
+  auto target = allocator.CreateOffscreenMSAA(*context, {100, 100}, 1);
+  ASSERT_TRUE(target.SetRenderArea(IRect::MakeXYWH(20, 30, 40, 50)));
+  auto buffer = context->CreateCommandBuffer();
+  EXPECT_FALSE(buffer->CreateRenderPass(target));
+  EXPECT_TRUE(
+      GetRecordedRenderAreas(CommandBufferVK::Cast(*buffer).GetCommandBuffer())
+          .empty());
+  EXPECT_TRUE(GetMockVulkanQueueSubmitBatchCounts().empty());
+}
+
+TEST(RenderPassVK, BoundedAndFullPassesDoNotShareIncompatibleCachedPolicy) {
+  auto context = MockVulkanContextBuilder().Build();
+  RenderTargetAllocator allocator(context->GetResourceAllocator());
+  auto full = allocator.CreateOffscreenMSAA(*context, {100, 100}, 1);
+  auto& resolve = TextureVK::Cast(*full.GetColorAttachment(0).resolve_texture);
+  auto run = [&](const RenderTarget& target, IRect expected) {
+    auto buffer = context->CreateCommandBuffer();
+    auto pass = buffer->CreateRenderPass(target);
+    ASSERT_TRUE(pass);
+    const auto& areas = GetRecordedRenderAreas(
+        CommandBufferVK::Cast(*buffer).GetCommandBuffer());
+    ASSERT_EQ(areas.size(), 1u);
+    EXPECT_EQ(areas[0].offset.x, expected.GetX());
+    EXPECT_EQ(areas[0].offset.y, expected.GetY());
+    EXPECT_EQ(areas[0].extent.width, expected.GetWidth());
+    EXPECT_EQ(areas[0].extent.height, expected.GetHeight());
+    EXPECT_TRUE(pass->EncodeCommands());
+  };
+  run(full, IRect::MakeSize(ISize(100, 100)));
+  auto cached = resolve.GetCachedFrameData(SampleCount::kCount4, 0, 0);
+  ASSERT_TRUE(cached.render_pass);
+  auto bounded = full;
+  ASSERT_TRUE(bounded.SetRenderArea(IRect::MakeXYWH(20, 30, 40, 50)));
+  run(bounded, *bounded.GetRenderArea());
+  EXPECT_EQ(resolve.GetCachedFrameData(SampleCount::kCount4, 0, 0).render_pass,
+            cached.render_pass);
+  run(full, IRect::MakeSize(ISize(100, 100)));
+}
 
 TEST(RenderPassVK, DoesNotRedundantlySetStencil) {
   std::shared_ptr<ContextVK> context = MockVulkanContextBuilder().Build();

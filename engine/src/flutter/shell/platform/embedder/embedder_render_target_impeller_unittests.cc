@@ -39,6 +39,21 @@ TEST(EmbedderRenderTargetImpellerTest, DefersCreationAndReleasesUnusedLease) {
   EXPECT_EQ(release_order, (std::vector<int>{1, 2}));
 }
 
+TEST(EmbedderRenderTargetImpellerTest,
+     BoundedMSAACapabilityIsKnownBeforeAllocation) {
+  int creations = 0;
+  auto aiks = std::make_shared<impeller::AiksContext>(nullptr, nullptr);
+  EmbedderRenderTargetImpeller target(
+      {}, aiks, DlISize(800, 600),
+      [&]() -> std::unique_ptr<impeller::RenderTarget> {
+        creations++;
+        return nullptr;
+      },
+      [] {}, [] {}, {}, /*supports_partial_msaa=*/true);
+  EXPECT_FALSE(target.RasterReplacesWholeTarget());
+  EXPECT_EQ(creations, 0);
+}
+
 TEST(EmbedderRenderTargetImpellerTest, MaterializesOnlyOnce) {
   int creations = 0;
   auto aiks = std::make_shared<impeller::AiksContext>(nullptr, nullptr);

@@ -42,7 +42,8 @@ RenderPassBuilderVK& RenderPassBuilderVK::SetColorAttachment(
     LoadAction load_action,
     StoreAction store_action,
     vk::ImageLayout current_layout,
-    bool is_swapchain) {
+    bool is_swapchain,
+    std::optional<vk::ImageLayout> preserved_resolve_layout) {
   vk::AttachmentDescription desc;
   desc.format = ToVKImageFormat(format);
   desc.samples = ToVKSampleCount(sample_count);
@@ -58,24 +59,30 @@ RenderPassBuilderVK& RenderPassBuilderVK::SetColorAttachment(
   desc.finalLayout = ComputeFinalLayout(is_swapchain, sample_count);
 
   const bool performs_resolves = StoreActionPerformsResolve(store_action);
+  auto resolve_desc = desc;
+  resolve_desc.storeOp = ToVKAttachmentStoreOp(store_action, true);
+  resolve_desc.samples = vk::SampleCountFlagBits::e1;
+  resolve_desc.finalLayout =
+      ComputeFinalLayout(is_swapchain, SampleCount::kCount1);
+  if (preserved_resolve_layout) {
+    // Do not transition the entire retained image from UNDEFINED: only the
+    // render area is replaced by this resolve. No old samples within that area
+    // are needed, but pixels outside it must survive the layout transition.
+    resolve_desc.loadOp = vk::AttachmentLoadOp::eDontCare;
+    resolve_desc.initialLayout = *preserved_resolve_layout;
+  }
   if (index == 0u) {
     color0_ = desc;
 
     if (performs_resolves) {
-      desc.storeOp = ToVKAttachmentStoreOp(store_action, true);
-      desc.samples = vk::SampleCountFlagBits::e1;
-      desc.finalLayout = ComputeFinalLayout(is_swapchain, SampleCount::kCount1);
-      color0_resolve_ = desc;
+      color0_resolve_ = resolve_desc;
     } else {
       color0_resolve_ = std::nullopt;
     }
   } else {
     colors_[index] = desc;
     if (performs_resolves) {
-      desc.storeOp = ToVKAttachmentStoreOp(store_action, true);
-      desc.samples = vk::SampleCountFlagBits::e1;
-      desc.finalLayout = ComputeFinalLayout(is_swapchain, SampleCount::kCount1);
-      resolves_[index] = desc;
+      resolves_[index] = resolve_desc;
     } else {
       resolves_.erase(index);
     }

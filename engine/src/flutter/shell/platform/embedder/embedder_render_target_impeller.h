@@ -26,7 +26,8 @@ class EmbedderRenderTargetImpeller final : public EmbedderRenderTarget {
 
   // Acquire backing-store identity now; construct raster resources only when
   // GetImpellerRenderTarget is called. Size/backend/damage queries stay cheap.
-  // Deferred targets conservatively allow whole-target raster until realized.
+  // Partial MSAA must be guaranteed by the factory's backend before preroll;
+  // discovering it after materialization would invalidate damage culling.
   EmbedderRenderTargetImpeller(
       FlutterBackingStore backing_store,
       std::shared_ptr<impeller::AiksContext> aiks_context,
@@ -35,7 +36,8 @@ class EmbedderRenderTargetImpeller final : public EmbedderRenderTarget {
       fml::closure on_release,
       fml::closure framebuffer_destruction_callback,
       TakeRenderCompleteSyncFDCallback take_render_complete_sync_fd_callback =
-          {});
+          {},
+      bool supports_partial_msaa = false);
 
   // |EmbedderRenderTarget|
   ~EmbedderRenderTargetImpeller() override;
@@ -62,6 +64,7 @@ class EmbedderRenderTargetImpeller final : public EmbedderRenderTarget {
   mutable std::unique_ptr<impeller::RenderTarget> impeller_target_;
   mutable RenderTargetFactory create_target_;
   DlISize target_size_;
+  bool supports_partial_msaa_ = false;
   fml::closure framebuffer_destruction_callback_;
   TakeRenderCompleteSyncFDCallback take_render_complete_sync_fd_callback_;
 

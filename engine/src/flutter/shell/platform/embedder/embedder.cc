@@ -1772,7 +1772,7 @@ MakeRenderTargetFromBackingStoreImpeller(
     // A single-sample root pass therefore has no antialiasing at all: every
     // clip edge and every arbitrary path in the frame lands hard-edged. That
     // cost is paid by the whole frame, so the root pass asks for multisampling
-    // first and treats partial repaint as the thing that gives way.
+    // first. A known external-image layout also permits bounded MSAA resolve.
     impeller::TransientsPoolRefusalVK msaa_refusal;
     impeller::TransientsPoolRefusalVK fallback_refusal;
     auto transients =
@@ -1811,10 +1811,9 @@ MakeRenderTargetFromBackingStoreImpeller(
     ReportRootPassSampleCount(impeller_context.get(), multisampled);
 
     auto render_target = surface->GetRenderTarget();
-    // A multisampled pass resolves over the whole target, so nothing this
-    // target preserved survives it and its previous contents cannot be loaded.
-    // Only the single-sample fallback renders into the target itself, and only
-    // there can a preserved target load its exact previous contents.
+    // Single-sample fallback loads retained pixels directly. MSAA clears its
+    // transient attachment and preserves the resolve image outside the bounded
+    // render area when the selected-target contract permits partial repaint.
     if (!multisampled && preserved_contents) {
       auto color = render_target.GetColorAttachment(0u);
       color.load_action = impeller::LoadAction::kLoad;
@@ -1852,7 +1851,8 @@ MakeRenderTargetFromBackingStoreImpeller(
       std::move(create_target), on_release, framebuffer_destruct,
       [wrapped_source]() mutable -> fml::UniqueFD {
         return wrapped_source->TakeRenderCompleteSyncFD();
-      });
+      },
+      /*supports_partial_msaa=*/external_ownership.has_value());
 #else
   return nullptr;
 #endif

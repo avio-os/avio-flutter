@@ -39,11 +39,13 @@ EmbedderRenderTargetImpeller::EmbedderRenderTargetImpeller(
     RenderTargetFactory create_target,
     fml::closure on_release,
     fml::closure framebuffer_destruction_callback,
-    TakeRenderCompleteSyncFDCallback take_render_complete_sync_fd_callback)
+    TakeRenderCompleteSyncFDCallback take_render_complete_sync_fd_callback,
+    bool supports_partial_msaa)
     : EmbedderRenderTarget(backing_store, std::move(on_release)),
       aiks_context_(std::move(aiks_context)),
       create_target_(std::move(create_target)),
       target_size_(target_size),
+      supports_partial_msaa_(supports_partial_msaa),
       framebuffer_destruction_callback_(
           std::move(framebuffer_destruction_callback)),
       take_render_complete_sync_fd_callback_(
@@ -86,8 +88,9 @@ DlISize EmbedderRenderTargetImpeller::GetRenderTargetSize() const {
 }
 
 bool EmbedderRenderTargetImpeller::RasterReplacesWholeTarget() const {
-  return !impeller_target_ ||
-         impeller_target_->GetColorAttachment(0u).resolve_texture != nullptr;
+  return !supports_partial_msaa_ &&
+         (!impeller_target_ ||
+          impeller_target_->GetColorAttachment(0u).resolve_texture != nullptr);
 }
 
 fml::UniqueFD EmbedderRenderTargetImpeller::TakeRenderCompleteSyncFD() {
