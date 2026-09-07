@@ -22,9 +22,12 @@ class EmbedderTestBackingStoreProducerVulkan
 
   // Transfer the test image between Skia and Impeller in a known GENERAL
   // layout on their shared graphics queue. This is a real same-family handoff,
-  // not a claim that the image belongs to a foreign process.
+  // not a claim that the image belongs to a foreign process. Metadata may be
+  // withheld to exercise the legacy full-repaint path; producer/consumer
+  // synchronization and actual image-layout tracking remain mandatory.
   static bool PrepareForExternalRendering(
-      const FlutterBackingStore* backing_store);
+      const FlutterBackingStore* backing_store,
+      bool advertise_external_ownership = true);
   static bool CompleteExternalRendering(
       const FlutterBackingStore* backing_store,
       int render_complete_sync_fd);

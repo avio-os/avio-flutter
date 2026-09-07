@@ -138,7 +138,8 @@ bool EmbedderTestBackingStoreProducerVulkan::Create(
 }
 
 bool EmbedderTestBackingStoreProducerVulkan::PrepareForExternalRendering(
-    const FlutterBackingStore* backing_store) {
+    const FlutterBackingStore* backing_store,
+    bool advertise_external_ownership) {
   auto* data = reinterpret_cast<UserData*>(backing_store->user_data);
   auto context = data->vulkan_context->GetGrDirectContext();
   const uint32_t queue = data->vulkan_context->GetGraphicsQueueIndex();
@@ -150,8 +151,10 @@ bool EmbedderTestBackingStoreProducerVulkan::PrepareForExternalRendering(
   if (!context->submit(GrSyncCpu::kYes)) {
     return false;
   }
-  data->image->has_external_queue_family_ownership = true;
-  data->image->external_queue_family_index = queue;
+  data->image->has_external_queue_family_ownership =
+      advertise_external_ownership;
+  data->image->external_queue_family_index =
+      advertise_external_ownership ? queue : VK_QUEUE_FAMILY_IGNORED;
   return true;
 }
 
@@ -171,8 +174,9 @@ bool EmbedderTestBackingStoreProducerVulkan::CompleteExternalRendering(
     }
   }
   auto* data = reinterpret_cast<UserData*>(backing_store->user_data);
-  // The engine's completed release leaves this image in GENERAL. Notify Skia
-  // of that actual state; do not encode a transition from its stale old layout.
+  // Embedder swapchain targets finish in GENERAL with or without the external
+  // ownership extension. Notify Skia of that actual state before readback; a
+  // transition from its stale UNDEFINED layout may discard the rendered pixels.
   data->backend_texture.setMutableState(skgpu::MutableTextureStates::MakeVulkan(
       VK_IMAGE_LAYOUT_GENERAL, data->vulkan_context->GetGraphicsQueueIndex()));
   return true;

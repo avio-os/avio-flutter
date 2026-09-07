@@ -141,9 +141,10 @@ struct SelectedTargetTestContext {
       target.backing_store.vulkan.destruction_callback = [](void*) {};
       target.created = true;
     }
-    if (external_handoff &&
-        !EmbedderTestBackingStoreProducerVulkan::PrepareForExternalRendering(
-            &target.backing_store)) {
+    // Withholding ownership metadata disables bounded repaint in the engine,
+    // but never skips the fixture's synchronization or Skia cache invalidation.
+    if (!EmbedderTestBackingStoreProducerVulkan::PrepareForExternalRendering(
+            &target.backing_store, external_handoff)) {
       return false;
     }
     target.backing_store.content_state = &target.content_state;
@@ -171,8 +172,7 @@ struct SelectedTargetTestContext {
       return true;
     }
 
-    if (external_handoff &&
-        !EmbedderTestBackingStoreProducerVulkan::CompleteExternalRendering(
+    if (!EmbedderTestBackingStoreProducerVulkan::CompleteExternalRendering(
             info.backing_store,
             info.backing_store_present_info->render_complete_sync_fd)) {
       return false;
