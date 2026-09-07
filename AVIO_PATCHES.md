@@ -271,9 +271,11 @@ degrades to a single-sample pass rather than failing: a refused reservation
 used to return `nullptr` and lose the whole frame, which live sessions hit
 during window-chrome reconfiguration bursts. Only that fallback path renders
 into the embedder's image directly, and only it takes the preserved `Load`
-first pass. Sample-count transitions are logged once per change, throttled to
-one line a second, because a root pass that silently loses its antialiasing
-reports nothing else.
+first pass. Successfully materialized single-sample targets emit the
+`EmbedderRootSingleSampleTarget` TRACE counter, keyed by their Impeller context.
+This describes attachment selection, not proof of rendering or presentation.
+There is no process-global sample transition state or ERROR line when targets
+alternate their sample counts.
 
 Impeller's existing external-image queue-family barriers and exact
 render-complete semaphore remain the only GPU ownership path. There is no
@@ -740,3 +742,13 @@ do not understand this proof. Real raster failures retain their prior meaning.
 Focused tests force attachment-factory failure, assert one exact terminal and
 collection, and exhaust both sample modes of the six-entry Avio profile before
 releasing an outstanding lease. No GPU OOM or battery state is required.
+
+## Root attachment pressure diagnostics (2026-09-07)
+
+`EmbedderRootTargetAdmission` records dimensions, materialization outcome and
+both multisample/fallback refusal witnesses at TRACE, keyed by Impeller context.
+Admission backpressure never emits a per-frame ERROR. Admitted attachment
+materialization failures emit at most one process-level diagnostic; repeated
+evidence remains in the trace counter. Successful multisample targets add no
+new diagnostic event. Sample-count reporting follows surface validation and
+never claims that attachment creation proves a successful render.

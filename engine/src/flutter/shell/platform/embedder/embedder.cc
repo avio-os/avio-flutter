@@ -1656,51 +1656,43 @@ bool HasPreservedSelectedTargetContents(
          content_state->existing_damage != nullptr;
 }
 
-// Report the root pass losing, and later regaining, its multisampling. A root
-// pass that drops to one sample renders every antialiased edge in the frame
-// hard while reporting nothing else wrong, which is the one failure mode here
-// that a correct-looking log would otherwise hide.
-//
-// Only transitions are reported, so a steady sample count -- degraded or not
-// -- costs nothing per frame. The healthy state is never announced, because
-// the absence of these lines already says it. The engine drops anything below
-// ERROR unless the embedder asked for verbose logging (`shell.cc`), so ERROR
-// is what it takes for these to reach an embedder's log at all.
-void ReportRootPassSampleCount(bool multisampled) {
-  static std::mutex mutex;
-  static bool reported_degraded = false;
-  static uint64_t degraded_targets = 0u;
-
-  bool report_degraded = false;
-  uint64_t recovered_after = 0u;
-  {
-    std::scoped_lock lock(mutex);
-    if (!multisampled) {
-      degraded_targets++;
-      if (reported_degraded) {
-        return;
-      }
-      reported_degraded = true;
-      report_degraded = true;
-    } else {
-      if (!reported_degraded) {
-        return;
-      }
-      reported_degraded = false;
-      recovered_after = degraded_targets;
-      degraded_targets = 0u;
-    }
+// The sample count describes a materialized attachment set, not a completed
+// render. Report only the exceptional single-sample selection at TRACE; a
+// process-global transition latch would oscillate between unrelated targets.
+void ReportRootPassSampleCount(const impeller::Context* context,
+                               bool multisampled) {
+  if (!multisampled) {
+    FML_TRACE_COUNTER("flutter", "EmbedderRootSingleSampleTarget",
+                      reinterpret_cast<int64_t>(context), "sample_count", 1);
   }
+}
 
-  if (report_degraded) {
-    FML_LOG(ERROR)
-        << "Embedder root render pass dropped to a single sample: the Vulkan "
-           "transients budget could not seat a multisample reservation. Every "
-           "antialiased edge rasters hard until it can.";
+// Admission refusal is ordinary backpressure. Keep its exact pool witness at
+// TRACE without synchronous per-frame logging or process-global target state.
+void ReportRootTargetAdmission(
+    const impeller::Context* context,
+    const impeller::TextureDescriptor& desc,
+    const impeller::TransientsPoolRefusalVK& msaa_refusal,
+    const impeller::TransientsPoolRefusalVK& fallback_refusal,
+    bool materialized) {
+  if (!msaa_refusal.refused && !fallback_refusal.refused && materialized) {
     return;
   }
-  FML_LOG(ERROR) << "Embedder root render pass is multisampled again after "
-                 << recovered_after << " single-sample target(s).";
+  FML_TRACE_COUNTER(
+      "flutter", "EmbedderRootTargetAdmission",
+      reinterpret_cast<int64_t>(context), "width", desc.size.width, "height",
+      desc.size.height, "materialized", materialized, "msaa_refused",
+      msaa_refusal.refused, "msaa_invalid_footprint",
+      msaa_refusal.invalid_footprint, "msaa_entry_limit",
+      msaa_refusal.entry_limit, "msaa_byte_limit", msaa_refusal.byte_limit,
+      "msaa_entries", msaa_refusal.entries, "msaa_bytes", msaa_refusal.bytes,
+      "msaa_requested_bytes", msaa_refusal.requested_bytes, "fallback_refused",
+      fallback_refusal.refused, "fallback_invalid_footprint",
+      fallback_refusal.invalid_footprint, "fallback_entry_limit",
+      fallback_refusal.entry_limit, "fallback_byte_limit",
+      fallback_refusal.byte_limit, "fallback_entries", fallback_refusal.entries,
+      "fallback_bytes", fallback_refusal.bytes, "fallback_requested_bytes",
+      fallback_refusal.requested_bytes);
 }
 
 }  // namespace
@@ -1796,24 +1788,27 @@ MakeRenderTargetFromBackingStoreImpeller(
                                                   /*enable_msaa=*/false,
                                                   &fallback_refusal);
     }
-    ReportRootPassSampleCount(multisampled);
-
     auto surface = impeller::SurfaceVK::WrapSwapchainImage(
         transients, wrapped_source, []() -> bool { return true; });
-    if (!surface || !surface->IsValid()) {
-      FML_LOG(ERROR) << "Could not wrap Vulkan image as Impeller surface. "
-                     << "target=" << desc.size.width << "x" << desc.size.height
-                     << " msaa_refused=" << msaa_refusal.refused
-                     << " fallback_refused=" << fallback_refusal.refused
-                     << " invalid_footprint="
-                     << fallback_refusal.invalid_footprint
-                     << " entry_limit=" << fallback_refusal.entry_limit
-                     << " byte_limit=" << fallback_refusal.byte_limit
-                     << " entries=" << fallback_refusal.entries
-                     << " bytes=" << fallback_refusal.bytes
-                     << " requested_bytes=" << fallback_refusal.requested_bytes;
+    const bool materialized = surface && surface->IsValid();
+    ReportRootTargetAdmission(impeller_context.get(), desc, msaa_refusal,
+                              fallback_refusal, materialized);
+    if (!materialized) {
+      // Driver/materialization failure is distinct from bounded admission.
+      // Emit at most one process diagnostic; detailed repetitions stay in
+      // TRACE.
+      if (transients) {
+        static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+        if (!reported.test_and_set(std::memory_order_relaxed)) {
+          FML_LOG(ERROR)
+              << "Could not materialize admitted Vulkan root attachments. "
+              << "Further failures are reported by "
+                 "EmbedderRootTargetAdmission tracing.";
+        }
+      }
       return nullptr;
     }
+    ReportRootPassSampleCount(impeller_context.get(), multisampled);
 
     auto render_target = surface->GetRenderTarget();
     // A multisampled pass resolves over the whole target, so nothing this
