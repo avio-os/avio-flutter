@@ -59,7 +59,7 @@ TEST(EmbedderRenderTargetImpellerTest, MaterializesOnlyOnce) {
 // needed: a skipped target must never invoke its factory, and a failed factory
 // must prove no submission without falling into Slimpeller's fatal
 // backend-switch path.
-void CheckDeferredTerminal(bool unchanged) {
+void CheckDeferredTerminal(bool unchanged, bool accept_terminal = true) {
   int creations = 0;
   int releases = 0;
   int presents = 0;
@@ -117,7 +117,7 @@ void CheckDeferredTerminal(bool unchanged) {
               status,
               kFlutterPresentRenderTargetStatusAllocationFailedBeforeSubmit);
         }
-        return true;
+        return accept_terminal;
       });
   ExternalViewEmbedder& boundary = embedder;
   boundary.BeginFrame(nullptr, nullptr);
@@ -149,8 +149,25 @@ void CheckDeferredTerminal(bool unchanged) {
   frame->set_submit_info(submit);
   boundary.SubmitFlutterView(29, nullptr, aiks, std::move(frame));
   EXPECT_EQ(creations, unchanged ? 0 : 1);
+  EXPECT_EQ(boundary.GetRootRenderTargetResult(29),
+            !accept_terminal
+                ? ExternalViewEmbedder::RootRenderTargetResult::kRejected
+            : unchanged
+                ? ExternalViewEmbedder::RootRenderTargetResult::kNoVisualChange
+                : ExternalViewEmbedder::RootRenderTargetResult::kBackpressured);
+  EXPECT_FALSE(boundary.GetRootRenderTargetResult(30).has_value());
+  boundary.BeginFrame(nullptr, nullptr);
+  EXPECT_FALSE(boundary.GetRootRenderTargetResult(29).has_value());
   EXPECT_EQ(presents, 1);
   EXPECT_EQ(releases, 1);
+}
+
+TEST(EmbedderRenderTargetImpellerTest, RejectedDeferredFailureDoesNotRearm) {
+  CheckDeferredTerminal(false, false);
+}
+
+TEST(EmbedderRenderTargetImpellerTest, RejectedUnchangedTargetDoesNotPromote) {
+  CheckDeferredTerminal(true, false);
 }
 
 TEST(EmbedderRenderTargetImpellerTest,

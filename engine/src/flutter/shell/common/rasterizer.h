@@ -90,6 +90,9 @@ enum class DrawSurfaceStatus {
   // Exact typed results from root render-target acquisition. No pixels were
   // written; only backpressure preserves demand for a later opportunity.
   kTargetBackpressured,
+  // Post-acquisition results already terminalized by the root callback.
+  kTargetRenderBackpressured,
+  kTargetNoVisualChange,
   kTargetWithdrawn,
   kTargetRemoved,
   kTargetEpochStale,

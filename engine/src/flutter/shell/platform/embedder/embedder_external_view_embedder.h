@@ -162,6 +162,9 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
   std::optional<ExternalViewEmbedder::RootRenderTargetAcquisition>
   GetRootRenderTargetAcquisition(int64_t flutter_view_id) const override;
 
+  std::optional<RootRenderTargetResult> GetRootRenderTargetResult(
+      int64_t flutter_view_id) const override;
+
   // |ExternalViewEmbedder|
   bool SupportsMetadataFrameDamageForCurrentFrame() const override;
 
@@ -206,7 +209,7 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
           nullptr,
       bool compositor_materials_invalid = false,
       const std::vector<FlutterAvioWindowPreview>* window_previews = nullptr,
-      bool window_previews_invalid = false) const;
+      bool window_previews_invalid = false);
 
   const FlutterCompositorMode compositor_mode_;
   const bool selected_target_damage_;
@@ -230,6 +233,7 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
       pending_root_deferred_cleanup_render_targets_;
   // Exact acquisition result for each root target selected in this frame.
   // Cleared at every frame boundary.
+  std::unordered_map<int64_t, RootRenderTargetResult> root_target_results_;
   std::unordered_map<int64_t, ExternalViewEmbedder::RootRenderTargetAcquisition>
       root_target_acquisitions_;
   // The render target caches for views. Each key is a view ID.

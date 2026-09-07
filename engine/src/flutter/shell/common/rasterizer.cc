@@ -809,7 +809,8 @@ std::unique_ptr<FrameItem> Rasterizer::DrawToSurfacesUnsafe(
     auto& view_record = EnsureViewRecord(task->view_id);
     view_record.last_draw_status = status;
     if (status == DrawSurfaceStatus::kSuccess ||
-        status == DrawSurfaceStatus::kNoVisualChange) {
+        status == DrawSurfaceStatus::kNoVisualChange ||
+        status == DrawSurfaceStatus::kTargetNoVisualChange) {
       view_record.last_successful_task = std::make_unique<LayerTreeTask>(
           view_id, std::move(layer_tree), device_pixel_ratio);
       if (status == DrawSurfaceStatus::kNoVisualChange) {
@@ -822,7 +823,20 @@ std::unique_ptr<FrameItem> Rasterizer::DrawToSurfacesUnsafe(
     } else if (status == DrawSurfaceStatus::kFailed) {
       CompleteFrameOpportunity(frame_timings_recorder, view_id,
                                FrameOpportunityOutcome::kRasterFailed);
+    } else if (status == DrawSurfaceStatus::kTargetRenderBackpressured) {
+      // The acquired lease was returned unchanged and its root callback
+      // already emitted the one terminal. Keep the painted baseline and ask
+      // for a later opportunity; never raster-spin on the same opportunity.
+      if (tasks_are_retained) {
+        view_record.last_successful_task = std::make_unique<LayerTreeTask>(
+            view_id, std::move(layer_tree), device_pixel_ratio);
+      }
+      backpressured_target_ids.insert(view_id);
     } else if (status == DrawSurfaceStatus::kRejected) {
+      if (tasks_are_retained) {
+        view_record.last_successful_task = std::make_unique<LayerTreeTask>(
+            view_id, std::move(layer_tree), device_pixel_ratio);
+      }
       // The selected-target presentation callback already terminalized this
       // exact opportunity with its typed pre-raster rejection. Repeating that
       // terminal here would violate the one-opportunity/one-terminal contract.
@@ -1071,6 +1085,21 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     } else {
       FML_CHECK(frame_status == RasterStatus::kSuccess);
       if (external_view_embedder_) {
+        const auto result =
+            external_view_embedder_->GetRootRenderTargetResult(view_id);
+        if (result.has_value()) {
+          using Result = ExternalViewEmbedder::RootRenderTargetResult;
+          switch (*result) {
+            case Result::kPresented:
+              return DrawSurfaceStatus::kSuccess;
+            case Result::kNoVisualChange:
+              return DrawSurfaceStatus::kTargetNoVisualChange;
+            case Result::kBackpressured:
+              return DrawSurfaceStatus::kTargetRenderBackpressured;
+            case Result::kRejected:
+              return DrawSurfaceStatus::kRejected;
+          }
+        }
         const auto acquisition =
             external_view_embedder_->GetRootRenderTargetAcquisition(view_id);
         if (acquisition.has_value()) {

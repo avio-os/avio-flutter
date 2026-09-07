@@ -520,6 +520,20 @@ class ExternalViewEmbedder {
     return std::nullopt;
   }
 
+  // Result after an acquired target has been processed. Acquisition alone
+  // cannot establish that the layer tree was painted. These results already
+  // carry an embedder terminal; rasterizer must not emit a second terminal.
+  enum class RootRenderTargetResult {
+    kPresented,
+    kNoVisualChange,
+    kBackpressured,
+    kRejected,
+  };
+  virtual std::optional<RootRenderTargetResult> GetRootRenderTargetResult(
+      int64_t flutter_view_id) const {
+    return std::nullopt;
+  }
+
   // Whether metadata-only frame-damage diffing is safe for the current frame.
   // Embedders that introduce synthetic platform-view boundaries can opt out of
   // this path while still using the normal full-repaint external-view flow.

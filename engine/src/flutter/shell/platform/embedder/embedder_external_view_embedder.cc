@@ -98,6 +98,7 @@ void EmbedderExternalViewEmbedder::BeginFrame(
     const fml::RefPtr<fml::RasterThreadMerger>& raster_thread_merger) {
   pending_frame_opportunity_ = std::nullopt;
   root_target_acquisitions_.clear();
+  root_target_results_.clear();
 }
 
 void EmbedderExternalViewEmbedder::SetFrameOpportunity(
@@ -259,6 +260,15 @@ EmbedderExternalViewEmbedder::GetRootRenderTargetAcquisition(
              ? std::nullopt
              : std::optional<ExternalViewEmbedder::RootRenderTargetAcquisition>(
                    found->second);
+}
+
+std::optional<ExternalViewEmbedder::RootRenderTargetResult>
+EmbedderExternalViewEmbedder::GetRootRenderTargetResult(
+    int64_t flutter_view_id) const {
+  const auto found = root_target_results_.find(flutter_view_id);
+  return found == root_target_results_.end()
+             ? std::nullopt
+             : std::optional<RootRenderTargetResult>(found->second);
 }
 
 bool EmbedderExternalViewEmbedder::SupportsMetadataFrameDamageForCurrentFrame()
@@ -1242,7 +1252,6 @@ void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
       previous_paint_region,
       PaintCoverageForFrame(*root_view, submit_info.avio_compositor_materials),
       rastered_damage);
-  root_paint_regions_[flutter_view_id] = retained_paint_region;
 
   if (aiks_context) {
     aiks_context->GetContext()->DisposeThreadLocalCachedResources();
@@ -1310,6 +1319,8 @@ void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
           &compositor_materials, false, &window_previews)) {
     FML_LOG(ERROR) << "Could not present explicit render target for view "
                    << flutter_view_id;
+  } else {
+    root_paint_regions_[flutter_view_id] = retained_paint_region;
   }
 
   deferred_cleanup_render_targets.clear();
@@ -1328,10 +1339,10 @@ bool EmbedderExternalViewEmbedder::CompleteRootRenderTarget(
     const std::vector<FlutterAvioCompositorMaterial>* compositor_materials,
     bool compositor_materials_invalid,
     const std::vector<FlutterAvioWindowPreview>* window_previews,
-    bool window_previews_invalid) const {
+    bool window_previews_invalid) {
   static const std::vector<FlutterAvioCompositorMaterial> kNoMaterials;
   static const std::vector<FlutterAvioWindowPreview> kNoPreviews;
-  return present_render_target_callback_(
+  const bool accepted = present_render_target_callback_(
       flutter_view_id,
       pending_frame_opportunity_.has_value() ? pending_frame_opportunity_->id
                                              : 0,
@@ -1344,6 +1355,24 @@ bool EmbedderExternalViewEmbedder::CompleteRootRenderTarget(
       compositor_materials_invalid,
       window_previews ? *window_previews : kNoPreviews,
       window_previews_invalid);
+  RootRenderTargetResult result = RootRenderTargetResult::kRejected;
+  if (accepted) {
+    switch (status) {
+      case kFlutterPresentRenderTargetStatusPresented:
+        result = RootRenderTargetResult::kPresented;
+        break;
+      case kFlutterPresentRenderTargetStatusNoVisualChange:
+        result = RootRenderTargetResult::kNoVisualChange;
+        break;
+      case kFlutterPresentRenderTargetStatusAllocationFailedBeforeSubmit:
+        result = RootRenderTargetResult::kBackpressured;
+        break;
+      default:
+        break;
+    }
+  }
+  root_target_results_.insert_or_assign(flutter_view_id, result);
+  return accepted;
 }
 
 }  // namespace flutter
