@@ -7,6 +7,7 @@
 #include "flutter/flow/layers/display_list_layer.h"
 
 #include "flutter/display_list/dl_builder.h"
+#include "flutter/display_list/effects/dl_image_filter.h"
 #include "flutter/flow/layers/layer_tree.h"
 #include "flutter/flow/testing/diff_context_test.h"
 #include "flutter/fml/macros.h"
@@ -366,6 +367,62 @@ TEST_F(DisplayListLayerDiffTest, SimpleDisplayList) {
   MockLayerTree tree3;
   damage = DiffLayerTree(tree3, tree2);
   EXPECT_EQ(damage.frame_damage.bounds(), DlIRect::MakeLTRB(10, 10, 60, 60));
+}
+
+TEST_F(DisplayListLayerDiffTest,
+       EmbeddedBackdropReadbackSurvivesRetainedAncestor) {
+  const DlRect bounds = DlRect::MakeLTRB(10, 10, 80, 80);
+  DisplayListBuilder builder(bounds);
+  auto filter = DlImageFilter::MakeBlur(3, 3, DlTileMode::kClamp);
+  builder.SaveLayer(bounds, nullptr, filter.get());
+  builder.DrawRect(bounds, DlPaint().setColor(DlColor::kBlue()));
+  builder.Restore();
+  auto display_list = builder.Build();
+  ASSERT_TRUE(display_list->root_has_backdrop_filter());
+  auto retained = CreateContainerLayer(CreateDisplayListLayer(display_list));
+  MockLayerTree first;
+  first.root()->Add(CreateDisplayListLayer(CreateDisplayList(
+      DlRect::MakeLTRB(500, 500, 510, 510), DlColor::kRed())));
+  first.root()->Add(retained);
+  auto damage =
+      DiffLayerTree(first, MockLayerTree(), DlIRect(), 0, 0, false, true);
+  EXPECT_TRUE(damage.has_readback);
+
+  MockLayerTree unchanged;
+  unchanged.root()->Add(first.root()->layers()[0]);
+  unchanged.root()->Add(retained);
+  damage = DiffLayerTree(unchanged, first, DlIRect(), 0, 0, false, true);
+  EXPECT_TRUE(damage.has_readback);
+  EXPECT_TRUE(damage.frame_damage.isEmpty());
+
+  // The filter layer and its ancestor are identical objects. Changing only a
+  // sibling must still rediscover the readback before selecting a raster clip.
+  MockLayerTree changed;
+  changed.root()->Add(CreateDisplayListLayer(CreateDisplayList(
+      DlRect::MakeLTRB(500, 500, 510, 510), DlColor::kGreen())));
+  changed.root()->Add(retained);
+  damage = DiffLayerTree(changed, unchanged, DlIRect(), 0, 0, false, true);
+  EXPECT_TRUE(damage.has_readback);
+  EXPECT_EQ(damage.frame_damage.bounds(), DlIRect::MakeSize(changed.size()));
+}
+
+TEST_F(DisplayListLayerDiffTest,
+       AdvancedRootBlendsConservativelyGateImpellerOnly) {
+  for (const auto mode :
+       {DlBlendMode::kSrcOver, DlBlendMode::kModulate, DlBlendMode::kScreen}) {
+    DisplayListBuilder builder;
+    builder.DrawRect(DlRect::MakeLTRB(10, 10, 80, 80),
+                     DlPaint().setBlendMode(mode));
+    auto display_list = builder.Build();
+    EXPECT_EQ(display_list->max_root_blend_mode(), mode);
+    for (const bool impeller : {false, true}) {
+      MockLayerTree tree;
+      tree.root()->Add(CreateDisplayListLayer(display_list));
+      const auto damage = DiffLayerTree(tree, MockLayerTree(), DlIRect(), 0, 0,
+                                        false, impeller);
+      EXPECT_EQ(damage.has_readback, impeller && mode > DlBlendMode::kModulate);
+    }
+  }
 }
 
 TEST_F(DisplayListLayerDiffTest, FractionalTranslation) {

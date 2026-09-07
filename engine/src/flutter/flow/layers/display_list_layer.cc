@@ -55,6 +55,20 @@ void DisplayListLayer::Diff(DiffContext* context, const Layer* old_layer) {
     context->WillPaintWithIntegralTransform();
   }
   context->AddLayerBounds(display_list()->GetBounds());
+  if (context->impeller_enabled() &&
+      (display_list()->root_has_backdrop_filter() ||
+       display_list()->max_root_blend_mode() > DlBlendMode::kModulate)) {
+    // These operations can make Impeller render the root into a readback
+    // target and copy it back. Discover that before damage narrows preroll.
+    // DiffContext has no framebuffer-fetch capability, so advanced root blends
+    // conservatively require full repaint even on devices that support fetch.
+    // The display list does not expose filter input bounds here; retain the
+    // current cull region as a conservative dependency. Recording the readback
+    // in the paint region also prevents unchanged ancestors from bypassing it.
+    context->AddReadbackRegion(
+        DlIRect::RoundOut(context->MapRect(display_list()->GetBounds())),
+        DlIRect::RoundOut(context->MapRect(context->GetCullRect())));
+  }
   context->SetLayerPaintRegion(this, context->CurrentSubtreeRegion());
 }
 
