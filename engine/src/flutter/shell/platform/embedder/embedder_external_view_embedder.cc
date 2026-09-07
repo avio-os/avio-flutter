@@ -1197,6 +1197,14 @@ void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
   std::optional<DlRegion> rastered_damage = submit_info.buffer_damage;
   const auto render_bounds = DlRect::MakeSize(descriptor.surface_size);
   switch (root_view->Render(*render_target, render_bounds, rastered_damage)) {
+    case EmbedderExternalView::RenderResult::kAllocationFailedBeforeSubmit:
+      deferred_cleanup_render_targets.clear();
+      CompleteRootRenderTarget(
+          flutter_view_id,
+          kFlutterPresentRenderTargetStatusAllocationFailedBeforeSubmit,
+          render_target->GetBackingStore());
+      frame->Submit();
+      return;
     case EmbedderExternalView::RenderResult::kFailed:
       FML_LOG(ERROR) << "Could not render Flutter contents into explicit "
                         "render target for view "

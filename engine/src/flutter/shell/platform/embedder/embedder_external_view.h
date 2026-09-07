@@ -121,8 +121,12 @@ class EmbedderExternalView {
   ///         reporting the wrong one to the embedder poisons its record of
   ///         what the target holds.
   enum class RenderResult {
-    /// Nothing was rastered and the target is unusable for this frame.
+    /// GPU work may have been submitted before rendering failed.
     kFailed,
+
+    /// Attachments could not be created. No GPU work was submitted and the
+    /// embedder backing store remains unchanged.
+    kAllocationFailedBeforeSubmit,
 
     /// Nothing was rastered because nothing in the target would change. The
     /// target's pixels and its history are exactly what they were before the

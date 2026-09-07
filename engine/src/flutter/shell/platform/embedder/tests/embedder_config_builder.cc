@@ -348,6 +348,9 @@ void EmbedderConfigBuilder::SetRootRenderTargetCompositor(
   compositor_.avoid_backing_store_cache = avoid_backing_store_cache;
   compositor_.compositor_mode = kFlutterCompositorModeRootRenderTarget;
   required_features |= kFlutterAvioExtensionFeatureTypedRenderTargetAcquisition;
+  if (required_features & kFlutterAvioExtensionFeatureSelectedTargetDamage) {
+    required_features |= kFlutterAvioExtensionFeaturePreSubmitFailure;
+  }
   const FlutterAvioExtensionFeatures exact_features =
       kFlutterAvioExtensionFeaturePerDisplayVsync |
       kFlutterAvioExtensionFeatureExplicitRenderCompletion |

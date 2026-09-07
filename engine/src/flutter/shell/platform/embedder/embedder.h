@@ -94,6 +94,7 @@ typedef uint64_t FlutterAvioExtensionFeatures;
   0x0000000000000200ULL
 #define kFlutterAvioExtensionFeatureRenderDeadline 0x0000000000000400ULL
 #define kFlutterAvioExtensionFeatureAtomicWindowPreviews 0x0000000000000800ULL
+#define kFlutterAvioExtensionFeaturePreSubmitFailure 0x0000000000001000ULL
 #define FLUTTER_AVIO_MAX_WINDOW_PREVIEWS 8u
 
 /// Hard transaction bound shared by retained scene collection and embedders.
@@ -2605,6 +2606,12 @@ typedef enum {
   /// every established C ABI enum value.
   kFlutterPresentRenderTargetStatusInvalidCompositorMaterials,
   kFlutterPresentRenderTargetStatusInvalidWindowPreviews,
+
+  /// Target attachment allocation failed before any GPU work was submitted.
+  /// The backing store is unchanged and reusable after collection. This is
+  /// an admission failure, not an uncertain in-flight raster failure.
+  /// Requires kFlutterAvioExtensionFeaturePreSubmitFailure.
+  kFlutterPresentRenderTargetStatusAllocationFailedBeforeSubmit,
 } FlutterPresentRenderTargetStatus;
 
 typedef enum {

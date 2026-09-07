@@ -57,7 +57,7 @@ TEST(EmbedderRenderTargetImpellerTest, MaterializesOnlyOnce) {
 
 // Exercise the real selected-target metadata and terminal paths. No GPU is
 // needed: a skipped target must never invoke its factory, and a failed factory
-// must terminalize as raster failure without falling into Slimpeller's fatal
+// must prove no submission without falling into Slimpeller's fatal
 // backend-switch path.
 void CheckDeferredTerminal(bool unchanged) {
   int creations = 0;
@@ -107,9 +107,16 @@ void CheckDeferredTerminal(bool unchanged) {
         EXPECT_EQ(opportunity, 73u);
         EXPECT_EQ(display, 11u);
         EXPECT_NE(backing, nullptr);
-        EXPECT_EQ(status, unchanged
-                              ? kFlutterPresentRenderTargetStatusNoVisualChange
-                              : kFlutterPresentRenderTargetStatusRasterFailed);
+        if (unchanged) {
+          EXPECT_EQ(status, kFlutterPresentRenderTargetStatusNoVisualChange);
+        } else {
+          // No render target existed, so no GPU write could have been
+          // submitted. RasterFailed makes the host quarantine a perfectly
+          // reusable slot.
+          EXPECT_EQ(
+              status,
+              kFlutterPresentRenderTargetStatusAllocationFailedBeforeSubmit);
+        }
         return true;
       });
   ExternalViewEmbedder& boundary = embedder;
@@ -152,7 +159,7 @@ TEST(EmbedderRenderTargetImpellerTest,
 }
 
 TEST(EmbedderRenderTargetImpellerTest,
-     AllocationFailureHasOneRasterFailureOutcome) {
+     AllocationFailureHasOneNoSubmissionOutcome) {
   CheckDeferredTerminal(false);
 }
 

@@ -64,6 +64,13 @@ need "real SceneBuilder preview regression coverage" \
   $F/lib/ui/compositing/avio_preview_scene_builder_unittests.cc \
   'AvioPreviewSceneBuilderPreservesNestedAndRetainedMetadata'
 
+need "typed pre-submit allocation failure" \
+  $F/shell/platform/embedder/embedder.h 'kFlutterPresentRenderTargetStatusAllocationFailedBeforeSubmit'
+need "pre-submit failure semantic negotiation" \
+  $F/shell/platform/embedder/embedder.cc 'Selected-target damage requires typed pre-submission failures'
+need "real Vulkan allocation refusal regression" \
+  $F/shell/platform/embedder/tests/embedder_vk_unittests.cc 'SelectedTargetBudgetRefusalPreservesExactCollectibleLease'
+
 echo "--- Exact frame opportunities ---"
 need "exact opportunity feature negotiation" \
   $F/shell/platform/embedder/embedder.h \
@@ -78,11 +85,11 @@ need "render deadline travels in exact vsync ABI" \
   $F/shell/platform/embedder/embedder.h 'uint64_t render_deadline_time_nanos'
 need "frame timing recorder retains the producer deadline" \
   $F/flow/frame_timings.h 'GetRenderDeadlineTime'
-need "raster trace reports exact deadline misses" \
-  $F/shell/common/rasterizer.cc 'AvioRenderDeadlineMiss'
-need "deadline miss traces require exact opportunity identity" \
-  $F/shell/common/rasterizer.cc \
-  'opportunity.has_value\(\) && raster_finish_time > render_deadline_time'
+# Commit 57cd5217 deliberately keeps allocation/deadline experiment probes
+# on the diagnostics branch. Main must retain deadline transport and recorder
+# semantics; the optional miss-trace emitter is not a production requirement.
+need "render deadline recorder regression" \
+  $F/flow/frame_timings_recorder_unittests.cc 'RecordVsyncPreservesRenderDeadline'
 need "engine-local opportunity conservation ledger" \
   $F/common/frame_opportunity.h 'class FrameOpportunityRegistry'
 need "exact returned-opportunity cancellation ABI" \

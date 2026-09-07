@@ -727,3 +727,16 @@ Notes:
   (Material decoupling — placeholders as of 2026-06), windowing API
   stabilization (`WidgetsBinding.windowingOwner` — future Avio shell
   integration point).
+
+## Deferred target admission recovery (2026-09-07)
+
+Selected-target materialization failure precedes GPU submission. Report the
+negotiated `AllocationFailedBeforeSubmit` terminal with its exact backing store
+instead of `RasterFailed`; otherwise a safety-correct host permanently
+quarantines an unchanged slot and eventually retries an exhausted grant. Hosts
+request `PreSubmitFailure`; selected-target initialization rejects hosts that
+do not understand this proof. Real raster failures retain their prior meaning.
+
+Focused tests force attachment-factory failure, assert one exact terminal and
+collection, and exhaust both sample modes of the six-entry Avio profile before
+releasing an outstanding lease. No GPU OOM or battery state is required.

@@ -192,7 +192,8 @@ static constexpr FlutterAvioExtensionFeatures kAvioSupportedFeatures =
     kFlutterAvioExtensionFeatureAtomicCompositorMaterials |
     kFlutterAvioExtensionFeatureTypedRenderTargetAcquisition |
     kFlutterAvioExtensionFeatureRenderDeadline |
-    kFlutterAvioExtensionFeatureAtomicWindowPreviews
+    kFlutterAvioExtensionFeatureAtomicWindowPreviews |
+    kFlutterAvioExtensionFeaturePreSubmitFailure
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && \
     defined(IMPELLER_SUPPORTS_RENDERING)
     | kFlutterAvioExtensionFeatureResourceLifecycleConfig
@@ -240,6 +241,12 @@ static const char* ValidateAvioExtensionRequest(
         kFlutterAvioExtensionFeatureExplicitRenderCompletion) == 0)) {
     return "Selected-target damage requires root targets and explicit render "
            "completion.";
+  }
+  if ((request->required_features &
+       kFlutterAvioExtensionFeatureSelectedTargetDamage) != 0 &&
+      (request->required_features &
+       kFlutterAvioExtensionFeaturePreSubmitFailure) == 0) {
+    return "Selected-target damage requires typed pre-submission failures.";
   }
   if ((request->required_features &
        kFlutterAvioExtensionFeatureViewVisibility) != 0 &&
@@ -1624,7 +1631,8 @@ namespace {
 std::shared_ptr<impeller::SwapchainTransientsVK> GetCachedSwapchainTransientsVK(
     const std::shared_ptr<impeller::Context>& context,
     const impeller::TextureDescriptor& desc,
-    bool enable_msaa) {
+    bool enable_msaa,
+    impeller::TransientsPoolRefusalVK* refusal) {
   if (!context ||
       context->GetBackendType() != impeller::Context::BackendType::kVulkan) {
     return nullptr;
@@ -1634,7 +1642,7 @@ std::shared_ptr<impeller::SwapchainTransientsVK> GetCachedSwapchainTransientsVK(
   if (!pool) {
     return nullptr;
   }
-  return pool->Acquire(desc, enable_msaa);
+  return pool->Acquire(desc, enable_msaa, refusal);
 }
 
 bool HasPreservedSelectedTargetContents(
@@ -1773,8 +1781,11 @@ MakeRenderTargetFromBackingStoreImpeller(
     // clip edge and every arbitrary path in the frame lands hard-edged. That
     // cost is paid by the whole frame, so the root pass asks for multisampling
     // first and treats partial repaint as the thing that gives way.
-    auto transients = GetCachedSwapchainTransientsVK(impeller_context, desc,
-                                                     /*enable_msaa=*/true);
+    impeller::TransientsPoolRefusalVK msaa_refusal;
+    impeller::TransientsPoolRefusalVK fallback_refusal;
+    auto transients =
+        GetCachedSwapchainTransientsVK(impeller_context, desc,
+                                       /*enable_msaa=*/true, &msaa_refusal);
     const bool multisampled = transients != nullptr;
     if (!multisampled) {
       // The transients budget could not seat a multisample reservation -- every
@@ -1782,14 +1793,25 @@ MakeRenderTargetFromBackingStoreImpeller(
       // frame single-sampled costs the frame its antialiasing; refusing to
       // render costs the frame entirely.
       transients = GetCachedSwapchainTransientsVK(impeller_context, desc,
-                                                  /*enable_msaa=*/false);
+                                                  /*enable_msaa=*/false,
+                                                  &fallback_refusal);
     }
     ReportRootPassSampleCount(multisampled);
 
     auto surface = impeller::SurfaceVK::WrapSwapchainImage(
         transients, wrapped_source, []() -> bool { return true; });
     if (!surface || !surface->IsValid()) {
-      FML_LOG(ERROR) << "Could not wrap Vulkan image as Impeller surface.";
+      FML_LOG(ERROR) << "Could not wrap Vulkan image as Impeller surface. "
+                     << "target=" << desc.size.width << "x" << desc.size.height
+                     << " msaa_refused=" << msaa_refusal.refused
+                     << " fallback_refused=" << fallback_refusal.refused
+                     << " invalid_footprint="
+                     << fallback_refusal.invalid_footprint
+                     << " entry_limit=" << fallback_refusal.entry_limit
+                     << " byte_limit=" << fallback_refusal.byte_limit
+                     << " entries=" << fallback_refusal.entries
+                     << " bytes=" << fallback_refusal.bytes
+                     << " requested_bytes=" << fallback_refusal.requested_bytes;
       return nullptr;
     }
 
@@ -1818,7 +1840,7 @@ MakeRenderTargetFromBackingStoreImpeller(
   if (!selected_target_damage) {
     // Legacy layer compositors cannot terminalize a deferred allocation
     // failure. Preserve their acquisition-time failure boundary; only the
-    // negotiated exact-target path may defer until it can report RasterFailed.
+    // negotiated exact-target path may defer and prove pre-submission failure.
     auto render_target = create_target();
     if (!render_target) {
       return nullptr;

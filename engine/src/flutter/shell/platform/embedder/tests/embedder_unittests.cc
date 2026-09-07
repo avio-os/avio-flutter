@@ -1110,6 +1110,23 @@ TEST_F(EmbedderTest, SelectedTargetDamageRequiresExplicitRenderCompletion) {
   EXPECT_FALSE(engine.is_valid());
 }
 
+TEST_F(EmbedderTest, SelectedTargetDamageRequiresPreSubmitFailureContract) {
+  auto& context = GetEmbedderContext<EmbedderTestContextSoftware>();
+  EmbedderConfigBuilder builder(context);
+  builder.SetSurface(DlISize(800, 600));
+  builder.SetRootRenderTargetCompositor(false);
+  FlutterAvioExtensionRequest request = {
+      .struct_size = sizeof(request),
+      .version = FLUTTER_AVIO_EXTENSION_VERSION,
+      .required_features =
+          kFlutterAvioExtensionFeatureRootRenderTarget |
+          kFlutterAvioExtensionFeatureExplicitRenderCompletion |
+          kFlutterAvioExtensionFeatureSelectedTargetDamage,
+  };
+  builder.GetProjectArgs().avio_extension_request = &request;
+  EXPECT_FALSE(builder.InitializeEngine().is_valid());
+}
+
 TEST_F(EmbedderTest, SelectedTargetDamageRequiresVulkanImpeller) {
   auto& context = GetEmbedderContext<EmbedderTestContextSoftware>();
   EmbedderConfigBuilder builder(context);

@@ -489,6 +489,82 @@ TEST_F(EmbedderTest, VulkanImpellerCompositorSkipsRootSurfaceAcquisition) {
 }
 
 TEST_F(EmbedderTest,
+       SelectedTargetBudgetRefusalPreservesExactCollectibleLease) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  EmbedderConfigBuilder builder(context);
+  builder.AddCommandLineArgument("--enable-impeller");
+  builder.SetDartEntrypoint("render_selected_target_ready");
+  builder.AddDartEntrypointArgument("render_gradient_retained");
+  fml::AutoResetWaitableEvent dart_ready;
+  context.AddNativeCallback(
+      "SignalNativeTest",
+      CREATE_NATIVE_ENTRY(
+          [&dart_ready](Dart_NativeArguments args) { dart_ready.Signal(); }));
+  builder.SetSurface(DlISize(800, 600));
+  builder.SetRootRenderTargetCompositor(
+      true, kExactSelectedTargetFeatures |
+                kFlutterAvioExtensionFeatureResourceLifecycleConfig);
+  builder.SetRenderTargetType(
+      EmbedderTestBackingStoreProducer::RenderTargetType::kVulkanImage);
+  // Force the real pool's byte-admission refusal before any target render.
+  // The external image still exists; only its transient attachments are denied.
+  FlutterAvioResourceLifecycleConfig resources = {
+      .struct_size = sizeof(resources),
+      .transient_max_entries = 6u,
+      .transient_max_bytes = 64u,
+      .pipeline_cache_policy = kFlutterAvioPipelineCacheDisabled,
+      .pipeline_cache_directory_fd = -1,
+  };
+  builder.GetProjectArgs().avio_resource_lifecycle_config = &resources;
+  SelectedTargetTestContext selected_target(context.GetCompositor());
+  builder.GetCompositor().user_data = &selected_target;
+  builder.GetCompositor().acquire_render_target_callback =
+      AcquireSelectedTarget;
+  builder.GetCompositor().collect_backing_store_callback =
+      [](const FlutterBackingStore* store, void* user_data) {
+        return reinterpret_cast<SelectedTargetTestContext*>(user_data)->Collect(
+            store);
+      };
+  builder.GetCompositor().present_render_target_callback =
+      [](const FlutterPresentRenderTargetInfo* info) {
+        return reinterpret_cast<SelectedTargetTestContext*>(info->user_data)
+            ->Present(*info);
+      };
+  fml::AutoResetWaitableEvent result_ready;
+  fml::AutoResetWaitableEvent collected;
+  context.GetCompositor().AddOnCollectRenderTargetCallback(
+      [&] { collected.Signal(); });
+  selected_target.on_result = [&](const FlutterPresentRenderTargetInfo& info) {
+    EXPECT_EQ(info.status,
+              kFlutterPresentRenderTargetStatusAllocationFailedBeforeSubmit);
+    EXPECT_NE(info.backing_store, nullptr);
+    if (info.backing_store && info.backing_store->content_state) {
+      EXPECT_EQ(info.backing_store->content_state->target_identifier, 7u);
+    }
+    result_ready.Signal();
+    return true;
+  };
+  auto engine = builder.LaunchEngine();
+  ASSERT_TRUE(engine.is_valid());
+  ASSERT_FALSE(dart_ready.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  FlutterWindowMetricsEvent event = {};
+  event.struct_size = sizeof(event);
+  event.width = 800;
+  event.height = 600;
+  event.pixel_ratio = 1.0;
+  for (int attempt = 0; attempt < 4; attempt++) {
+    ASSERT_EQ(FlutterEngineSendWindowMetricsEvent(engine.get(), &event),
+              kSuccess);
+    ASSERT_FALSE(result_ready.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+    ASSERT_FALSE(collected.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  }
+  engine.reset();
+  EXPECT_EQ(selected_target.create_count, 4u);
+  EXPECT_EQ(selected_target.collect_count, 4u);
+  EXPECT_EQ(selected_target.present_count, 4u);
+}
+
+TEST_F(EmbedderTest,
        SelectedTargetDamageReacquiresAndRepaintsExactRetainedTarget) {
   auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
 

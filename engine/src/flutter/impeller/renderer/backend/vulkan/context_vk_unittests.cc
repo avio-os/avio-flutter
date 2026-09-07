@@ -100,6 +100,40 @@ TEST(ContextVKTest, TransientsPoolDoesNotReuseLeasedEntries) {
   EXPECT_EQ(third.get(), first_raw);
 }
 
+// Reproduce the shipped Avio host profile without allocating GPU memory.
+// Slower GPU completion keeps these texture leases alive longer; no OOM,
+// broken driver, or battery policy is needed to exhaust the six-entry cap.
+TEST(ContextVKTest, AvioSixEntryProfileRefusesBothSamplesUntilLeaseCompletes) {
+  TextureDescriptor desc;
+  desc.size = ISize(64, 64);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+  TransientsPoolVK pool(std::weak_ptr<Context>(), PixelFormat::kD24UnormS8Uint,
+                        false, {6u, 256u * 1024u * 1024u, false});
+  std::vector<std::shared_ptr<SwapchainTransientsVK>> leases;
+  for (size_t i = 0; i < 6u; i++) {
+    auto lease = pool.Acquire(desc, true);
+    ASSERT_TRUE(lease);
+    leases.push_back(std::move(lease));
+  }
+  for (size_t frame = 0; frame < 100u; frame++) {
+    TransientsPoolRefusalVK refusal;
+    EXPECT_FALSE(pool.Acquire(desc, true, &refusal));
+    EXPECT_TRUE(refusal.refused);
+    EXPECT_TRUE(refusal.entry_limit);
+    EXPECT_FALSE(refusal.byte_limit);
+    EXPECT_FALSE(refusal.invalid_footprint);
+    EXPECT_EQ(refusal.entries, 6u);
+    EXPECT_FALSE(pool.Acquire(desc, false, &refusal));
+    EXPECT_TRUE(refusal.entry_limit);
+    EXPECT_FALSE(refusal.byte_limit);
+    EXPECT_EQ(pool.GetUsage().entries, 6u);
+  }
+  leases.pop_back();
+  EXPECT_TRUE(pool.Acquire(desc, true));
+  leases.clear();
+  EXPECT_EQ(pool.TrimIdle().after.entries, 0u);
+}
+
 TEST(ContextVKTest, TransientsPoolNeverEvictsLeasedEntryToExceedLimit) {
   TextureDescriptor first_desc;
   first_desc.size = ISize(64, 64);
@@ -139,7 +173,11 @@ TEST(ContextVKTest, TransientsPoolRejectsEntryLargerThanByteBudget) {
                             .allow_environment_override = false,
                         });
 
-  EXPECT_FALSE(pool.Acquire(desc, /*enable_msaa=*/true));
+  TransientsPoolRefusalVK refusal;
+  EXPECT_FALSE(pool.Acquire(desc, /*enable_msaa=*/true, &refusal));
+  EXPECT_TRUE(refusal.byte_limit);
+  EXPECT_FALSE(refusal.entry_limit);
+  EXPECT_FALSE(refusal.invalid_footprint);
   EXPECT_EQ(pool.GetUsage(), ResourceCacheUsage{});
 }
 

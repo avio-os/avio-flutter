@@ -19,6 +19,18 @@
 
 namespace impeller {
 
+// Exact refusal witness, captured under the pool lock. This distinguishes
+// bounded admission pressure from driver-side texture allocation failure.
+struct TransientsPoolRefusalVK {
+  bool refused = false;
+  bool invalid_footprint = false;
+  bool entry_limit = false;
+  bool byte_limit = false;
+  size_t entries = 0;
+  size_t bytes = 0;
+  size_t requested_bytes = 0;
+};
+
 struct TransientsPoolLimitsVK {
   size_t max_entries;
   size_t max_bytes;
@@ -99,8 +111,10 @@ class TransientsPoolVK {
   ///         color descriptor, constructing one on miss. The caller may
   ///         hold the returned shared_ptr beyond a single render; the
   ///         pool retains its own strong reference until eviction.
-  std::shared_ptr<SwapchainTransientsVK> Acquire(const TextureDescriptor& desc,
-                                                 bool enable_msaa);
+  std::shared_ptr<SwapchainTransientsVK> Acquire(
+      const TextureDescriptor& desc,
+      bool enable_msaa,
+      TransientsPoolRefusalVK* refusal = nullptr);
 
   /// @brief  Drop all cached entries. Must be called before the owning
   ///         `ResourceManagerVK` and `TimelineCompletionVK` are destroyed so

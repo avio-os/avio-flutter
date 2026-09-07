@@ -54,7 +54,11 @@ void TransientsPoolVK::Reset() {
 
 std::shared_ptr<SwapchainTransientsVK> TransientsPoolVK::Acquire(
     const TextureDescriptor& desc,
-    bool enable_msaa) {
+    bool enable_msaa,
+    TransientsPoolRefusalVK* refusal) {
+  if (refusal) {
+    *refusal = {};
+  }
   Key key{
       .width = static_cast<int>(desc.size.width),
       .height = static_cast<int>(desc.size.height),
@@ -81,6 +85,19 @@ std::shared_ptr<SwapchainTransientsVK> TransientsPoolVK::Acquire(
   // outlast the owning ContextVK.
   const auto footprint = ComputeFootprint(desc, enable_msaa);
   if (!footprint.has_value() || !ReserveFor(*footprint)) {
+    if (refusal) {
+      *refusal = {
+          .refused = true,
+          .invalid_footprint = !footprint.has_value(),
+          .entry_limit = lru_.size() >= max_entries_,
+          .byte_limit =
+              footprint.has_value() && (*footprint > max_bytes_ ||
+                                        total_bytes_ > max_bytes_ - *footprint),
+          .entries = lru_.size(),
+          .bytes = total_bytes_,
+          .requested_bytes = footprint.value_or(0u),
+      };
+    }
     return nullptr;
   }
   auto transients =

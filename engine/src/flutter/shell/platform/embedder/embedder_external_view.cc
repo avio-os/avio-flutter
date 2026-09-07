@@ -145,9 +145,10 @@ EmbedderExternalView::RenderResult EmbedderExternalView::Render(
 #ifdef IMPELLER_SUPPORTS_RENDERING
   auto* impeller_target = render_target.GetImpellerRenderTarget();
   if (!impeller_target && render_target.GetAiksContext()) {
-    // A deferred attachment failure is an ordinary raster failure, not a
-    // request to switch render backends (which is fatal in Slimpeller).
-    return RenderResult::kFailed;
+    // Materialization happens before any target render or queue submission.
+    // Preserve that proof: a generic raster failure would force the host to
+    // quarantine this unchanged backing store forever.
+    return RenderResult::kAllocationFailedBeforeSubmit;
   }
   if (impeller_target) {
     auto aiks_context = render_target.GetAiksContext();
