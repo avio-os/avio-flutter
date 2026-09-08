@@ -1811,8 +1811,17 @@ enum AvioCoverageMode {
   /// compositor supplies its backdrop.
   ///
   /// Impeller converts the operation's combined authored opacity and edge or
-  /// mask coverage once in its existing shader. This preserves display-space
-  /// UI ink without adding another surface, layer, or compositor pass.
+  /// mask coverage once. Analytic masks use their shader directly; geometric
+  /// paths resolve multisample coverage first. A layer applies the policy to
+  /// its completed mask, after its opacity and filters. Inner paints of such
+  /// a layer should use [platformDefault]. The layer suppresses inner platform
+  /// contrast adjustments and owns the single final coverage conversion.
+  /// Geometric draws and layers use this policy with [BlendMode.srcOver]; other
+  /// blend modes retain platform coverage and their original geometric extent.
+  ///
+  /// This is an optical ink policy, not exact encoded-space composition against
+  /// an arbitrary unseen background. General paths may allocate a bounded
+  /// intermediate mask. It adds no compositor pass.
   externalLinearBackdrop,
 }
 

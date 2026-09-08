@@ -89,6 +89,8 @@ class Contents {
     int32_t mip_count = 1;
     std::string_view label = "Snapshot";
     int32_t coverage_expansion = 1;
+    // Preserve physical sample positions when resolving coverage masks.
+    bool pixel_aligned = false;
   };
 
   //----------------------------------------------------------------------------

@@ -32,6 +32,7 @@
 #include "impeller/entity/contents/color_source_contents.h"
 #include "impeller/entity/contents/complex_rse_contents.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/contents/external_coverage_contents.h"
 #include "impeller/entity/contents/filters/filter_contents.h"
 #include "impeller/entity/contents/framebuffer_blend_contents.h"
 #include "impeller/entity/contents/shadow_vertices_contents.h"
@@ -132,8 +133,15 @@ static std::shared_ptr<Contents> CreateContentsForSubpassTarget(
   contents->SetOpacity(paint.color.alpha);
   contents->SetDeferApplyingOpacity(true);
 
-  return paint.WithFiltersForSubpassTarget(renderer, std::move(contents),
-                                           effect_transform);
+  Paint filter_paint = paint;
+  if (!paint.image_filter && !paint.color_filter && !paint.invert_colors) {
+    // A layer is already a resolved mask. Apply the transfer during its
+    // normal restore draw instead of allocating a second offscreen.
+    contents->SetCoverageMode(paint.coverage_mode);
+    filter_paint.coverage_mode = flutter::DlCoverageMode::kPlatformDefault;
+  }
+  return filter_paint.WithFiltersForSubpassTarget(renderer, std::move(contents),
+                                                  effect_transform);
 }
 
 static const constexpr RenderTarget::AttachmentConfig kDefaultStencilConfig =
@@ -594,13 +602,24 @@ bool Canvas::AttemptDrawAntialiasedCircle(const Point& center,
 
   auto contents =
       CircleContents::Make(std::move(geom), paint.color, is_stroked);
-  entity.SetContents(std::move(contents));
+  if (!transform_stack_.back().raw_coverage &&
+      paint.blend_mode == BlendMode::kSrcOver &&
+      paint.coverage_mode == flutter::DlCoverageMode::kExternalLinearBackdrop) {
+    entity.SetContents(
+        std::make_shared<ExternalCoverageContents>(std::move(contents)));
+  } else {
+    entity.SetContents(std::move(contents));
+  }
   AddRenderEntityToCurrentPass(entity);
 
   return true;
 }
 
 bool Canvas::IsShadowBlurDrawOperation(const Paint& paint) {
+  // External coverage must be applied to the completed blurred mask.
+  if (paint.coverage_mode == flutter::DlCoverageMode::kExternalLinearBackdrop) {
+    return false;
+  }
   if (paint.style != Paint::Style::kFill) {
     return false;
   }
@@ -1454,7 +1473,10 @@ void Canvas::DrawImageRect(const std::shared_ptr<Texture>& image,
                                         SourceRectConstraint::kStrict);
   texture_contents->SetSamplerDescriptor(sampler);
   texture_contents->SetOpacity(paint.color.alpha);
-  texture_contents->SetCoverageMode(paint.coverage_mode);
+  texture_contents->SetCoverageMode(
+      transform_stack_.back().raw_coverage
+          ? flutter::DlCoverageMode::kPlatformDefault
+          : paint.coverage_mode);
   texture_contents->SetDeferApplyingOpacity(paint.HasColorFilter());
 
   Entity entity;
@@ -1677,6 +1699,7 @@ void Canvas::Save(uint32_t total_content_depth) {
   entry.transform = transform_stack_.back().transform;
   entry.clip_depth = current_depth_ + total_content_depth;
   entry.distributed_opacity = transform_stack_.back().distributed_opacity;
+  entry.raw_coverage = transform_stack_.back().raw_coverage;
   FML_DCHECK(entry.clip_depth <= transform_stack_.back().clip_depth)
       << entry.clip_depth << " <=? " << transform_stack_.back().clip_depth
       << " after allocating " << total_content_depth;
@@ -1724,7 +1747,7 @@ std::optional<Rect> Canvas::GetLocalCoverageLimit() {
       Rect::MakeSize(render_target_.GetRenderTargetSize()));
 }
 
-void Canvas::SaveLayer(const Paint& paint,
+void Canvas::SaveLayer(const Paint& requested_paint,
                        std::optional<Rect> bounds,
                        const flutter::DlImageFilter* backdrop_filter,
                        ContentBoundsPromise bounds_promise,
@@ -1732,6 +1755,11 @@ void Canvas::SaveLayer(const Paint& paint,
                        bool can_distribute_opacity,
                        std::optional<int64_t> backdrop_id) {
   TRACE_EVENT0("flutter", "Canvas::saveLayer");
+  Paint paint = requested_paint;
+  if (transform_stack_.back().raw_coverage ||
+      paint.blend_mode != BlendMode::kSrcOver) {
+    paint.coverage_mode = flutter::DlCoverageMode::kPlatformDefault;
+  }
   if (IsSkipping()) {
     return SkipUntilMatchingRestore(total_content_depth);
   }
@@ -1772,6 +1800,19 @@ void Canvas::SaveLayer(const Paint& paint,
 
   auto subpass_coverage = maybe_subpass_coverage.value();
 
+  const bool raw_coverage =
+      transform_stack_.back().raw_coverage ||
+      paint.coverage_mode == flutter::DlCoverageMode::kExternalLinearBackdrop;
+  if (raw_coverage) {
+    // Analytic AA uses derivatives evaluated on 2x2 fragment quads. Retain
+    // their physical origin as well as pixel phase when changing targets.
+    subpass_coverage =
+        Rect::MakeLTRB(std::floor(subpass_coverage.GetLeft() / 2) * 2,
+                       std::floor(subpass_coverage.GetTop() / 2) * 2,
+                       std::ceil(subpass_coverage.GetRight() / 2) * 2,
+                       std::ceil(subpass_coverage.GetBottom() / 2) * 2);
+  }
+
   // When an image filter is present, clamp to avoid flicking due to nearest
   // sampled image. For other cases, round out to ensure than any geometry is
   // not cut off.
@@ -1783,7 +1824,7 @@ void Canvas::SaveLayer(const Paint& paint,
   ISize subpass_size;
   bool did_round_out = false;
   Point coverage_origin_adjustment = Point{0, 0};
-  if (paint.image_filter) {
+  if (paint.image_filter && !raw_coverage) {
     subpass_size = ISize(subpass_coverage.GetSize());
   } else {
     did_round_out = true;
@@ -1939,6 +1980,9 @@ void Canvas::SaveLayer(const Paint& paint,
   entry.clip_height = transform_stack_.back().clip_height;
   entry.rendering_mode = Entity::RenderingMode::kSubpassAppendSnapshotTransform;
   entry.did_round_out = did_round_out;
+  entry.raw_coverage =
+      transform_stack_.back().raw_coverage ||
+      paint.coverage_mode == flutter::DlCoverageMode::kExternalLinearBackdrop;
   transform_stack_.emplace_back(entry);
 
   // Start non-collapsed subpasses with a fresh clip coverage stack limited by
@@ -2120,7 +2164,9 @@ bool Canvas::AttemptBlurredTextOptimization(
     const std::shared_ptr<TextContents>& text_contents,
     Entity& entity,
     const Paint& paint) {
-  if (!paint.mask_blur_descriptor.has_value() ||  //
+  // Raw masks cannot share cached shadows with optically adjusted text.
+  if (transform_stack_.back().raw_coverage ||
+      !paint.mask_blur_descriptor.has_value() ||  //
       paint.image_filter != nullptr ||            //
       paint.color_filter != nullptr ||            //
       paint.invert_colors) {
@@ -2187,6 +2233,7 @@ void Canvas::DrawTextFrame(const std::shared_ptr<TextFrame>& text_frame,
 
   auto text_contents = std::make_shared<TextContents>();
   text_contents->SetTextFrame(text_frame);
+  text_contents->SetRawCoverage(transform_stack_.back().raw_coverage);
   text_contents->SetPosition(position);
   text_contents->SetScreenTransform(GetCurrentTransform());
   text_contents->SetForceTextColor(paint.mask_blur_descriptor.has_value());
@@ -2226,14 +2273,27 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
   }
   auto geometry = std::make_unique<UberSDFGeometry>(params);
   auto contents = UberSDFContents::Make(params, std::move(geometry));
-  contents->SetCoverageMode(paint.coverage_mode);
+  const bool raw_coverage = transform_stack_.back().raw_coverage;
+  const auto coverage_mode =
+      raw_coverage ? flutter::DlCoverageMode::kExternalLinearBackdrop
+      : paint.blend_mode == BlendMode::kSrcOver
+          ? paint.coverage_mode
+          : flutter::DlCoverageMode::kPlatformDefault;
+  contents->SetCoverageMode(coverage_mode);
+  const bool defer_coverage = raw_coverage || paint.color_source ||
+                              paint.color_filter || paint.invert_colors ||
+                              paint.image_filter ||
+                              paint.mask_blur_descriptor.has_value();
+  contents->SetDeferCoverageTransform(defer_coverage);
   const Geometry* geom = contents->GetGeometry();
 
   if (paint.color_source) {
     // UberSDF doesn't perform things like gradients so we blend the SDF
     // with the color source.
+    Paint source_paint = paint;
+    source_paint.coverage_mode = flutter::DlCoverageMode::kPlatformDefault;
     std::shared_ptr<ColorSourceContents> color_source_contents =
-        paint.CreateContents(renderer_, geom, shape_transform);
+        source_paint.CreateContents(renderer_, geom, shape_transform);
     std::shared_ptr<Contents> final_contents = ColorFilterContents::MakeBlend(
         BlendMode::kSrcIn, {FilterInput::Make(std::move(contents)),
                             FilterInput::Make(color_source_contents)});
@@ -2245,7 +2305,14 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
                                             /*override_contents=*/
                                             std::move(final_contents));
   } else {
-    AddRenderEntityWithFiltersToCurrentPass(entity, geom, paint, reuse_depth,
+    Paint final_paint = paint;
+    if (!defer_coverage) {
+      // The analytic shader already owns the final mask and performs the
+      // transfer directly. Never wrap it in a second conversion.
+      final_paint.coverage_mode = flutter::DlCoverageMode::kPlatformDefault;
+    }
+    AddRenderEntityWithFiltersToCurrentPass(entity, geom, final_paint,
+                                            reuse_depth,
                                             /*override_contents=*/
                                             std::move(contents));
   }
@@ -2254,9 +2321,24 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
 void Canvas::AddRenderEntityWithFiltersToCurrentPass(
     Entity& entity,
     const Geometry* geometry,
-    const Paint& paint,
+    const Paint& requested_paint,
     bool reuse_depth,
     std::shared_ptr<Contents> override_contents) {
+  const bool resolve_coverage =
+      !transform_stack_.back().raw_coverage &&
+      requested_paint.blend_mode == BlendMode::kSrcOver &&
+      requested_paint.coverage_mode ==
+          flutter::DlCoverageMode::kExternalLinearBackdrop;
+  Paint paint = requested_paint;
+  // Image color sources and filters must produce an unconverted mask here.
+  paint.coverage_mode = flutter::DlCoverageMode::kPlatformDefault;
+  auto submit = [&]() {
+    if (resolve_coverage) {
+      entity.SetContents(
+          std::make_shared<ExternalCoverageContents>(entity.GetContents()));
+    }
+    AddRenderEntityToCurrentPass(entity, reuse_depth);
+  };
   std::shared_ptr<ColorSourceContents> color_source_contents;
   std::shared_ptr<Contents> contents;
   if (override_contents) {
@@ -2269,7 +2351,7 @@ void Canvas::AddRenderEntityWithFiltersToCurrentPass(
   if (!paint.color_filter && !paint.invert_colors && !paint.image_filter &&
       !paint.mask_blur_descriptor.has_value()) {
     entity.SetContents(std::move(contents));
-    AddRenderEntityToCurrentPass(entity, reuse_depth);
+    submit();
     return;
   }
 
@@ -2303,7 +2385,7 @@ void Canvas::AddRenderEntityWithFiltersToCurrentPass(
         paint, renderer_, geometry, color_source_contents, needs_color_filter,
         &out_rect);
     entity.SetContents(std::move(filter));
-    AddRenderEntityToCurrentPass(entity, reuse_depth);
+    submit();
     return;
   }
 
@@ -2332,12 +2414,12 @@ void Canvas::AddRenderEntityWithFiltersToCurrentPass(
                   FilterInput::Make(std::move(contents_copy)));
     filter->SetRenderingMode(Entity::RenderingMode::kDirect);
     entity.SetContents(filter);
-    AddRenderEntityToCurrentPass(entity, reuse_depth);
+    submit();
     return;
   }
 
   entity.SetContents(std::move(contents_copy));
-  AddRenderEntityToCurrentPass(entity, reuse_depth);
+  submit();
 }
 
 void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {

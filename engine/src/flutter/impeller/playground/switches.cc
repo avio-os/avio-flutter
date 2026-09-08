@@ -22,6 +22,7 @@ PlaygroundSwitches::PlaygroundSwitches(const fml::CommandLine& args) {
   }
   enable_vulkan_validation = args.HasOption("enable_vulkan_validation");
   use_swiftshader = args.HasOption("use_swiftshader");
+  flags.use_sdfs = args.HasOption("use_sdfs");
   use_angle = args.HasOption("use_angle");
 #if FML_OS_MACOSX
   // OpenGL on macOS is busted and deprecated. Use Angle there by default.

@@ -61,6 +61,8 @@ struct CanvasStackEntry {
   // Whether subpass coverage was rounded out to pixel coverage, or if false
   // truncated.
   bool did_round_out = false;
+  // Optical transfer belongs to the enclosing external saveLayer restore.
+  bool raw_coverage = false;
 };
 
 enum class PointStyle {

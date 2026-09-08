@@ -30,6 +30,9 @@ class TextContents final : public Contents {
 
   void SetColor(Color color);
 
+  // Bypass both platform contrast and external transfer inside a mask layer.
+  void SetRawCoverage(bool value) { raw_coverage_ = value; }
+
   /// @brief Force the text color to apply to the rendered glyphs, even if those
   ///        glyphs are bitmaps.
   ///
@@ -109,6 +112,7 @@ class TextContents final : public Contents {
   Point position_;
   Matrix screen_transform_;
   bool force_text_color_ = false;
+  bool raw_coverage_ = false;
   Color color_;
   GlyphProperties properties_;
 

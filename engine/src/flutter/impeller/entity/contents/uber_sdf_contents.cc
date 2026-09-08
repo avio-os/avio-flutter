@@ -90,6 +90,7 @@ bool UberSDFContents::Render(const ContentContext& renderer,
   frag_info.circle_center_right = params_.circle_center_right;
   frag_info.superellipse_scale = params_.superellipse_scale;
   frag_info.radii = params_.radii;
+  frag_info.defer_coverage_transform = defer_coverage_transform_ ? 1.0f : 0.0f;
   frag_info.external_linear_backdrop =
       coverage_mode_ == flutter::DlCoverageMode::kExternalLinearBackdrop ? 1.0f
                                                                          : 0.0f;

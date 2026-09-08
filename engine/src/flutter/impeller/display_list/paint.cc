@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "impeller/display_list/paint.h"
+#include "impeller/entity/contents/external_coverage_contents.h"
 
 #include "impeller/display_list/dl_image_impeller.h"
 
@@ -307,6 +308,9 @@ std::shared_ptr<Contents> Paint::WithFiltersForSubpassTarget(
     input = image_filter;
   }
   input = WithColorFilter(input, ColorFilterContents::AbsorbOpacity::kYes);
+  if (coverage_mode == flutter::DlCoverageMode::kExternalLinearBackdrop) {
+    input = std::make_shared<ExternalCoverageContents>(std::move(input));
+  }
   return input;
 }
 

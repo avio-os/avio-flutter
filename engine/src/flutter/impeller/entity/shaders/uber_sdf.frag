@@ -29,6 +29,7 @@ uniform FragInfo {
   vec2 superellipse_scale;
   vec4 radii;
   float external_linear_backdrop;
+  float defer_coverage_transform;
 }
 frag_info;
 
@@ -295,6 +296,8 @@ void main() {
 
   frag_color = vec4(frag_info.color.rgb, frag_info.color.a * alpha);
   frag_color = IPPremultiply(frag_color);
-  frag_color = IPApplyExternalLinearBackdropCoverage(
-      frag_color, frag_info.external_linear_backdrop);
+  if (frag_info.defer_coverage_transform < 0.5) {
+    frag_color = IPApplyExternalLinearBackdropCoverage(
+        frag_color, frag_info.external_linear_backdrop);
+  }
 }

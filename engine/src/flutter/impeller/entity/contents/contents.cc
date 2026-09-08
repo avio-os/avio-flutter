@@ -81,6 +81,13 @@ std::optional<Snapshot> Contents::RenderToSnapshot(
     }
   }
 
+  if (options.pixel_aligned) {
+    // Preserve derivative quads used by analytic AA, not only pixel centers.
+    coverage = Rect::MakeLTRB(std::floor(coverage->GetLeft() / 2) * 2,
+                              std::floor(coverage->GetTop() / 2) * 2,
+                              std::ceil(coverage->GetRight() / 2) * 2,
+                              std::ceil(coverage->GetBottom() / 2) * 2);
+  }
   ISize subpass_size = ISize::Ceil(coverage->GetSize());
   fml::StatusOr<RenderTarget> render_target = renderer.MakeSubpass(
       options.label, subpass_size, command_buffer,

@@ -288,7 +288,8 @@ class DisplayListOpFlags : DisplayListFlags {
       kUsesAlpha |        //
       kUsesBlend |        //
       kUsesColorFilter |  //
-      kUsesImageFilter    //
+      kUsesImageFilter |  //
+      kUsesCoverageMode   //
   };
   static constexpr DisplayListAttributeFlags kDrawColorFlags{
       kFloodsSurface |  //

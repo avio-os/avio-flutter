@@ -304,11 +304,15 @@ bool TextContents::Render(const ContentContext& renderer,
   frag_info.use_text_color = force_text_color_ ? 1.0 : 0.0;
   frag_info.text_color = ToVector(color.Premultiply());
   frag_info.is_color_glyph = type == GlyphAtlas::Type::kColorBitmap;
-  frag_info.text_contrast = ComputeTextContrast(
-      color, frame_->GetCoverageMode(), frame_->GetEnableGammaCorrection());
+  frag_info.text_contrast =
+      raw_coverage_ ? 1.0f
+                    : ComputeTextContrast(color, frame_->GetCoverageMode(),
+                                          frame_->GetEnableGammaCorrection());
   frag_info.external_linear_backdrop =
-      frame_->GetCoverageMode() == CoverageMode::kExternalLinearBackdrop ? 1.0f
-                                                                         : 0.0f;
+      !raw_coverage_ &&
+              frame_->GetCoverageMode() == CoverageMode::kExternalLinearBackdrop
+          ? 1.0f
+          : 0.0f;
 
   FS::BindFragInfo(
       pass, renderer.GetTransientsDataBuffer().EmplaceUniform(frag_info));
