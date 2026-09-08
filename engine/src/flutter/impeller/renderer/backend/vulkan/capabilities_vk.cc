@@ -352,6 +352,16 @@ CapabilitiesVK::GetEnabledDeviceExtensions(
 #ifdef FML_OS_LINUX
         auto name = GetExtensionName(ext);
         if (exts.find(name) != exts.end()) {
+          // DRM modifiers require image-format lists on the Vulkan 1.1
+          // instance used by standalone Impeller contexts. Advertised support
+          // for the modifier alone is not a valid device extension set.
+          if (ext ==
+              OptionalLinuxDeviceExtensionVK::kEXTImageDrmFormatModifier) {
+            if (exts.count(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME) == 0) {
+              return true;
+            }
+            enabled.push_back(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
+          }
           enabled.push_back(name);
         }
 #endif  //  FML_OS_LINUX
