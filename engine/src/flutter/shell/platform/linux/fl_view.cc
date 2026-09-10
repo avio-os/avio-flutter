@@ -526,7 +526,7 @@ static void realize_cb(FlView* self) {
   if (self->view_id != flutter::kFlutterImplicitViewId) {
     self->visibility_monitor = fl_view_visibility_monitor_new(
         self->engine, self->view_id, GTK_WIDGET(self),
-        GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(self))));
+        GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(self))), self->renderer);
     setup_cursor(self);
     return;
   }
@@ -554,7 +554,7 @@ static void realize_cb(FlView* self) {
 
   self->visibility_monitor = fl_view_visibility_monitor_new(
       self->engine, self->view_id, GTK_WIDGET(self),
-      GTK_WINDOW(toplevel_window));
+      GTK_WINDOW(toplevel_window), self->renderer);
   setup_cursor(self);
 
   handle_geometry_changed(self);

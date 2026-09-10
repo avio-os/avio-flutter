@@ -168,3 +168,10 @@ void fl_view_renderer_notify_frame(FlViewRenderer* self) {
     g_signal_emit(self, fl_view_renderer_signals[SIGNAL_FIRST_FRAME], 0);
   }
 }
+
+gboolean fl_view_renderer_has_first_frame(FlViewRenderer* self) {
+  g_return_val_if_fail(FL_IS_VIEW_RENDERER(self), FALSE);
+  const auto* priv = static_cast<FlViewRendererPrivate*>(
+      fl_view_renderer_get_instance_private(self));
+  return priv->have_first_frame;
+}

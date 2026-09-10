@@ -114,6 +114,11 @@ void fl_view_renderer_notify_compositor_materials(FlViewRenderer* renderer);
  */
 void fl_view_renderer_notify_frame(FlViewRenderer* renderer);
 
+// GTK-thread query of the renderer's retained first drawable-frame receipt.
+// This remains true across view unmap/re-realize and is set before first-frame
+// signal handlers run.
+gboolean fl_view_renderer_has_first_frame(FlViewRenderer* renderer);
+
 G_END_DECLS
 
 #endif  // FLUTTER_SHELL_PLATFORM_LINUX_FL_VIEW_RENDERER_H_

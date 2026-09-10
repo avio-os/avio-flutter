@@ -8,6 +8,7 @@
 #include <gtk/gtk.h>
 
 #include "flutter/shell/platform/linux/fl_engine_private.h"
+#include "flutter/shell/platform/linux/fl_view_renderer.h"
 
 G_BEGIN_DECLS
 
@@ -19,12 +20,16 @@ G_DECLARE_FINAL_TYPE(FlViewVisibilityMonitor,
 
 // Call after engine startup and view registration, while the widget is
 // realized. Toolkit render relevance is per view and independent of application
-// lifecycle and input focus. Destroy the monitor before removing the view from
-// the engine.
-FlViewVisibilityMonitor* fl_view_visibility_monitor_new(FlEngine* engine,
-                                                        FlutterViewId view_id,
-                                                        GtkWidget* view,
-                                                        GtkWindow* window);
+// lifecycle and input focus. A cold renderer may produce its first drawable
+// frame while unmapped so a first-frame handler can show its window. Its actual
+// renderer receipt then restores normal mapped/window relevance, even if
+// hidden. Destroy the monitor before removing the view from the engine.
+FlViewVisibilityMonitor* fl_view_visibility_monitor_new(
+    FlEngine* engine,
+    FlutterViewId view_id,
+    GtkWidget* view,
+    GtkWindow* window,
+    FlViewRenderer* renderer);
 
 G_END_DECLS
 

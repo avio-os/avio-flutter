@@ -419,6 +419,16 @@ GTK Wayland reports xdg_toplevel suspended as FULLY_OBSCURED, including minimize
 windows, without necessarily reporting ICONIFIED. Partial occlusion and loss of
 focus stay renderable. This bridge does not change Dart application lifecycle.
 
+A realized but unmapped cold renderer retains permission to produce its first
+actual drawable frame, because the stock GTK runner shows its window from
+FlView's first-frame signal. The existing renderer-owned have_first_frame
+receipt ends this bootstrap permission before first-frame handlers run; if the
+window stays hidden it is then suspended. Monitor replacement/re-realization
+queries that retained receipt, so it does not grant a second bootstrap. Explicit
+compositor occlusion or iconification still suppresses cold rendering, and
+monitor disposal always suspends. No timer or guessed ever-visible state owns
+this boundary.
+
 When the last renderable view becomes hidden, the raster thread trims only already-idle
 Impeller resources. Dart timers and application policy remain controlled by
 Avio's separate typed shell lifecycle channel, so the engine never infers
