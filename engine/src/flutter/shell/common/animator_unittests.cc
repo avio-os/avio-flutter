@@ -66,16 +66,24 @@ class ManualDisplayVsyncWaiter final : public VsyncWaiter {
   }
 
   size_t request_count() const { return request_count_; }
+  size_t display_request_count(DisplayId display) const {
+    const auto found = display_request_counts_.find(display);
+    return found == display_request_counts_.end() ? 0 : found->second;
+  }
 
   // |VsyncWaiter|
   bool SupportsPerDisplayVsync() const override { return true; }
 
  protected:
   void AwaitVSync() override { request_count_++; }
-  void AwaitVSync(DisplayId) override { request_count_++; }
+  void AwaitVSync(DisplayId display) override {
+    request_count_++;
+    display_request_counts_[display]++;
+  }
 
  private:
   size_t request_count_ = 0;
+  std::map<DisplayId, size_t> display_request_counts_;
 };
 
 /// A waiter with no per-display support, matching every stock platform waiter
@@ -1099,6 +1107,236 @@ TEST_F(ShellTest, UnhomedViewsKeepTheGlobalFrameClockInPerDisplayMode) {
   });
   PostTaskSync(task_runners.GetUITaskRunner(), [] {});
   PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+TEST_F(ShellTest, GlobalVisibilitySettlesAdmittedBatonAndRestoresOnce) {
+  FakeAnimatorDelegate delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::unique_ptr<Animator> animator;
+  GlobalOnlyVsyncWaiter* waiter = nullptr;
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    auto owned_waiter = std::make_unique<GlobalOnlyVsyncWaiter>(task_runners);
+    waiter = owned_waiter.get();
+    animator = std::make_unique<Animator>(delegate, task_runners,
+                                          std::move(owned_waiter));
+    animator->AddDisplay(31, 60);
+    EXPECT_TRUE(animator->RegisterView(0));
+    EXPECT_FALSE(animator->RegisterView(0));
+    EXPECT_FALSE(animator->IsPerDisplayMode());
+    animator->RequestFrame();
+    // Hide before the posted AwaitVSync task runs. The acquired semaphore and
+    // eventual legacy baton still have exactly one terminal callback.
+    EXPECT_TRUE(
+        animator->SetViewVisibility(0, Animator::ViewVisibility::kSuspended));
+    animator->RequestFrame();
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_EQ(waiter->request_count(), 1u);
+    EXPECT_CALL(delegate, OnAnimatorBeginFrame).Times(0);
+    waiter->Fire();
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  ::testing::Mock::VerifyAndClearExpectations(&delegate);
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    animator->RequestFrame();
+    EXPECT_EQ(waiter->request_count(), 1u);
+    animator->SetViewVisibility(0, Animator::ViewVisibility::kVisible);
+    animator->SetViewVisibility(0, Animator::ViewVisibility::kVisible);
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_EQ(waiter->request_count(), 2u);
+    // Hide and restore after admission, before this second baton returns.
+    animator->SetViewVisibility(0, Animator::ViewVisibility::kObscured);
+    animator->SetViewVisibility(0, Animator::ViewVisibility::kVisible);
+    EXPECT_CALL(delegate, OnAnimatorBeginFrame).Times(1);
+    waiter->Fire();
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_EQ(waiter->request_count(), 2u);
+    animator->RequestFrame();
+    animator->RequestFrame();
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_EQ(waiter->request_count(), 3u);
+    animator->SetViewVisibility(0, Animator::ViewVisibility::kSuspended);
+    waiter->Fire();
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+TEST_F(ShellTest, GlobalVisibilityFiltersNewAndCachedTreesForVisibleSibling) {
+  class CachedDelegate final : public FakeAnimatorDelegate {
+   public:
+    MOCK_METHOD(void,
+                OnAnimatorDrawLastLayerTreesForDisplay,
+                (std::unique_ptr<FrameTimingsRecorder>,
+                 const std::set<int64_t>&),
+                (override));
+  } delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::unique_ptr<Animator> animator;
+  GlobalOnlyVsyncWaiter* waiter = nullptr;
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    auto owned_waiter = std::make_unique<GlobalOnlyVsyncWaiter>(task_runners);
+    waiter = owned_waiter.get();
+    animator = std::make_unique<Animator>(delegate, task_runners,
+                                          std::move(owned_waiter));
+    EXPECT_TRUE(animator->RegisterView(0));
+    EXPECT_TRUE(animator->RegisterView(42));
+    EXPECT_FALSE(
+        animator->SetViewVisibility(0, Animator::ViewVisibility::kObscured));
+    EXPECT_CALL(delegate, OnAnimatorBeginFrame).WillOnce([&] {
+      animator->Render(0, std::make_unique<LayerTree>(nullptr, DlISize(10, 10)),
+                       1);
+      animator->Render(
+          42, std::make_unique<LayerTree>(nullptr, DlISize(10, 10)), 1);
+    });
+    EXPECT_CALL(delegate, OnAnimatorDraw).WillOnce([](auto pipeline) {
+      const auto result =
+          pipeline->Consume([](std::unique_ptr<FrameItem> item) {
+            ASSERT_EQ(item->layer_tree_tasks.size(), 1u);
+            EXPECT_EQ(item->layer_tree_tasks[0]->view_id, 42);
+          });
+      EXPECT_EQ(result, PipelineConsumeResult::Done);
+    });
+    animator->RequestFrame();
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [waiter] { waiter->Fire(); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_CALL(delegate, OnAnimatorDrawLastLayerTreesForDisplay)
+        .WillOnce([](auto recorder, const auto& views) {
+          EXPECT_EQ(views, std::set<int64_t>({42}));
+        });
+    animator->RequestFrame(false);
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [waiter] { waiter->Fire(); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+TEST_F(ShellTest, GlobalHiddenConfigureWaitsForRestoreAndPreservesSerial) {
+  FakeAnimatorDelegate delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::unique_ptr<Animator> animator;
+  GlobalOnlyVsyncWaiter* waiter = nullptr;
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    auto owned_waiter = std::make_unique<GlobalOnlyVsyncWaiter>(task_runners);
+    waiter = owned_waiter.get();
+    animator = std::make_unique<Animator>(delegate, task_runners,
+                                          std::move(owned_waiter));
+    EXPECT_TRUE(animator->RegisterView(0));
+    animator->SetViewVisibility(0, Animator::ViewVisibility::kSuspended);
+    EXPECT_CALL(delegate, OnAnimatorBeginFrame).Times(0);
+    animator->ScheduleImmediateFrame(731);
+    EXPECT_EQ(waiter->request_count(), 0u);
+  });
+  ::testing::Mock::VerifyAndClearExpectations(&delegate);
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_CALL(delegate, OnAnimatorBeginFrame).WillOnce([&] {
+      animator->Render(0, std::make_unique<LayerTree>(nullptr, DlISize(10, 10)),
+                       1);
+    });
+    EXPECT_CALL(delegate, OnAnimatorDraw).WillOnce([](auto pipeline) {
+      const auto result =
+          pipeline->Consume([](std::unique_ptr<FrameItem> item) {
+            EXPECT_EQ(item->frame_timings_recorder->GetConfigureSerial(), 731u);
+          });
+      EXPECT_EQ(result, PipelineConsumeResult::Done);
+    });
+    animator->SetViewVisibility(0, Animator::ViewVisibility::kVisible);
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [waiter] { waiter->Fire(); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+TEST_F(ShellTest, MixedVisibilityKeepsGlobalAndDisplayTargetsSeparate) {
+  class CachedDelegate final : public FakeAnimatorDelegate {
+   public:
+    void OnAnimatorBeginFrameForDisplay(fml::TimePoint,
+                                        uint64_t,
+                                        int64_t,
+                                        const std::set<int64_t>&) override {}
+    MOCK_METHOD(void,
+                OnAnimatorDrawLastLayerTreesForDisplay,
+                (std::unique_ptr<FrameTimingsRecorder>,
+                 const std::set<int64_t>&),
+                (override));
+  } delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::unique_ptr<Animator> animator;
+  ManualDisplayVsyncWaiter* waiter = nullptr;
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    auto owned_waiter =
+        std::make_unique<ManualDisplayVsyncWaiter>(task_runners);
+    waiter = owned_waiter.get();
+    animator = std::make_unique<Animator>(delegate, task_runners,
+                                          std::move(owned_waiter));
+    animator->AddDisplay(31, 60);
+    EXPECT_TRUE(animator->RegisterInitialViewDisplay(131, 31));
+    EXPECT_TRUE(animator->RegisterView(0));
+    EXPECT_TRUE(animator->RegisterView(42));
+    animator->SetViewVisibility(0, Animator::ViewVisibility::kObscured);
+    EXPECT_CALL(delegate, OnAnimatorBeginFrame).WillOnce([&] {
+      animator->Render(0, std::make_unique<LayerTree>(nullptr, DlISize(10, 10)),
+                       1);
+      animator->Render(
+          42, std::make_unique<LayerTree>(nullptr, DlISize(10, 10)), 1);
+    });
+    EXPECT_CALL(delegate, OnAnimatorDraw).WillOnce([](auto pipeline) {
+      EXPECT_EQ(pipeline->Consume([](std::unique_ptr<FrameItem> item) {
+        ASSERT_EQ(item->layer_tree_tasks.size(), 1u);
+        EXPECT_EQ(item->layer_tree_tasks[0]->view_id, 42);
+      }),
+                PipelineConsumeResult::Done);
+    });
+    animator->RequestFrame();
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [waiter] {
+    waiter->FireDisplay(VsyncWaiter::kDefaultDisplayId);
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_CALL(delegate, OnAnimatorDrawLastLayerTreesForDisplay)
+        .WillOnce([](auto recorder, const auto& views) {
+          EXPECT_EQ(views, std::set<int64_t>({42}));
+        });
+    animator->RequestFrame(false);
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [waiter] {
+    waiter->FireDisplay(VsyncWaiter::kDefaultDisplayId);
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(),
+               [&] { animator->RequestFrame(); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    // The homed view remains visible, but it cannot justify a second global
+    // frame when the final default-lane view hides after baton admission.
+    EXPECT_FALSE(
+        animator->SetViewVisibility(42, Animator::ViewVisibility::kSuspended));
+    EXPECT_CALL(delegate, OnAnimatorBeginFrame).Times(0);
+    waiter->FireDisplay(VsyncWaiter::kDefaultDisplayId);
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(),
+               [waiter] { waiter->FireDisplay(31); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  size_t display_requests = 0;
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    display_requests = waiter->display_request_count(31);
+    animator->SetViewVisibility(42, Animator::ViewVisibility::kVisible);
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_EQ(waiter->display_request_count(31), display_requests);
+    animator.reset();
+  });
 }
 
 }  // namespace testing

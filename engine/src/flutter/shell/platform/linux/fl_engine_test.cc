@@ -18,6 +18,29 @@
 
 class FlEngineTest : public flutter::testing::LinuxTest {};
 
+TEST_F(FlEngineTest, NegotiatesViewVisibilityWithoutAnotherFrameClock) {
+  const auto initialize = fl_engine_get_embedder_api(engine)->Initialize;
+  bool negotiated = false;
+  fl_engine_get_embedder_api(engine)->Initialize = MOCK_ENGINE_PROC(
+      Initialize,
+      ([&](auto version, auto config, const FlutterProjectArgs* args,
+           auto user_data, auto engine_out) {
+        EXPECT_NE(args->avio_extension_request, nullptr);
+        negotiated = args->avio_extension_request != nullptr;
+        if (negotiated) {
+          EXPECT_EQ(args->avio_extension_request->version,
+                    FLUTTER_AVIO_EXTENSION_VERSION);
+          EXPECT_EQ(args->avio_extension_request->required_features,
+                    kFlutterAvioExtensionFeatureViewVisibility);
+        }
+        EXPECT_EQ(args->vsync_callback, nullptr);
+        EXPECT_EQ(args->vsync_for_display_callback, nullptr);
+        return initialize(version, config, args, user_data, engine_out);
+      }));
+  StartEngine();
+  EXPECT_TRUE(negotiated);
+}
+
 // Checks notifying display updates works.
 TEST_F(FlEngineTest, NotifyDisplayUpdate) {
   StartEngine();

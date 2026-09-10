@@ -148,8 +148,8 @@ TEST_F(EmbedderTest, UnsupportedAvioExtensionFeatureFailsBeforeLaunch) {
   FlutterAvioExtensionRequest request = {
       .struct_size = sizeof(FlutterAvioExtensionRequest),
       .version = FLUTTER_AVIO_EXTENSION_VERSION,
-      .required_features = kFlutterAvioExtensionFeatureRootRenderTarget |
-                           kFlutterAvioExtensionFeatureExactVsyncCancellation,
+      .required_features =
+          kFlutterAvioExtensionFeatureViewVisibility | (1ULL << 63),
   };
   builder.GetProjectArgs().avio_extension_request = &request;
   auto engine = builder.LaunchEngine();

@@ -404,8 +404,22 @@ embedder already admitted. At the UI boundary that target instead terminates
 exactly once as no-visual-change; subsequent demand stays suppressed until an
 explicit visible update schedules one fresh view-scoped frame.
 
-The feature requires the exact frame-opportunity contract. When the last
-renderable view becomes hidden, the raster thread trims only already-idle
+The feature can be negotiated independently for legacy global-vsync clients.
+Global clients register all views without opting into per-display scheduling;
+only an explicitly all-hidden view set suspends the shared clock. An already
+requested global baton is consumed on return and returns its semaphore without
+raster work. A visible sibling keeps the clock eligible, with hidden views
+excluded from both new and cached-tree raster submissions. Restore schedules a
+fresh frame. Exact frame-opportunity clients retain their existing prerequisites
+and terminal outcomes; visibility does not weaken those contracts.
+
+The Linux GTK embedder negotiates this feature and maps each FlView's map/unmap,
+window withdrawn/iconified, and toplevel visibility events to render relevance.
+GTK Wayland reports xdg_toplevel suspended as FULLY_OBSCURED, including minimized
+windows, without necessarily reporting ICONIFIED. Partial occlusion and loss of
+focus stay renderable. This bridge does not change Dart application lifecycle.
+
+When the last renderable view becomes hidden, the raster thread trims only already-idle
 Impeller resources. Dart timers and application policy remain controlled by
 Avio's separate typed shell lifecycle channel, so the engine never infers
 authority, lock state, or suspension from missing vsync.

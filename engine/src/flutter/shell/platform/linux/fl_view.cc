@@ -25,6 +25,7 @@
 #include "flutter/shell/platform/linux/fl_view_renderer.h"
 #include "flutter/shell/platform/linux/fl_view_renderer_opengl.h"
 #include "flutter/shell/platform/linux/fl_view_renderer_software.h"
+#include "flutter/shell/platform/linux/fl_view_visibility_monitor.h"
 #include "flutter/shell/platform/linux/fl_window_state_monitor.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_engine.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_plugin_registry.h"
@@ -52,6 +53,7 @@ struct _FlView {
 
   // Monitor to track window state.
   FlWindowStateMonitor* window_state_monitor;
+  FlViewVisibilityMonitor* visibility_monitor;
 
   // Manages scrolling events.
   FlScrollingManager* scrolling_manager;
@@ -520,7 +522,11 @@ static void gesture_zoom_end_cb(FlView* self) {
 }
 
 static void realize_cb(FlView* self) {
+  g_clear_object(&self->visibility_monitor);
   if (self->view_id != flutter::kFlutterImplicitViewId) {
+    self->visibility_monitor = fl_view_visibility_monitor_new(
+        self->engine, self->view_id, GTK_WIDGET(self),
+        GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(self))));
     setup_cursor(self);
     return;
   }
@@ -546,6 +552,9 @@ static void realize_cb(FlView* self) {
     return;
   }
 
+  self->visibility_monitor = fl_view_visibility_monitor_new(
+      self->engine, self->view_id, GTK_WIDGET(self),
+      GTK_WINDOW(toplevel_window));
   setup_cursor(self);
 
   handle_geometry_changed(self);
@@ -571,6 +580,7 @@ static void fl_view_dispose(GObject* object) {
   FlView* self = FL_VIEW(object);
 
   g_cancellable_cancel(self->cancellable);
+  g_clear_object(&self->visibility_monitor);
 
   if (self->renderer != nullptr) {
     fl_view_renderer_set_compositor_materials_callback(self->renderer, nullptr,

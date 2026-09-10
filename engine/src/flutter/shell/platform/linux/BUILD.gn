@@ -100,6 +100,7 @@ source_set("flutter_linux_sources") {
              "fl_view_monitor.h",
              "fl_view_private.h",
              "fl_window_monitor.h",
+             "fl_view_visibility_monitor.h",
              "fl_window_state_monitor.h",
            ]
 
@@ -175,6 +176,7 @@ source_set("flutter_linux_sources") {
     "fl_view_renderer_opengl.cc",
     "fl_view_renderer_software.cc",
     "fl_window_monitor.cc",
+    "fl_view_visibility_monitor.cc",
     "fl_window_state_monitor.cc",
   ]
 
@@ -272,6 +274,7 @@ executable("flutter_linux_unittests") {
     "fl_value_test.cc",
     "fl_view_accessible_test.cc",
     "fl_view_test.cc",
+    "fl_view_visibility_monitor_test.cc",
     "fl_window_state_monitor_test.cc",
     "testing/fl_mock_binary_messenger.cc",
     "testing/fl_test.cc",

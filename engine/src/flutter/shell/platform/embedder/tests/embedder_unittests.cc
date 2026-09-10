@@ -1086,16 +1086,24 @@ TEST_F(EmbedderTest, ExactVsyncCancellationRequiresPerDisplayVsync) {
   EXPECT_FALSE(engine.is_valid());
 }
 
-TEST_F(EmbedderTest, ViewVisibilityRequiresExactFrameOutcomes) {
+TEST_F(EmbedderTest, GlobalViewVisibilityNegotiatesIndependently) {
   auto& context = GetEmbedderContext<EmbedderTestContextSoftware>();
   EmbedderConfigBuilder builder(context);
   builder.SetSurface(DlISize(800, 600));
-  builder.SetRootRenderTargetCompositor(
-      false, kFlutterAvioExtensionFeatureRootRenderTarget |
-                 kFlutterAvioExtensionFeatureViewVisibility);
-
+  FlutterAvioExtensionRequest extensions = {};
+  extensions.struct_size = sizeof(extensions);
+  extensions.version = FLUTTER_AVIO_EXTENSION_VERSION;
+  extensions.required_features = kFlutterAvioExtensionFeatureViewVisibility;
+  builder.GetProjectArgs().avio_extension_request = &extensions;
   auto engine = builder.LaunchEngine();
-  EXPECT_FALSE(engine.is_valid());
+  ASSERT_TRUE(engine.is_valid());
+  FlutterAvioViewVisibilityEvent event = {};
+  event.struct_size = sizeof(event);
+  event.view_id = 0;
+  event.visibility = kFlutterAvioViewVisibilitySuspended;
+  EXPECT_EQ(FlutterEngineSetAvioViewVisibility(engine.get(), &event), kSuccess);
+  event.visibility = kFlutterAvioViewVisibilityVisible;
+  EXPECT_EQ(FlutterEngineSetAvioViewVisibility(engine.get(), &event), kSuccess);
 }
 
 TEST_F(EmbedderTest, SelectedTargetDamageRequiresExplicitRenderCompletion) {

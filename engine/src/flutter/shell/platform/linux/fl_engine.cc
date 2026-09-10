@@ -865,6 +865,12 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
   args.dart_entrypoint_argv =
       reinterpret_cast<const char* const*>(dart_entrypoint_args);
   args.engine_id = reinterpret_cast<int64_t>(self);
+  FlutterAvioExtensionRequest avio_extensions = {};
+  avio_extensions.struct_size = sizeof(avio_extensions);
+  avio_extensions.version = FLUTTER_AVIO_EXTENSION_VERSION;
+  avio_extensions.required_features =
+      kFlutterAvioExtensionFeatureViewVisibility;
+  args.avio_extension_request = &avio_extensions;
 
   FlutterCompositor compositor = {};
   compositor.struct_size = sizeof(FlutterCompositor);
@@ -938,6 +944,22 @@ void fl_engine_notify_display_update(FlEngine* self,
       displays_length);
   if (result != kSuccess) {
     g_warning("Failed to notify display update to Flutter engine: %d", result);
+  }
+}
+
+void fl_engine_set_view_visibility(FlEngine* self,
+                                   FlutterViewId view_id,
+                                   FlutterAvioViewVisibility visibility) {
+  g_return_if_fail(FL_IS_ENGINE(self));
+  g_return_if_fail(self->engine != nullptr);
+  FlutterAvioViewVisibilityEvent event = {};
+  event.struct_size = sizeof(event);
+  event.view_id = view_id;
+  event.visibility = visibility;
+  const FlutterEngineResult result =
+      self->embedder_api.SetAvioViewVisibility(self->engine, &event);
+  if (result != kSuccess) {
+    g_warning("Failed to update view render relevance: %d", result);
   }
 }
 

@@ -249,12 +249,6 @@ static const char* ValidateAvioExtensionRequest(
     return "Selected-target damage requires typed pre-submission failures.";
   }
   if ((request->required_features &
-       kFlutterAvioExtensionFeatureViewVisibility) != 0 &&
-      (request->required_features &
-       kFlutterAvioExtensionFeatureFrameOpportunityOutcomes) == 0) {
-    return "Per-view visibility requires exact frame opportunity outcomes.";
-  }
-  if ((request->required_features &
        kFlutterAvioExtensionFeatureTypedRenderTargetAcquisition) != 0 &&
       ((request->required_features &
         kFlutterAvioExtensionFeatureRootRenderTarget) == 0 ||

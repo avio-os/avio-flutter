@@ -191,6 +191,10 @@ class Animator final {
   /// Assigns a view to a display for per-display vsync rendering.
   void SetViewDisplay(int64_t view_id, int64_t display_id);
 
+  /// Registers a legacy global-clock view without opting into display-scoped
+  /// scheduling. Registration is idempotent and does not request a frame.
+  [[nodiscard]] bool RegisterView(int64_t view_id);
+
   /// Registers a new view's initial display ownership without scheduling.
   /// The caller must do this before publishing the view to Dart, then request
   /// the first frame only after publication succeeds. Returns false without
@@ -385,6 +389,10 @@ class Animator final {
 
   /// Fallback state used when no displays are registered.
   DisplayFrameState default_state_;
+
+  void RequestGlobalFrame(bool regenerate_layer_trees = true);
+  bool HasRegisteredViews() const;
+  bool IsViewHidden(int64_t view_id) const;
 
   fml::TaskRunnerAffineWeakPtrFactory<Animator> weak_factory_;
 

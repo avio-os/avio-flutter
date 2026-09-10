@@ -83,6 +83,15 @@ Engine::Engine(Delegate& delegate,
              std::make_shared<FontCollection>(),
              nullptr,
              gpu_disabled_switch) {
+  for (const auto& [view_id, metrics] :
+       platform_data.viewport_metrics_for_views) {
+    if (animator_->IsPerDisplayMode()) {
+      static_cast<void>(animator_->RegisterInitialViewDisplay(
+          view_id, static_cast<int64_t>(metrics.display_id)));
+    } else {
+      static_cast<void>(animator_->RegisterView(view_id));
+    }
+  }
   runtime_controller_ = std::make_unique<RuntimeController>(
       *this,                                 // runtime delegate
       &vm,                                   // VM
@@ -143,6 +152,16 @@ std::unique_ptr<Engine> Engine::Spawn(
       /*image_decoder=*/result->GetImageDecoderWeakPtr(),
       /*image_generator_registry=*/result->GetImageGeneratorRegistry(),
       /*snapshot_delegate=*/std::move(snapshot_delegate));
+  for (const auto& [view_id, metrics] :
+       result->runtime_controller_->GetPlatformData()
+           .viewport_metrics_for_views) {
+    if (result->animator_->IsPerDisplayMode()) {
+      static_cast<void>(result->animator_->RegisterInitialViewDisplay(
+          view_id, static_cast<int64_t>(metrics.display_id)));
+    } else {
+      static_cast<void>(result->animator_->RegisterView(view_id));
+    }
+  }
   result->initial_route_ = initial_route;
   result->asset_manager_ = asset_manager_;
   return result;
@@ -344,15 +363,16 @@ tonic::DartErrorHandleType Engine::GetUIIsolateLastError() {
 void Engine::AddView(int64_t view_id,
                      const ViewportMetrics& view_metrics,
                      std::function<void(bool added)> callback) {
-  const bool registered_initial_display =
-      animator_->IsPerDisplayMode() &&
-      animator_->RegisterInitialViewDisplay(
-          view_id, static_cast<int64_t>(view_metrics.display_id));
+  const bool registered_view =
+      animator_->IsPerDisplayMode()
+          ? animator_->RegisterInitialViewDisplay(
+                view_id, static_cast<int64_t>(view_metrics.display_id))
+          : animator_->RegisterView(view_id);
   runtime_controller_->AddView(
       view_id, view_metrics,
-      [engine = GetWeakPtr(), view_id, registered_initial_display,
+      [engine = GetWeakPtr(), view_id, registered_view,
        callback = std::move(callback)](bool added) mutable {
-        if (!added && registered_initial_display && engine) {
+        if (!added && registered_view && engine) {
           engine->animator_->RemoveView(view_id);
         }
         callback(added);

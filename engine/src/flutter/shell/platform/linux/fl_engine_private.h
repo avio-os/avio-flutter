@@ -136,6 +136,11 @@ void fl_engine_notify_display_update(FlEngine* engine,
  */
 void fl_engine_set_implicit_view(FlEngine* engine, FlRenderable* renderable);
 
+// Sets render relevance only; does not change Dart application lifecycle.
+void fl_engine_set_view_visibility(FlEngine* engine,
+                                   FlutterViewId view_id,
+                                   FlutterAvioViewVisibility visibility);
+
 /**
  * fl_engine_add_view:
  * @engine: an #FlEngine.

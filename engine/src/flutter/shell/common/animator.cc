@@ -127,6 +127,9 @@ Animator::~Animator() = default;
 
 void Animator::ScheduleImmediateFrame(uint64_t configure_serial) {
   pending_configure_serial_ = configure_serial;
+  if (HasRegisteredViews() && !HasRenderableViews()) {
+    return;
+  }
 
   if (!pending_frame_semaphore_.TryWait()) {
     // Keep immediate scheduling aligned with RequestFrame gating so resize
@@ -303,6 +306,16 @@ void Animator::EndFrame() {
 void Animator::Render(int64_t view_id,
                       std::unique_ptr<flutter::LayerTree> layer_tree,
                       float device_pixel_ratio) {
+  if (IsViewHidden(view_id)) {
+    const auto* state = GetDisplayState(GetDisplayForView(view_id));
+    // An exact per-display target already admitted into an active frame must
+    // finish its existing accounting. Every other hidden render is new demand,
+    // including a default/global callback in mixed scheduling mode.
+    if (!state || !state->frame_in_progress ||
+        state->current_frame_view_ids.count(view_id) == 0) {
+      return;
+    }
+  }
   has_rendered_ = true;
 
   if (!frame_timings_recorder_) {
@@ -382,10 +395,23 @@ void Animator::DrawLastLayerTreesForDisplay(
   const auto now = fml::TimePoint::Now();
   frame_timings_recorder->RecordBuildStart(now);
   frame_timings_recorder->RecordBuildEnd(now);
-  delegate_.OnAnimatorDrawLastLayerTrees(std::move(frame_timings_recorder));
+  if (HasRegisteredViews()) {
+    // This helper services the global/default lane even in mixed mode. Display
+    // lanes use their own exact current target set in OnDisplayVsync.
+    delegate_.OnAnimatorDrawLastLayerTreesForDisplay(
+        std::move(frame_timings_recorder), default_state_.renderable_view_ids);
+  } else {
+    delegate_.OnAnimatorDrawLastLayerTrees(std::move(frame_timings_recorder));
+  }
 }
 
 void Animator::RequestFrame(bool regenerate_layer_trees) {
+  // A legacy waiter has no display-scoped target set. Its one frame clock may
+  // sleep only when every registered view is hidden. Keep bootstrap behavior
+  // before the platform has registered any views.
+  if (HasRegisteredViews() && !HasRenderableViews()) {
+    return;
+  }
   if (IsPerDisplayMode()) {
     // PlatformDispatcher.scheduleFrame() carries no view identity. In
     // per-display mode the framework uses RequestFrameForDisplayViews() when
@@ -412,11 +438,18 @@ void Animator::RequestFrame(bool regenerate_layer_trees) {
     // whether a display accepted the request: a display whose views are all
     // non-renderable declined on purpose, and a global frame must not
     // resurrect that suppressed demand.
-    if (display_owns_a_view && default_state_.view_ids.empty()) {
+    if (display_owns_a_view && default_state_.renderable_view_ids.empty()) {
       return;
     }
   }
 
+  RequestGlobalFrame(regenerate_layer_trees);
+}
+
+void Animator::RequestGlobalFrame(bool regenerate_layer_trees) {
+  if (HasRegisteredViews() && default_state_.renderable_view_ids.empty()) {
+    return;
+  }
   if (regenerate_layer_trees && !regenerate_layer_trees_) {
     // This event will be closed by BeginFrame. BeginFrame will only be called
     // if regenerating the layer trees. If a frame has been requested to update
@@ -455,6 +488,21 @@ void Animator::AwaitVSync() {
       [self = weak_factory_.GetWeakPtr()](
           std::unique_ptr<FrameTimingsRecorder> frame_timings_recorder) {
         if (self) {
+          if (self->HasRegisteredViews() &&
+              self->default_state_.renderable_view_ids.empty()) {
+            // The legacy baton was already admitted before the last view hid.
+            // Consume it without raster work, returning its semaphore exactly
+            // once so restore can request a fresh frame.
+            if (self->regenerate_layer_trees_) {
+              TRACE_EVENT_ASYNC_END0("flutter", "Frame Request Pending",
+                                     self->frame_request_number_);
+            }
+            self->regenerate_layer_trees_ = false;
+            self->EndTraceFlowIds();
+            self->frame_scheduled_ = false;
+            self->pending_frame_semaphore_.Signal();
+            return;
+          }
           if (self->CanReuseLastLayerTrees()) {
             self->DrawLastLayerTrees(std::move(frame_timings_recorder));
           } else {
@@ -585,6 +633,33 @@ void Animator::SetViewDisplay(int64_t view_id, int64_t display_id) {
   }
 }
 
+bool Animator::RegisterView(int64_t view_id) {
+  if (view_to_display_.count(view_id) != 0 ||
+      default_state_.view_ids.count(view_id) != 0) {
+    return false;
+  }
+  default_state_.view_ids.insert(view_id);
+  default_state_.renderable_view_ids.insert(view_id);
+  return true;
+}
+
+bool Animator::HasRegisteredViews() const {
+  return !default_state_.view_ids.empty() || !view_to_display_.empty();
+}
+
+bool Animator::IsViewHidden(int64_t view_id) const {
+  const DisplayFrameState* state = &default_state_;
+  auto mapping = view_to_display_.find(view_id);
+  if (mapping != view_to_display_.end()) {
+    auto display = display_states_.find(mapping->second);
+    if (display != display_states_.end()) {
+      state = &display->second;
+    }
+  }
+  return state->view_ids.count(view_id) != 0 &&
+         state->renderable_view_ids.count(view_id) == 0;
+}
+
 bool Animator::RegisterInitialViewDisplay(int64_t view_id, int64_t display_id) {
   TRACE_EVENT2_INT("flutter", "Animator::RegisterInitialViewDisplay", "view_id",
                    view_id, "display_id", display_id);
@@ -687,9 +762,11 @@ bool Animator::SetViewVisibility(int64_t view_id, ViewVisibility visibility) {
 
   if (should_render) {
     state->renderable_view_ids.insert(view_id);
-    if (state != &default_state_) {
+    if (IsPerDisplayMode() && state != &default_state_) {
       static_cast<void>(
           RequestFrameForDisplayViews(state->display_id, {view_id}));
+    } else {
+      RequestGlobalFrame();
     }
   } else {
     // Keep existing pending/current target sets intact. If the platform has

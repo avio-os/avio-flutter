@@ -4189,7 +4189,9 @@ FlutterEngineResult FlutterEngineSetViewDisplay(
 ///
 ///             Hidden views remain registered and any already-admitted exact
 ///             frame opportunity still terminates. Future frame demand is
-///             suppressed until the view becomes visible again.
+///             suppressed until the view becomes visible again. This feature
+///             can be negotiated independently by legacy global-vsync clients;
+///             it does not opt them into exact frame opportunity scheduling.
 ///
 /// @param[in]  engine  A running engine instance.
 /// @param[in]  event   Caller-sized visibility event.

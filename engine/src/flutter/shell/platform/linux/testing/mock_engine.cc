@@ -236,5 +236,7 @@ FlutterEngineResult FlutterEngineGetProcAddresses(
   table->NotifyDisplayUpdate = &FlutterEngineNotifyDisplayUpdate;
   table->AddView = &FlutterEngineAddView;
   table->RemoveView = &FlutterEngineRemoveView;
+  table->SetAvioViewVisibility =
+      [](auto, const FlutterAvioViewVisibilityEvent*) { return kSuccess; };
   return kSuccess;
 }
