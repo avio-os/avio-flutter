@@ -73,7 +73,7 @@ extern "C" {
 // Flutter embedder ABI. The engine reports supported semantics through
 // FlutterEngineGetAvioExtensionCapabilities and validates the request again
 // during initialization, before creating a view or GPU resource.
-#define FLUTTER_AVIO_EXTENSION_VERSION 5u
+#define FLUTTER_AVIO_EXTENSION_VERSION 6u
 
 typedef uint64_t FlutterAvioExtensionFeatures;
 
@@ -845,7 +845,8 @@ typedef struct {
 
 /// One retained external-compositor material node.
 ///
-/// `rect` is in logical view coordinates after Flutter transforms and clips.
+/// `rect` is the complete material in logical view coordinates after Flutter
+/// transforms. `visible_rect` is its current ancestor/viewport-clipped slice.
 /// `corner_scale` carries the matching uniform retained-tree scale so a
 /// consumer can transform the corner shape without scaling recipe kernels.
 /// The array containing this value lives only for the presentation callback.
@@ -875,6 +876,7 @@ typedef struct {
   double clip_parameter_1;
   double clip_parameter_2;
   double clip_parameter_3;
+  FlutterRect visible_rect;
 } FlutterAvioCompositorMaterial;
 
 /// A structure to represent a 2D point.

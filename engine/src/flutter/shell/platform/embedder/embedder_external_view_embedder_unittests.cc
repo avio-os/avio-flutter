@@ -15,6 +15,7 @@ TEST(EmbedderExternalViewEmbedderTest,
   AvioCompositorMaterial material = {
       .id = 1u,
       .rect = DlRect::MakeXYWH(4.0f, 6.0f, 10.0f, 12.0f),
+      .visible_rect = DlRect::MakeXYWH(5.0f, 8.0f, 8.0f, 7.0f),
       .recipe = AvioCompositorMaterialRecipe::kTiered,
       .tier = 2u,
       .corner_scale = 1.5f,
@@ -31,6 +32,10 @@ TEST(EmbedderExternalViewEmbedderTest,
   EXPECT_EQ(converted[0].rect.top, 6.0);
   EXPECT_EQ(converted[0].rect.right, 14.0);
   EXPECT_EQ(converted[0].rect.bottom, 18.0);
+  EXPECT_EQ(converted[0].visible_rect.left, 5.0);
+  EXPECT_EQ(converted[0].visible_rect.top, 8.0);
+  EXPECT_EQ(converted[0].visible_rect.right, 13.0);
+  EXPECT_EQ(converted[0].visible_rect.bottom, 15.0);
   EXPECT_EQ(converted[0].corner_scale, 1.5f);
 }
 
@@ -39,6 +44,7 @@ TEST(EmbedderExternalViewEmbedderTest,
   AvioCompositorMaterial material = {
       .id = 2u,
       .rect = DlRect::MakeXYWH(4.0f, 6.0f, 400.0f, 80.0f),
+      .visible_rect = DlRect::MakeXYWH(4.0f, 6.0f, 400.0f, 80.0f),
       .recipe = AvioCompositorMaterialRecipe::kTiered,
       .tier = 2u,
       .clip_kind = AvioCompositorMaterialClipKind::kBottomEdgePull,
@@ -80,6 +86,7 @@ AvioCompositorMaterial MakeMaterial(uint64_t id, const DlRect& rect) {
   return AvioCompositorMaterial{
       .id = id,
       .rect = rect,
+      .visible_rect = rect,
       .recipe = AvioCompositorMaterialRecipe::kTiered,
       .tier = 1u,
       .corner_scale = 1.0f,

@@ -100,30 +100,13 @@ void AvioCompositorMaterialLayer::Preroll(PrerollContext* context) {
   }
 
   auto material = material_;
-  material.rect = transformed.value();
+  material.rect = full_bounds;
+  material.visible_rect = transformed.value();
   material.corner_scale = *max_scale;
   if (material.clip_kind == AvioCompositorMaterialClipKind::kBottomEdgePull) {
     material.clip_parameter_0 *= *max_scale;
     material.clip_parameter_2 *= *max_scale;
     material.clip_parameter_3 *= *max_scale;
-  }
-  // Clipping an original corner creates a square cut edge, not a new rounded
-  // corner at the clipped boundary.
-  if (material.clip_kind == AvioCompositorMaterialClipKind::kRoundedRectangle &&
-      material.rect.GetLeft() > full_bounds.GetLeft()) {
-    material.corner_mask &= ~(0x01u | 0x08u);
-  }
-  if (material.clip_kind == AvioCompositorMaterialClipKind::kRoundedRectangle &&
-      material.rect.GetTop() > full_bounds.GetTop()) {
-    material.corner_mask &= ~(0x01u | 0x02u);
-  }
-  if (material.clip_kind == AvioCompositorMaterialClipKind::kRoundedRectangle &&
-      material.rect.GetRight() < full_bounds.GetRight()) {
-    material.corner_mask &= ~(0x02u | 0x04u);
-  }
-  if (material.clip_kind == AvioCompositorMaterialClipKind::kRoundedRectangle &&
-      material.rect.GetBottom() < full_bounds.GetBottom()) {
-    material.corner_mask &= ~(0x04u | 0x08u);
   }
   material.strength =
       std::clamp(material.strength * context->state_stack.outstanding_opacity(),

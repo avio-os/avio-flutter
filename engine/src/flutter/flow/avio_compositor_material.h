@@ -30,7 +30,12 @@ enum class AvioCompositorMaterialClipKind : uint32_t {
 /// original value for retained-layer diffing.
 struct AvioCompositorMaterial {
   uint64_t id = 0;
+  /// Complete transformed material geometry. Ancestor and viewport clipping
+  /// never changes this rectangle or the raster identity derived from it.
   DlRect rect;
+  /// Visible slice of `rect` after the current scene cull. Preroll fills this
+  /// field on the published copy; authored descriptors leave it empty.
+  DlRect visible_rect;
   AvioCompositorMaterialRecipe recipe = AvioCompositorMaterialRecipe::kExplicit;
   uint32_t tier = 0;
   bool uses_default_corner = false;

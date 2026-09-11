@@ -78,8 +78,10 @@ TEST_F(AvioCompositorMaterialLayerTest,
 
   ASSERT_EQ(materials.size(), 1u);
   EXPECT_EQ(materials[0].id, 7u);
-  EXPECT_EQ(materials[0].rect, DlRect::MakeXYWH(35.0f, 44.0f, 10.0f, 8.0f));
-  EXPECT_EQ(materials[0].corner_mask, 0u);
+  EXPECT_EQ(materials[0].rect, DlRect::MakeXYWH(30.0f, 40.0f, 20.0f, 20.0f));
+  EXPECT_EQ(materials[0].visible_rect,
+            DlRect::MakeXYWH(35.0f, 44.0f, 10.0f, 8.0f));
+  EXPECT_EQ(materials[0].corner_mask, 0x0fu);
   EXPECT_EQ(materials[0].corner_scale, 1.0f);
   EXPECT_NEAR(materials[0].strength, 128.0f / 255.0f, 0.001f);
   EXPECT_FALSE(invalid());
@@ -98,6 +100,8 @@ TEST_F(AvioCompositorMaterialLayerTest,
 
   ASSERT_EQ(materials.size(), 1u);
   EXPECT_EQ(materials[0].rect, DlRect::MakeXYWH(4.0f, 6.0f, 40.0f, 20.0f));
+  EXPECT_EQ(materials[0].visible_rect,
+            DlRect::MakeXYWH(4.0f, 6.0f, 40.0f, 20.0f));
   EXPECT_EQ(materials[0].corner_scale, 2.0f);
   EXPECT_FALSE(invalid());
 }

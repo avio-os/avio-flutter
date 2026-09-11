@@ -372,6 +372,8 @@ ConvertAvioCompositorMaterialsToEmbedderCoordinates(
   for (const auto& material : materials) {
     const auto rect =
         material.rect.TransformAndClipBounds(surface_transformation);
+    const auto visible_rect =
+        material.visible_rect.TransformAndClipBounds(surface_transformation);
     result.push_back(FlutterAvioCompositorMaterial{
         .struct_size = sizeof(FlutterAvioCompositorMaterial),
         .id = material.id,
@@ -410,6 +412,13 @@ ConvertAvioCompositorMaterialsToEmbedderCoordinates(
             material.clip_parameter_2 * surface_scale * logical_scale,
         .clip_parameter_3 =
             material.clip_parameter_3 * surface_scale * logical_scale,
+        .visible_rect =
+            FlutterRect{
+                visible_rect.GetLeft() * logical_scale,
+                visible_rect.GetTop() * logical_scale,
+                visible_rect.GetRight() * logical_scale,
+                visible_rect.GetBottom() * logical_scale,
+            },
     });
   }
   return result;
@@ -449,9 +458,9 @@ static DlRegion ToDlRegion(const SkRegion& region) {
 ///         claims every glass surface was never painted -- which is exactly
 ///         the region a later partial frame would then decline to preserve.
 ///
-///         The material rects arrive already transformed into that space and
-///         already clipped to the scene cull rect by
-///         `AvioCompositorMaterialLayer::Preroll`, which owns that bound.
+///         Material visible rects arrive already transformed into that space
+///         and clipped to the scene cull rect by preroll. Their full rects are
+///         retained separately for stable compositor raster identity.
 DlRegion PaintCoverageForFrame(
     const EmbedderExternalView& root_view,
     const std::vector<AvioCompositorMaterial>& materials) {
@@ -461,10 +470,10 @@ DlRegion PaintCoverageForFrame(
   }
   std::vector<DlIRect> rects = recorded.getRects(/*deband=*/true);
   for (const AvioCompositorMaterial& material : materials) {
-    if (material.rect.IsEmpty()) {
+    if (material.visible_rect.IsEmpty()) {
       continue;
     }
-    rects.push_back(DlIRect::RoundOut(material.rect));
+    rects.push_back(DlIRect::RoundOut(material.visible_rect));
   }
   return DlRegion(rects);
 }
