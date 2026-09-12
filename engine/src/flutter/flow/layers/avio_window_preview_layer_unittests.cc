@@ -74,16 +74,16 @@ TEST_F(AvioWindowPreviewLayerTest, RasterDamageDoesNotEraseRetainedPreview) {
 TEST_F(AvioWindowPreviewLayerTest,
        InlineOverflowKeepsPlaceholderWhileExplicitOverflowRejects) {
   auto root = std::make_shared<ContainerLayer>();
-  for (int i = 1; i <= 9; i++)
+  for (int i = 1; i <= 65; i++)
     root->Add(std::make_shared<AvioWindowPreviewLayer>(
         i, DlRect::MakeXYWH(i * 10, 0, 8, 8), 2, true));
   root->Preroll(preroll_context());
-  EXPECT_EQ(previews.size(), 8u);
+  EXPECT_EQ(previews.size(), 64u);
   EXPECT_FALSE(invalid);
   auto explicit_layer = std::make_shared<AvioWindowPreviewLayer>(
-      10, DlRect::MakeXYWH(100, 0, 8, 8), 2);
+      66, DlRect::MakeXYWH(660, 0, 8, 8), 2);
   explicit_layer->Preroll(preroll_context());
-  EXPECT_EQ(previews.size(), 8u);
+  EXPECT_EQ(previews.size(), 64u);
   EXPECT_TRUE(invalid);
 }
 TEST_F(AvioWindowPreviewLayerTest, FullyClippedCandidatesDoNotConsumeSlots) {
@@ -101,13 +101,15 @@ TEST_F(AvioWindowPreviewLayerTest, FullyClippedCandidatesDoNotConsumeSlots) {
   EXPECT_EQ(previews[0].surface_id, 11u);
   EXPECT_FALSE(invalid);
 }
-TEST_F(AvioWindowPreviewLayerTest, DuplicateInlineKeepsPlaceholder) {
+TEST_F(AvioWindowPreviewLayerTest, RepeatedInlineSourceKeepsBothOccurrences) {
   auto root = std::make_shared<ContainerLayer>();
   for (int i = 0; i < 2; i++)
     root->Add(std::make_shared<AvioWindowPreviewLayer>(
         41, DlRect::MakeXYWH(i * 20, 0, 10, 10), 2, true));
   root->Preroll(preroll_context());
-  EXPECT_EQ(previews.size(), 1u);
+  ASSERT_EQ(previews.size(), 2u);
+  EXPECT_EQ(previews[0].surface_id, 41u);
+  EXPECT_EQ(previews[1].surface_id, 41u);
   EXPECT_FALSE(invalid);
 }
 TEST_F(AvioWindowPreviewLayerTest,
@@ -124,9 +126,11 @@ TEST_F(AvioWindowPreviewLayerTest,
                          DlPaint().setBlendMode(DlBlendMode::kClear));
   EXPECT_TRUE(DisplayListsEQ_Verbose(display_list(), expected.Build()));
 }
-TEST_F(AvioWindowPreviewLayerTest, RejectedInlinePaintsItsPlaceholder) {
+TEST_F(AvioWindowPreviewLayerTest, OverflowedInlinePaintsItsPlaceholder) {
   auto rect = DlRect::MakeXYWH(0, 0, 20, 20);
-  previews.push_back({41, rect, rect, 3, 1});
+  for (size_t i = 0; i < kMaxAvioWindowPreviewsPerFrame; i++) {
+    previews.push_back({static_cast<uint64_t>(i + 1), rect, rect, 3, 1});
+  }
   auto layer = std::make_shared<AvioWindowPreviewLayer>(41, rect, 3, true);
   layer->Add(std::make_shared<MockLayer>(DlPath::MakeRect(rect),
                                          DlPaint(DlColor::kCyan())));

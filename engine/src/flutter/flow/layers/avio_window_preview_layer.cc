@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "flutter/flow/layers/avio_window_preview_layer.h"
-#include <algorithm>
 #include <cmath>
 namespace flutter {
 AvioWindowPreviewLayer::AvioWindowPreviewLayer(uint64_t surface_id,
@@ -68,10 +67,7 @@ void AvioWindowPreviewLayer::Preroll(PrerollContext* context) {
     return;
   // Inline nodes keep their placeholder when the bounded frame set is full.
   // Explicit declarations have prepainted cutouts, so overflow must reject.
-  if (previews->size() >= kMaxAvioWindowPreviewsPerFrame ||
-      std::any_of(previews->begin(), previews->end(), [this](const auto& p) {
-        return p.surface_id == surface_id_;
-      })) {
+  if (previews->size() >= kMaxAvioWindowPreviewsPerFrame) {
     if (!replace_children_)
       *invalid = true;
     return;

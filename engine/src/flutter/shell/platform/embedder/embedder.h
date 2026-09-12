@@ -95,7 +95,7 @@ typedef uint64_t FlutterAvioExtensionFeatures;
 #define kFlutterAvioExtensionFeatureRenderDeadline 0x0000000000000400ULL
 #define kFlutterAvioExtensionFeatureAtomicWindowPreviews 0x0000000000000800ULL
 #define kFlutterAvioExtensionFeaturePreSubmitFailure 0x0000000000001000ULL
-#define FLUTTER_AVIO_MAX_WINDOW_PREVIEWS 8u
+#define FLUTTER_AVIO_MAX_WINDOW_PREVIEWS 64u
 
 /// Hard transaction bound shared by retained scene collection and embedders.
 #define FLUTTER_AVIO_MAX_COMPOSITOR_MATERIALS 64u

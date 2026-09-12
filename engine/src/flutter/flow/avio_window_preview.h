@@ -7,7 +7,7 @@
 #include <cstdint>
 #include "flutter/display_list/geometry/dl_geometry_types.h"
 namespace flutter {
-constexpr size_t kMaxAvioWindowPreviewsPerFrame = 8;
+constexpr size_t kMaxAvioWindowPreviewsPerFrame = 64;
 // Exact retained client identity and destinations from one scene. Rect is the
 // complete destination; clip may expose only part during entrance/scrolling.
 struct AvioWindowPreview {
