@@ -67,6 +67,24 @@ TEST_F(FlViewTest, DisposeClearsTextInputWidget) {
   EXPECT_EQ(fl_text_input_handler_get_widget(handler), nullptr);
 }
 
+// GTK may destroy children while another owner still holds the FlView.
+// Releasing that owner must not call the material renderer after finalization.
+TEST_F(FlViewTest, DestroyThenDisposeClearsMaterialRenderer) {
+  FlView* view = fl_view_new(project);
+  g_object_ref_sink(view);
+  int destroyed = 0;
+  fl_view_set_compositor_materials_callback(
+      view, nullptr, &destroyed,
+      [](gpointer data) { ++*static_cast<int*>(data); });
+  fl_gtk_widget_destroy(GTK_WIDGET(view));
+  g_object_run_dispose(G_OBJECT(view));
+  g_object_unref(view);
+  EXPECT_EQ(destroyed, 1);
+  EXPECT_EQ(flutter::testing::fl_get_received_gtk_log_levels() &
+                G_LOG_LEVEL_CRITICAL,
+            (GLogLevelFlags)0x0);
+}
+
 // FIXME(robert-ancell): Disabling this test as it requires the FlView
 // to be realized to work after some refactoring. This is proving to be
 // very difficult to mock. Following PRs will change this code so enable the

@@ -585,6 +585,9 @@ static void fl_view_dispose(GObject* object) {
   if (self->renderer != nullptr) {
     fl_view_renderer_set_compositor_materials_callback(self->renderer, nullptr,
                                                        nullptr);
+    g_object_remove_weak_pointer(G_OBJECT(self->renderer),
+                                 reinterpret_cast<gpointer*>(&self->renderer));
+    self->renderer = nullptr;
   }
   if (self->compositor_materials_destroy_notify != nullptr) {
     self->compositor_materials_destroy_notify(
@@ -744,6 +747,11 @@ static void setup_engine(FlView* self) {
           fl_view_renderer_opengl_new(self->engine, self->sized_to_content));
       break;
   }
+  // GTK owns the child widget and may finalize it before the FlView's last
+  // external reference is released. Do not retain a dangling renderer through
+  // that interval or a repeated GObject disposal.
+  g_object_add_weak_pointer(G_OBJECT(self->renderer),
+                            reinterpret_cast<gpointer*>(&self->renderer));
   gtk_widget_show(GTK_WIDGET(self->renderer));
   fl_view_renderer_set_compositor_materials_callback(
       self->renderer, compositor_materials_cb, self);
