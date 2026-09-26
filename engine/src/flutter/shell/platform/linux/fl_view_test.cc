@@ -80,9 +80,9 @@ TEST_F(FlViewTest, DestroyThenDisposeClearsMaterialRenderer) {
   g_object_run_dispose(G_OBJECT(view));
   g_object_unref(view);
   EXPECT_EQ(destroyed, 1);
-  EXPECT_EQ(flutter::testing::fl_get_received_gtk_log_levels() &
-                G_LOG_LEVEL_CRITICAL,
-            (GLogLevelFlags)0x0);
+  EXPECT_EQ(
+      flutter::testing::fl_get_received_gtk_log_levels() & G_LOG_LEVEL_CRITICAL,
+      (GLogLevelFlags)0x0);
 }
 
 // FIXME(robert-ancell): Disabling this test as it requires the FlView
