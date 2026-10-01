@@ -253,6 +253,12 @@ class ContextVK final : public Context,
   // |Context|
   ResourceCacheTrimResult TrimIdleResourceCaches() override;
 
+  // |Context|
+  void ReleaseTransientOwner(int64_t owner) override;
+
+  // |Context|
+  void ReleaseOrphanedTransients() override;
+
   /// @brief Whether the Android Surface control based swapchain should be
   ///        enabled
   bool GetShouldEnableSurfaceControlSwapchain() const;

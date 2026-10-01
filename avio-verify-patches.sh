@@ -400,6 +400,16 @@ need "shared transient entry regression" \
 need "shared transient synchronization-validation proof and control" \
   $F/impeller/renderer/backend/vulkan/transients_sharing_vk_unittests.cc \
   'SharedDepthStencilNeedsTheWidenedIncomingDependency'
+need "root-target transients are acquired on behalf of their view" \
+  $F/shell/platform/embedder/embedder.cc \
+  'pool->Acquire\(desc, enable_msaa, owner, refusal\)'
+need "a collected view releases its transient ownership" \
+  $F/shell/common/rasterizer.cc 'context->ReleaseTransientOwner\(view_id\)'
+need "idle orphaned transient sets are freed once per raster frame" \
+  $F/shell/common/rasterizer.cc 'context->ReleaseOrphanedTransients\(\)'
+need "orphans are released only when idle" \
+  $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
+  'if \(!EntryIsOrphanLocked\(\*it\) \|\| !EntryIsIdle\(\*it\)\)'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

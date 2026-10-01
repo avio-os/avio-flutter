@@ -386,6 +386,185 @@ TEST(ContextVKTest, TransientsPoolRejectsOverflowingFootprint) {
   EXPECT_EQ(pool.GetUsage(), ResourceCacheUsage{});
 }
 
+namespace {
+
+TransientsPoolVK MakeOwnerTestPool() {
+  return TransientsPoolVK(std::weak_ptr<Context>(),
+                          PixelFormat::kD24UnormS8Uint,
+                          /*supports_memoryless_textures=*/false,
+                          TransientsPoolLimitsVK{
+                              .max_entries = 8u,
+                              .max_bytes = 64u * 1024u * 1024u,
+                              .allow_environment_override = false,
+                          });
+}
+
+TextureDescriptor OwnerTestDescriptor(int64_t width, int64_t height) {
+  TextureDescriptor desc;
+  desc.size = ISize(width, height);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+  return desc;
+}
+
+}  // namespace
+
+// Red before EN46b: nothing released a removed view's set before the caps.
+TEST(ContextVKTest, TransientsPoolRemovedViewReleasesItsOnlyKey) {
+  auto pool = MakeOwnerTestPool();
+  const auto desc = OwnerTestDescriptor(128, 64);
+  ASSERT_TRUE(pool.Acquire(desc, true, TransientsOwnerVK{.view_id = 7}));
+  ASSERT_EQ(pool.GetUsage().entries, 1u);
+
+  const auto released = pool.ReleaseOwner(TransientsOwnerVK{.view_id = 7});
+  EXPECT_EQ(released.entries, 1u);
+  EXPECT_GT(released.bytes, 0u);
+  EXPECT_EQ(pool.GetUsage(), ResourceCacheUsage{});
+}
+
+// Red before EN46b: a resized view's old extent stayed until the caps.
+TEST(ContextVKTest, TransientsPoolResizedViewReleasesOldKey) {
+  auto pool = MakeOwnerTestPool();
+  const auto before = OwnerTestDescriptor(128, 64);
+  const auto after = OwnerTestDescriptor(128, 96);
+  const TransientsOwnerVK owner{.view_id = 3};
+
+  ASSERT_TRUE(pool.Acquire(before, true, owner));
+  auto new_set = pool.Acquire(after, true, owner);
+  ASSERT_TRUE(new_set);
+  // Re-keying never frees inside Acquire.
+  EXPECT_EQ(pool.GetUsage().entries, 2u);
+
+  // The end-of-frame check frees the extent no existing view holds.
+  EXPECT_EQ(pool.ReleaseOrphans().entries, 1u);
+  EXPECT_EQ(pool.GetUsage().entries, 1u);
+  EXPECT_EQ(pool.Acquire(after, true, owner), new_set);
+  // Taking the old extent again is a fresh entry.
+  auto again = pool.Acquire(before, true, TransientsOwnerVK{.view_id = 4});
+  ASSERT_TRUE(again);
+  EXPECT_EQ(pool.GetUsage().entries, 2u);
+}
+
+TEST(ContextVKTest, TransientsPoolSharedKeySurvivesOneOwnerRemoval) {
+  auto pool = MakeOwnerTestPool();
+  const auto desc = OwnerTestDescriptor(128, 64);
+  auto first = pool.Acquire(desc, true, TransientsOwnerVK{.view_id = 1});
+  auto second = pool.Acquire(desc, true, TransientsOwnerVK{.view_id = 2});
+  ASSERT_TRUE(first);
+  ASSERT_EQ(first, second);
+  first.reset();
+  second.reset();
+
+  EXPECT_EQ(pool.ReleaseOwner(TransientsOwnerVK{.view_id = 1}).entries, 0u);
+  EXPECT_EQ(pool.ReleaseOrphans().entries, 0u);
+  EXPECT_EQ(pool.GetUsage().entries, 1u);
+
+  EXPECT_EQ(pool.ReleaseOwner(TransientsOwnerVK{.view_id = 2}).entries, 1u);
+  EXPECT_EQ(pool.GetUsage().entries, 0u);
+}
+
+// A successor view that takes the extent before its predecessor is removed
+// keeps the warm set.
+TEST(ContextVKTest, TransientsPoolMakeBeforeBreakRemountKeepsEntry) {
+  auto pool = MakeOwnerTestPool();
+  const auto desc = OwnerTestDescriptor(2880, 30);
+  auto predecessor = pool.Acquire(desc, true, TransientsOwnerVK{.view_id = 16});
+  ASSERT_TRUE(predecessor);
+  auto* set = predecessor.get();
+  predecessor.reset();
+
+  auto successor = pool.Acquire(desc, true, TransientsOwnerVK{.view_id = 25});
+  EXPECT_EQ(successor.get(), set);
+  successor.reset();
+  EXPECT_EQ(pool.ReleaseOwner(TransientsOwnerVK{.view_id = 16}).entries, 0u);
+  EXPECT_EQ(pool.ReleaseOrphans().entries, 0u);
+  EXPECT_EQ(pool.Acquire(desc, true, TransientsOwnerVK{.view_id = 25}).get(),
+            set);
+}
+
+// An orphan is freed only after its last wrapper and its last GPU use are
+// gone; never while either still references the attachments.
+TEST(ContextVKTest, TransientsPoolOrphanFreedOnlyWhenIdle) {
+  auto context = MockVulkanContextBuilder().Build();
+  auto pool = context->GetSwapchainTransientsPool();
+  const auto desc = OwnerTestDescriptor(100, 100);
+  const TransientsOwnerVK owner{.view_id = 9};
+
+  auto leased = pool->Acquire(desc, true, owner);
+  ASSERT_TRUE(leased);
+  auto depth_stencil = leased->GetDepthStencilTexture();
+  ASSERT_TRUE(depth_stencil);
+  auto command_buffer = context->CreateCommandBuffer();
+  ASSERT_TRUE(command_buffer);
+  ASSERT_TRUE(CommandBufferVK::Cast(*command_buffer).Track(depth_stencil));
+  depth_stencil.reset();
+
+  // Still leased by a wrapper.
+  EXPECT_EQ(pool->ReleaseOwner(owner).entries, 0u);
+  EXPECT_EQ(pool->GetUsage().entries, 1u);
+  // Only referenced by recorded GPU work.
+  leased.reset();
+  EXPECT_EQ(pool->ReleaseOrphans().entries, 0u);
+  EXPECT_EQ(pool->GetUsage().entries, 1u);
+  // Idle.
+  command_buffer.reset();
+  EXPECT_EQ(pool->ReleaseOrphans().entries, 1u);
+  EXPECT_EQ(pool->GetUsage().entries, 0u);
+}
+
+// Hidden views keep ownership: an owned, idle, unorphaned entry is not
+// released by the orphan check.
+TEST(ContextVKTest, TransientsPoolOwnedIdleEntryIsNotAnOrphan) {
+  auto pool = MakeOwnerTestPool();
+  const auto desc = OwnerTestDescriptor(64, 64);
+  ASSERT_TRUE(pool.Acquire(desc, true, TransientsOwnerVK{.view_id = 1}));
+  EXPECT_EQ(pool.ReleaseOrphans().entries, 0u);
+  EXPECT_EQ(pool.ReleaseOwner(TransientsOwnerVK{.view_id = 2}).entries, 0u);
+  EXPECT_EQ(pool.GetUsage().entries, 1u);
+}
+
+// A refused acquisition leaves the owner on the extent it already holds.
+TEST(ContextVKTest, TransientsPoolRefusedAcquisitionKeepsOwnership) {
+  TransientsPoolVK pool(std::weak_ptr<Context>(), PixelFormat::kD24UnormS8Uint,
+                        /*supports_memoryless_textures=*/false,
+                        TransientsPoolLimitsVK{
+                            .max_entries = 1u,
+                            .max_bytes = 64u * 1024u * 1024u,
+                            .allow_environment_override = false,
+                        });
+  const auto held = OwnerTestDescriptor(64, 64);
+  const auto refused = OwnerTestDescriptor(64, 65);
+  const TransientsOwnerVK owner{.view_id = 1};
+  auto lease = pool.Acquire(held, true, owner);
+  ASSERT_TRUE(lease);
+  EXPECT_FALSE(pool.Acquire(refused, true, owner));
+  lease.reset();
+  EXPECT_EQ(pool.ReleaseOrphans().entries, 0u);
+  EXPECT_EQ(pool.GetUsage().entries, 1u);
+}
+
+// At the caps an idle orphan is evicted before a warm owned entry.
+TEST(ContextVKTest, TransientsPoolCapEvictsOrphansFirst) {
+  TransientsPoolVK pool(std::weak_ptr<Context>(), PixelFormat::kD24UnormS8Uint,
+                        /*supports_memoryless_textures=*/false,
+                        TransientsPoolLimitsVK{
+                            .max_entries = 2u,
+                            .max_bytes = 64u * 1024u * 1024u,
+                            .allow_environment_override = false,
+                        });
+  const auto hidden_view = OwnerTestDescriptor(64, 64);
+  const auto old_extent = OwnerTestDescriptor(64, 65);
+  const auto new_extent = OwnerTestDescriptor(64, 66);
+  auto* warm =
+      pool.Acquire(hidden_view, true, TransientsOwnerVK{.view_id = 1}).get();
+  ASSERT_TRUE(pool.Acquire(old_extent, true, TransientsOwnerVK{.view_id = 2}));
+  // View 2 moves; its old extent becomes an idle orphan at the LRU front.
+  ASSERT_TRUE(pool.Acquire(new_extent, true, TransientsOwnerVK{.view_id = 2}));
+  EXPECT_EQ(pool.GetUsage().entries, 2u);
+  EXPECT_EQ(
+      pool.Acquire(hidden_view, true, TransientsOwnerVK{.view_id = 1}).get(),
+      warm);
+}
+
 TEST(ContextVKTest, TransientsPoolTrimDropsOnlyIdleEntries) {
   TextureDescriptor first_desc;
   first_desc.size = ISize(64, 64);

@@ -838,6 +838,13 @@ class Rasterizer final : public SnapshotDelegate,
 
   void FireNextFrameCallbackIfPresent();
 
+  // The Impeller context that renders this rasterizer's surface, if any.
+  std::shared_ptr<impeller::Context> GetSurfaceImpellerContext() const;
+
+  // Engine-private render-resource work owed once per raster frame, after
+  // every view has rendered.
+  void EndRasterFrameResources() const;
+
   static bool ShouldResubmitFrame(const DoDrawResult& result);
   static DrawStatus ToDrawStatus(DoDrawStatus status);
 

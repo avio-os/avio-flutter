@@ -791,6 +791,20 @@ ResourceCacheTrimResult ContextVK::TrimIdleResourceCaches() {
   return swapchain_transients_pool_->TrimIdle();
 }
 
+void ContextVK::ReleaseTransientOwner(int64_t owner) {
+  if (!swapchain_transients_pool_) {
+    return;
+  }
+  swapchain_transients_pool_->ReleaseOwner(TransientsOwnerVK{.view_id = owner});
+}
+
+void ContextVK::ReleaseOrphanedTransients() {
+  if (!swapchain_transients_pool_) {
+    return;
+  }
+  swapchain_transients_pool_->ReleaseOrphans();
+}
+
 const std::shared_ptr<YUVConversionLibraryVK>&
 ContextVK::GetYUVConversionLibrary() const {
   return yuv_conversion_library_;

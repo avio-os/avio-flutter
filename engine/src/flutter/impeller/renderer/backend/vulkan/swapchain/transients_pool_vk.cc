@@ -50,23 +50,68 @@ void TransientsPoolVK::Reset() {
   std::scoped_lock lock(mutex_);
   lru_.clear();
   total_bytes_ = 0;
+  owner_keys_.clear();
+}
+
+TransientsPoolVK::Key TransientsPoolVK::KeyFor(const TextureDescriptor& desc,
+                                               bool enable_msaa) {
+  return Key{
+      .width = static_cast<int>(desc.size.width),
+      .height = static_cast<int>(desc.size.height),
+      .color_format = desc.format,
+      .enable_msaa = enable_msaa,
+  };
 }
 
 std::shared_ptr<SwapchainTransientsVK> TransientsPoolVK::Acquire(
     const TextureDescriptor& desc,
     bool enable_msaa,
     TransientsPoolRefusalVK* refusal) {
+  std::scoped_lock lock(mutex_);
+  const auto entry = AcquireLocked(desc, enable_msaa, refusal);
+  return entry == lru_.end() ? nullptr : entry->transients;
+}
+
+std::shared_ptr<SwapchainTransientsVK> TransientsPoolVK::Acquire(
+    const TextureDescriptor& desc,
+    bool enable_msaa,
+    TransientsOwnerVK owner,
+    TransientsPoolRefusalVK* refusal) {
+  std::scoped_lock lock(mutex_);
+  // The owner's claim moves to the key it acquires now. Withdraw it before
+  // admission so that, if the caps force an eviction, the extent this owner
+  // is leaving counts as an orphan (when no other owner holds it) and goes
+  // before another view's warm set.
+  std::optional<Key> previous;
+  if (const auto held = owner_keys_.find(owner.view_id);
+      held != owner_keys_.end()) {
+    previous = held->second;
+    owner_keys_.erase(held);
+  }
+  const auto entry = AcquireLocked(desc, enable_msaa, refusal);
+  if (entry == lru_.end()) {
+    // Refused: the owner keeps the extent it already holds.
+    if (previous.has_value()) {
+      owner_keys_.insert_or_assign(owner.view_id, *previous);
+    }
+    return nullptr;
+  }
+  // The owner now holds this key. A key it held before has lost the owner;
+  // if no other owner holds it, it is an orphan that a later ReleaseOwner or
+  // ReleaseOrphans frees once idle. Nothing is freed here except by the caps.
+  entry->owned = true;
+  owner_keys_.insert_or_assign(owner.view_id, entry->key);
+  return entry->transients;
+}
+
+std::list<TransientsPoolVK::Entry>::iterator TransientsPoolVK::AcquireLocked(
+    const TextureDescriptor& desc,
+    bool enable_msaa,
+    TransientsPoolRefusalVK* refusal) {
   if (refusal) {
     *refusal = {};
   }
-  Key key{
-      .width = static_cast<int>(desc.size.width),
-      .height = static_cast<int>(desc.size.height),
-      .color_format = desc.format,
-      .enable_msaa = enable_msaa,
-  };
-
-  std::scoped_lock lock(mutex_);
+  const Key key = KeyFor(desc, enable_msaa);
 
   // Hit: the key's one entry, whatever its lease. A leased entry may still be
   // referenced by a pending render target or by in-flight GPU work; sharing
@@ -76,7 +121,7 @@ std::shared_ptr<SwapchainTransientsVK> TransientsPoolVK::Acquire(
   // passes' writes (see SwapchainTransientsVK).
   if (const auto found = FindLocked(key); found != lru_.end()) {
     lru_.splice(lru_.begin(), lru_, found);
-    return lru_.front().transients;
+    return lru_.begin();
   }
 
   // Miss: construct the key's one entry. Bind the transients to the same
@@ -97,20 +142,18 @@ std::shared_ptr<SwapchainTransientsVK> TransientsPoolVK::Acquire(
           .requested_bytes = footprint.value_or(0u),
       };
     }
-    return nullptr;
+    return lru_.end();
   }
   // ReserveFor only removes entries, so the key is still absent.
   FML_DCHECK(FindLocked(key) == lru_.end());
-  auto transients =
-      std::make_shared<SwapchainTransientsVK>(context_, desc, enable_msaa);
   lru_.push_front(Entry{
       .key = key,
-      .transients = transients,
+      .transients =
+          std::make_shared<SwapchainTransientsVK>(context_, desc, enable_msaa),
       .byte_footprint = *footprint,
   });
   total_bytes_ += *footprint;
-
-  return transients;
+  return lru_.begin();
 }
 
 std::optional<size_t> TransientsPoolVK::ComputeFootprint(
@@ -172,12 +215,20 @@ bool TransientsPoolVK::ReserveFor(size_t byte_footprint) {
   }
   while (lru_.size() >= max_entries_ ||
          total_bytes_ > max_bytes_ - byte_footprint) {
+    // An idle orphan holds an extent no existing owner uses, so it goes
+    // first; otherwise the least recently used idle entry.
     auto candidate = lru_.end();
     for (auto it = lru_.end(); it != lru_.begin();) {
       --it;
-      if (EntryIsIdle(*it)) {
+      if (EntryIsIdle(*it) && EntryIsOrphanLocked(*it)) {
         candidate = it;
         break;
+      }
+    }
+    for (auto it = lru_.end(); candidate == lru_.end() && it != lru_.begin();) {
+      --it;
+      if (EntryIsIdle(*it)) {
+        candidate = it;
       }
     }
     if (candidate == lru_.end()) {
@@ -191,6 +242,48 @@ bool TransientsPoolVK::ReserveFor(size_t byte_footprint) {
 
 bool TransientsPoolVK::EntryIsIdle(const Entry& entry) const {
   return entry.transients.use_count() == 1u && entry.transients->IsIdle();
+}
+
+bool TransientsPoolVK::KeyHasOwnerLocked(const Key& key) const {
+  for (const auto& [_, owned_key] : owner_keys_) {
+    if (owned_key == key) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool TransientsPoolVK::EntryIsOrphanLocked(const Entry& entry) const {
+  return entry.owned && !KeyHasOwnerLocked(entry.key);
+}
+
+TransientsOrphansReleasedVK TransientsPoolVK::ReleaseIdleOrphansLocked() {
+  TransientsOrphansReleasedVK released;
+  for (auto it = lru_.begin(); it != lru_.end();) {
+    if (!EntryIsOrphanLocked(*it) || !EntryIsIdle(*it)) {
+      ++it;
+      continue;
+    }
+    // Dropping the pool's reference hands the textures to the context's
+    // resource manager, which destroys them off this thread.
+    released.entries++;
+    released.bytes += it->byte_footprint;
+    total_bytes_ -= it->byte_footprint;
+    it = lru_.erase(it);
+  }
+  return released;
+}
+
+TransientsOrphansReleasedVK TransientsPoolVK::ReleaseOwner(
+    TransientsOwnerVK owner) {
+  std::scoped_lock lock(mutex_);
+  owner_keys_.erase(owner.view_id);
+  return ReleaseIdleOrphansLocked();
+}
+
+TransientsOrphansReleasedVK TransientsPoolVK::ReleaseOrphans() {
+  std::scoped_lock lock(mutex_);
+  return ReleaseIdleOrphansLocked();
 }
 
 std::list<TransientsPoolVK::Entry>::iterator TransientsPoolVK::FindLocked(

@@ -6,6 +6,7 @@
 #define FLUTTER_IMPELLER_RENDERER_CONTEXT_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <string>
@@ -248,6 +249,17 @@ class Context {
   /// leased by a render target or referenced by submitted GPU work remain
   /// owned by the cache. Backends without such a cache return zero usage.
   virtual ResourceCacheTrimResult TrimIdleResourceCaches() { return {}; }
+
+  /// The render-target owner `owner` (an embedder view id) no longer exists.
+  /// Context-scoped attachment caches drop its claim and free, once idle, the
+  /// entries that no existing owner holds. Called on the raster thread when
+  /// the view is collected. Backends without such a cache do nothing.
+  virtual void ReleaseTransientOwner(int64_t owner) {}
+
+  /// Free idle context-scoped attachment entries that no existing owner holds.
+  /// Called on the raster thread once per raster frame, after every view has
+  /// rendered. Backends without such a cache do nothing.
+  virtual void ReleaseOrphanedTransients() {}
 
   /// @brief Enqueue command_buffer for submission by the end of the frame.
   ///

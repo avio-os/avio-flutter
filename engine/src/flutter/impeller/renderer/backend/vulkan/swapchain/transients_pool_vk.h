@@ -6,10 +6,12 @@
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_SWAPCHAIN_TRANSIENTS_POOL_VK_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 
 #include "impeller/base/thread.h"
 #include "impeller/core/formats.h"
@@ -29,6 +31,23 @@ struct TransientsPoolRefusalVK {
   size_t entries = 0;
   size_t bytes = 0;
   size_t requested_bytes = 0;
+};
+
+/// Identity of the render-target owner on whose behalf a transient set is
+/// acquired: the embedder's view id. An owner holds exactly one key at a time,
+/// the extent of its latest acquisition.
+struct TransientsOwnerVK {
+  int64_t view_id = 0;
+
+  constexpr bool operator==(const TransientsOwnerVK&) const = default;
+};
+
+/// Entries freed because no existing owner held their extent any more.
+struct TransientsOrphansReleasedVK {
+  size_t entries = 0u;
+  size_t bytes = 0u;
+
+  constexpr bool operator==(const TransientsOrphansReleasedVK&) const = default;
 };
 
 struct TransientsPoolLimitsVK {
@@ -69,11 +88,21 @@ struct TransientsPoolLimitsVK {
 ///             still on the GPU) share it under the single-queue invariant
 ///             documented on `SwapchainTransientsVK`.
 ///
+///             A set lives while an existing owner (an embedder view) holds
+///             its extent. An owned acquisition records the owner's current
+///             key; acquiring another key moves the owner, and removing the
+///             view releases it (`ReleaseOwner`). An entry that some owner
+///             held and that no existing owner holds any more is an orphan:
+///             it is freed by the first `ReleaseOwner` or `ReleaseOrphans`
+///             call that finds it idle, never inside `Acquire`'s hit path.
+///             Hidden views keep their ownership, so their extents stay warm.
+///
 ///             Entries are evicted in LRU order on insert until both
-///             constraints are satisfied. Only idle entries (no external
-///             wrapper owner and no texture referenced by submitted GPU work)
-///             are ever evicted or trimmed. The most-recently-acquired entry
-///             is never evicted in the same call that produced it.
+///             constraints are satisfied, idle orphans first. Only idle
+///             entries (no external wrapper owner and no texture referenced
+///             by submitted GPU work) are ever evicted, trimmed or released.
+///             The most-recently-acquired entry is never evicted in the same
+///             call that produced it.
 ///
 class TransientsPoolVK {
  public:
@@ -126,6 +155,26 @@ class TransientsPoolVK {
       bool enable_msaa,
       TransientsPoolRefusalVK* refusal = nullptr);
 
+  /// @brief  `Acquire` on behalf of `owner`. On success the owner holds this
+  ///         key; if it held another key before, that entry loses the owner
+  ///         and, once no owner holds it, becomes an orphan. A refused
+  ///         acquisition leaves the owner where it was. Never frees.
+  std::shared_ptr<SwapchainTransientsVK> Acquire(
+      const TextureDescriptor& desc,
+      bool enable_msaa,
+      TransientsOwnerVK owner,
+      TransientsPoolRefusalVK* refusal = nullptr);
+
+  /// @brief  The owner (a removed view) no longer exists. Frees every idle
+  ///         orphan, including the entry this owner was the last to hold.
+  ///         Busy orphans stay until a later release finds them idle.
+  TransientsOrphansReleasedVK ReleaseOwner(TransientsOwnerVK owner);
+
+  /// @brief  Frees every idle orphan. Called once per raster frame, after
+  ///         every view has rendered, so an orphan whose last GPU use has
+  ///         completed does not outlive the next frame.
+  TransientsOrphansReleasedVK ReleaseOrphans();
+
   /// @brief  Drop all cached entries. Must be called before the owning
   ///         `ResourceManagerVK` and `TimelineCompletionVK` are destroyed so
   ///         that the textures' destructors complete cleanly.
@@ -162,6 +211,9 @@ class TransientsPoolVK {
     Key key;
     std::shared_ptr<SwapchainTransientsVK> transients;
     size_t byte_footprint = 0;
+    // Whether any owner ever held this entry. Entries acquired only without
+    // an owner have no lifetime owner and are never orphans.
+    bool owned = false;
   };
 
   // Compute the worst-case device memory footprint of an entry. Returns 0
@@ -177,8 +229,24 @@ class TransientsPoolVK {
 
   bool EntryIsIdle(const Entry& entry) const IPLR_REQUIRES(mutex_);
 
+  static Key KeyFor(const TextureDescriptor& desc, bool enable_msaa);
+
   // The key's one entry, or `lru_.end()`.
   std::list<Entry>::iterator FindLocked(const Key& key) IPLR_REQUIRES(mutex_);
+
+  // The shared hit-or-insert path of both `Acquire` forms.
+  std::list<Entry>::iterator AcquireLocked(const TextureDescriptor& desc,
+                                           bool enable_msaa,
+                                           TransientsPoolRefusalVK* refusal)
+      IPLR_REQUIRES(mutex_);
+
+  // Whether some existing owner holds `key`.
+  bool KeyHasOwnerLocked(const Key& key) const IPLR_REQUIRES(mutex_);
+
+  // An entry that an owner held and no existing owner holds any more.
+  bool EntryIsOrphanLocked(const Entry& entry) const IPLR_REQUIRES(mutex_);
+
+  TransientsOrphansReleasedVK ReleaseIdleOrphansLocked() IPLR_REQUIRES(mutex_);
 
   ResourceCacheUsage GetUsageLocked() const IPLR_REQUIRES(mutex_);
 
@@ -194,6 +262,8 @@ class TransientsPoolVK {
   // LRU order: front = most recently accessed, back = candidate for eviction.
   std::list<Entry> lru_ IPLR_GUARDED_BY(mutex_);
   size_t total_bytes_ IPLR_GUARDED_BY(mutex_) = 0;
+  // Each existing owner's current key.
+  std::unordered_map<int64_t, Key> owner_keys_ IPLR_GUARDED_BY(mutex_);
 };
 
 }  // namespace impeller

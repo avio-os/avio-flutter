@@ -1620,12 +1620,15 @@ namespace {
 // reuses MSAA + depth/stencil attachments across `EmbedderRenderTarget`
 // lifetimes so embedder paths that disable Flutter's render-target cache
 // (e.g. Wayland compositors that own the presentable buffer ring) do not
-// re-allocate the attachments per frame. Returns nullptr if the context
-// has no Vulkan backend or the pool has been torn down.
+// re-allocate the attachments per frame. The acquisition is made on behalf of
+// the target's view, so the set lives while an existing view holds its extent
+// (the rasterizer releases the owner when it collects the view). Returns
+// nullptr if the context has no Vulkan backend or the pool has been torn down.
 std::shared_ptr<impeller::SwapchainTransientsVK> GetCachedSwapchainTransientsVK(
     const std::shared_ptr<impeller::Context>& context,
     const impeller::TextureDescriptor& desc,
     bool enable_msaa,
+    impeller::TransientsOwnerVK owner,
     impeller::TransientsPoolRefusalVK* refusal) {
   if (!context ||
       context->GetBackendType() != impeller::Context::BackendType::kVulkan) {
@@ -1636,7 +1639,7 @@ std::shared_ptr<impeller::SwapchainTransientsVK> GetCachedSwapchainTransientsVK(
   if (!pool) {
     return nullptr;
   }
-  return pool->Acquire(desc, enable_msaa, refusal);
+  return pool->Acquire(desc, enable_msaa, owner, refusal);
 }
 
 bool HasPreservedSelectedTargetContents(
@@ -1759,9 +1762,11 @@ MakeRenderTargetFromBackingStoreImpeller(
   const bool preserved_contents =
       selected_target_damage &&
       HasPreservedSelectedTargetContents(backing_store);
-  auto create_target =
-      [impeller_context = aiks_context->GetContext(), desc, wrapped_source,
-       preserved_contents]() -> std::unique_ptr<impeller::RenderTarget> {
+  const impeller::TransientsOwnerVK owner{
+      .view_id = static_cast<int64_t>(config.view_id)};
+  auto create_target = [impeller_context = aiks_context->GetContext(), desc,
+                        wrapped_source, preserved_contents,
+                        owner]() -> std::unique_ptr<impeller::RenderTarget> {
     // Impeller antialiases geometry by rastering it multisampled and resolving.
     // A single-sample root pass therefore has no antialiasing at all: every
     // clip edge and every arbitrary path in the frame lands hard-edged. That
@@ -1769,9 +1774,9 @@ MakeRenderTargetFromBackingStoreImpeller(
     // first. A known external-image layout also permits bounded MSAA resolve.
     impeller::TransientsPoolRefusalVK msaa_refusal;
     impeller::TransientsPoolRefusalVK fallback_refusal;
-    auto transients =
-        GetCachedSwapchainTransientsVK(impeller_context, desc,
-                                       /*enable_msaa=*/true, &msaa_refusal);
+    auto transients = GetCachedSwapchainTransientsVK(impeller_context, desc,
+                                                     /*enable_msaa=*/true,
+                                                     owner, &msaa_refusal);
     const bool multisampled = transients != nullptr;
     if (!multisampled) {
       // The transients budget could not seat a multisample reservation -- every
@@ -1779,7 +1784,7 @@ MakeRenderTargetFromBackingStoreImpeller(
       // frame single-sampled costs the frame its antialiasing; refusing to
       // render costs the frame entirely.
       transients = GetCachedSwapchainTransientsVK(impeller_context, desc,
-                                                  /*enable_msaa=*/false,
+                                                  /*enable_msaa=*/false, owner,
                                                   &fallback_refusal);
     }
     auto surface = impeller::SurfaceVK::WrapSwapchainImage(

@@ -193,15 +193,27 @@ void Rasterizer::NotifyLowMemoryWarning() const {
 #endif  //  !SLIMPELLER
 }
 
+std::shared_ptr<impeller::Context> Rasterizer::GetSurfaceImpellerContext()
+    const {
+  if (!surface_) {
+    return nullptr;
+  }
+  auto aiks_context = surface_->GetAiksContext();
+  return aiks_context ? aiks_context->GetContext() : nullptr;
+}
+
 void Rasterizer::TrimIdleResourceCaches() const {
-  if (surface_) {
-    auto aiks_context = surface_->GetAiksContext();
-    if (aiks_context) {
-      auto context = aiks_context->GetContext();
-      if (context) {
-        context->TrimIdleResourceCaches();
-      }
-    }
+  if (auto context = GetSurfaceImpellerContext()) {
+    context->TrimIdleResourceCaches();
+  }
+}
+
+void Rasterizer::EndRasterFrameResources() const {
+  // Transient attachment sets whose extent no existing view holds any more
+  // are freed once their last GPU use has completed. The free itself is
+  // asynchronous (the context's resource manager destroys the images).
+  if (auto context = GetSurfaceImpellerContext()) {
+    context->ReleaseOrphanedTransients();
   }
 }
 
@@ -210,6 +222,10 @@ void Rasterizer::CollectView(int64_t view_id) {
     external_view_embedder_->CollectView(view_id);
   }
   view_records_.erase(view_id);
+  // A removed view no longer holds its extent's transient attachments.
+  if (auto context = GetSurfaceImpellerContext()) {
+    context->ReleaseTransientOwner(view_id);
+  }
 }
 
 std::shared_ptr<flutter::TextureRegistry> Rasterizer::GetTextureRegistry() {
@@ -870,6 +886,7 @@ std::unique_ptr<FrameItem> Rasterizer::DrawToSurfacesUnsafe(
     delegate_.OnFrameOpportunityBackpressured(frame_opportunity->display_id,
                                               backpressured_target_ids);
   }
+  EndRasterFrameResources();
   // TODO(dkwingsmt): Pass in raster cache(s) for all views.
   // See https://github.com/flutter/flutter/issues/135530, item 4.
   frame_timings_recorder.RecordRasterEnd(

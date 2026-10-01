@@ -80,6 +80,7 @@ already ancestors of the selected main target under their original commits.
 | 44 | Carry typed analytic clips with retained compositor materials | permanent ABI/scene extension | none |
 | 45 | Author semantic foreground coverage for an external linear-light backdrop | permanent composition-contract extension | none — Flutter otherwise cannot know that its transparent target receives a backdrop later |
 | 46a | One transient attachment set per key on the single graphics queue | permanent resource-lifecycle correction (restores patch 11's one-entry-per-key pool; the incoming depth/stencil dependency is upstreamable) | partial: flutter/flutter#144617 recycles one onscreen set upstream |
+| 46b | A transient set lives while an existing view holds its extent | permanent resource-lifecycle owner (ships only with Avio G2, which keeps a ShellItem's view across extent changes) | none — upstream frees with the swapchain |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -161,6 +162,25 @@ hazard) and its negative control
 `RendererTest.SharedDepthStencilNeedsTheWidenedIncomingDependency` (the same
 passes recorded with the pre-46a color-only incoming dependency must report a
 depth/stencil hazard; with the builder's pass, none).
+
+Patch 46b gives each set a lifetime owner. The embedder acquires a root
+target's set on behalf of its `FlutterBackingStoreConfig.view_id`; the pool
+records each owner's current key and moves it when the view acquires another
+extent. `Rasterizer::CollectView` releases the owner
+(`Context::ReleaseTransientOwner`), and once per raster frame, after every
+view, `Context::ReleaseOrphanedTransients` frees idle orphans: entries some
+owner held that no existing owner holds any more. A busy orphan stays until a
+later check finds it idle; nothing is freed inside `Acquire`'s hit path, and
+at the caps an idle orphan is evicted before another view's warm set. Hidden
+views keep ownership, so warmth is unchanged, and the all-hidden trim
+(patch 36) stays. Without Avio's G2 an extent toggle (a new view id per
+change) would turn every return into a fresh set, so 46b is kept on the
+branch only together with G2. Regressions:
+`TransientsPoolRemovedViewReleasesItsOnlyKey`,
+`TransientsPoolResizedViewReleasesOldKey`,
+`TransientsPoolSharedKeySurvivesOneOwnerRemoval`,
+`TransientsPoolMakeBeforeBreakRemountKeepsEntry`,
+`TransientsPoolOrphanFreedOnlyWhenIdle`, `TransientsPoolCapEvictsOrphansFirst`.
 
 ### Patch 22: scoped render authority
 
