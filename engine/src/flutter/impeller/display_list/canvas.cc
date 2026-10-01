@@ -387,6 +387,13 @@ Canvas::Canvas(ContentContext& renderer,
   SetupRenderPass();
 }
 
+Canvas::~Canvas() {
+  // A replay that never reached EndReplay still returns its leases.
+  if (render_target_scope_.has_value()) {
+    renderer_.GetRenderTargetCache()->EndScope(*render_target_scope_);
+  }
+}
+
 void Canvas::Initialize(std::optional<Rect> cull_rect) {
   initial_cull_rect_ = cull_rect;
   transform_stack_.emplace_back(CanvasStackEntry{
@@ -1633,7 +1640,10 @@ void Canvas::DrawAtlas(const std::shared_ptr<AtlasContents>& atlas_contents,
 /////////////////////////////////////////
 
 void Canvas::SetupRenderPass() {
-  renderer_.GetRenderTargetCache()->Start();
+  // One lease scope per replay. The cache ages once per raster frame (its
+  // owner calls End), never per Canvas.
+  FML_DCHECK(!render_target_scope_.has_value());
+  render_target_scope_ = renderer_.GetRenderTargetCache()->BeginScope();
   ColorAttachment color0 = render_target_.GetColorAttachment(0);
 
   auto& stencil_attachment = render_target_.GetStencilAttachment();
@@ -2780,7 +2790,10 @@ bool Canvas::EndReplay() {
     VALIDATION_LOG << "Failed to submit command buffers";
   }
   render_passes_.clear();
-  renderer_.GetRenderTargetCache()->End();
+  if (render_target_scope_.has_value()) {
+    renderer_.GetRenderTargetCache()->EndScope(*render_target_scope_);
+    render_target_scope_.reset();
+  }
   clip_geometry_.clear();
 
   Reset();

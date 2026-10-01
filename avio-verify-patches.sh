@@ -441,6 +441,13 @@ need "the RenderTargetCache size counter carries real bytes" \
   $F/impeller/entity/render_target_cache.cc '"real_bytes",'
 need "Flip allocates one single-sample secondary" \
   $F/impeller/entity/entity_pass_target.cc '"EntityPassTarget Secondary"'
+need "a Canvas replay only leases render targets" \
+  $F/impeller/display_list/canvas.cc \
+  'render_target_scope_ = renderer_\.GetRenderTargetCache\(\)->BeginScope\(\)'
+absent_in "a Canvas replay never ages the render-target cache" \
+  $F/impeller/display_list/canvas.cc 'GetRenderTargetCache\(\)->(Start|End)\(\)'
+need "the rasterizer ages the render-target cache once per frame" \
+  $F/shell/common/rasterizer.cc 'cache->End\(\);'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

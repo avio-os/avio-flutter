@@ -36,6 +36,9 @@ bool Surface::DrawDisplayList(const DisplayList& dl) const {
 
   auto result = RenderToTarget(content_context, render_target, display_list,
                                cull_rect, /*reset_host_buffer=*/true);
+  // Each draw is one frame of this surface: one aging epoch of the offscreen
+  // render-target cache (Canvas replays only lease).
+  content_context.GetRenderTargetCache()->End();
   context_->GetContext()->ResetThreadLocalState();
   return result;
 }

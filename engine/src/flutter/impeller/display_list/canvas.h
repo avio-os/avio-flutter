@@ -145,7 +145,7 @@ class Canvas {
                   bool requires_readback,
                   IRect32 cull_rect);
 
-  ~Canvas() = default;
+  ~Canvas();
 
   /// @brief Update the backdrop data used to group together backdrop filters
   ///        within the same layer
@@ -310,6 +310,9 @@ class Canvas {
   bool requires_readback_;
   // Sticky for this replay, including subpasses removed during Restore.
   bool rendering_failed_ = false;
+  // This replay's render-target lease scope, open from SetupRenderPass until
+  // EndReplay (or destruction).
+  std::optional<uint64_t> render_target_scope_;
   EntityPassClipStack clip_coverage_stack_;
 
   std::deque<CanvasStackEntry> transform_stack_;

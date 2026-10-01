@@ -17,8 +17,12 @@ namespace impeller {
 /// @brief An implementation of the [RenderTargetAllocator] that caches all
 ///        allocated texture data for at least one frame.
 ///
-///        Any textures unused after [keep_alive_frame_count] frames are
-///        discarded.
+///        Leases and aging are separate. A workload (one Canvas replay) opens
+///        a lease scope; the targets it receives stay leased by it until the
+///        scope closes, and nested scopes never share them. Aging happens once
+///        per frame (`End`, called by the frame's owner after every view):
+///        textures unused for [keep_alive_frame_count] frames are discarded.
+///        Snapshot and per-view workloads therefore never age the cache.
 class RenderTargetCache : public RenderTargetAllocator {
  public:
   explicit RenderTargetCache(std::shared_ptr<Allocator> allocator,
@@ -31,6 +35,12 @@ class RenderTargetCache : public RenderTargetAllocator {
 
   // |RenderTargetAllocator|
   void End() override;
+
+  // |RenderTargetAllocator|
+  uint64_t BeginScope() override;
+
+  // |RenderTargetAllocator|
+  void EndScope(uint64_t scope) override;
 
   // |RenderTargetAllocator|
   void DisableCache() override;
@@ -95,7 +105,18 @@ class RenderTargetCache : public RenderTargetAllocator {
   size_t CachedTextureCount() const;
 
  private:
+  // Lease identities: unleased, leased outside any scope (released by the
+  // next Start or End), or a scope id from BeginScope.
+  static constexpr uint64_t kUnleased = 0u;
+  static constexpr uint64_t kFrameScope = 1u;
+
+  struct Scope {
+    uint64_t id = kFrameScope;
+    uint32_t disabled_count = 0u;
+  };
+
   struct RenderTargetData {
+    // Used since the previous aging epoch.
     bool used_this_frame;
     uint32_t keep_alive_frame_count;
     RenderTargetConfig config;
@@ -105,9 +126,19 @@ class RenderTargetCache : public RenderTargetAllocator {
     size_t real_bytes = 0u;
     // The report interval in which this entry was created.
     uint64_t created_interval = 0u;
+    // The scope that leases this entry, or kUnleased.
+    uint64_t lease_scope = kUnleased;
   };
 
   bool CacheEnabled() const;
+
+  // The innermost open scope, or kFrameScope.
+  uint64_t CurrentScope() const;
+
+  // The disable count of the innermost open scope.
+  uint32_t& CurrentDisabledCount();
+
+  void ReleaseLeases(uint64_t scope);
 
   // Lease a cached entry.
   void LeaseEntry(RenderTargetData& data);
@@ -133,10 +164,11 @@ class RenderTargetCache : public RenderTargetAllocator {
 
   std::vector<RenderTargetData> render_target_data_;
   uint32_t keep_alive_frame_count_;
-  uint32_t cache_disabled_count_ = 0;
-  // Whether a frame workload (Start..End) is open, so that used entries are
-  // leased.
-  bool frame_open_ = false;
+  // The disable count outside any scope.
+  uint32_t frame_disabled_count_ = 0;
+  // Open lease scopes, innermost last.
+  std::vector<Scope> scopes_;
+  uint64_t next_scope_id_ = kFrameScope + 1u;
   // Report interval counters.
   uint64_t interval_ = 0u;
   size_t peak_leased_nominal_bytes_ = 0u;

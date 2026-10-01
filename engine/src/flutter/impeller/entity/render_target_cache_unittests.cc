@@ -420,5 +420,128 @@ TEST_F(RenderTargetCacheResourceTest, MissReasonClassification) {
   cache.End();
 }
 
+// Red before EN51 (the scope API did not exist; with per-Canvas aging the
+// entry died after keep-alive foreign Canvases).
+TEST_F(RenderTargetCacheResourceTest, ForeignCanvasesWithinOneFrameDoNotAge) {
+  RenderTargetCache cache(allocator_);  // keep-alive 4
+  const uint64_t first_view = cache.BeginScope();
+  const RenderTarget status_bar = cache.CreateOffscreen(context_, {100, 30}, 1);
+  ASSERT_TRUE(status_bar.IsValid());
+  cache.EndScope(first_view);
+
+  // Fourteen sibling views render in the same frame.
+  for (int view = 0; view < 14; view++) {
+    const uint64_t scope = cache.BeginScope();
+    ASSERT_TRUE(cache.CreateOffscreen(context_, {200, 200}, 1).IsValid());
+    cache.EndScope(scope);
+  }
+  const size_t created = allocator_->created_textures;
+
+  const uint64_t again = cache.BeginScope();
+  EXPECT_EQ(
+      cache.CreateOffscreen(context_, {100, 30}, 1).GetRenderTargetTexture(),
+      status_bar.GetRenderTargetTexture());
+  cache.EndScope(again);
+  EXPECT_EQ(allocator_->created_textures, created);
+  cache.End();
+}
+
+TEST_F(RenderTargetCacheResourceTest, EntryUnusedForKeepAliveFramesIsDropped) {
+  RenderTargetCache cache(allocator_, /*keep_alive_frame_count=*/4);
+  const uint64_t scope = cache.BeginScope();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  cache.EndScope(scope);
+  cache.End();  // The frame that used it.
+
+  for (int frame = 0; frame < 4; frame++) {
+    cache.End();
+    EXPECT_EQ(cache.CachedTextureCount(), 1u) << "frame " << frame;
+  }
+  cache.End();
+  EXPECT_EQ(cache.CachedTextureCount(), 0u);
+}
+
+// Snapshot (toImage) Canvases lease and return; only frames age.
+TEST_F(RenderTargetCacheResourceTest, ToImageCanvasDoesNotAge) {
+  RenderTargetCache cache(allocator_, /*keep_alive_frame_count=*/0);
+  const uint64_t view = cache.BeginScope();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  cache.EndScope(view);
+  for (int snapshot = 0; snapshot < 20; snapshot++) {
+    const uint64_t scope = cache.BeginScope();
+    cache.EndScope(scope);
+  }
+  EXPECT_EQ(cache.CachedTextureCount(), 1u);
+}
+
+// Red before EN51: a nested Canvas's Start released every lease, so it could
+// be handed the texture its outer Canvas was still rendering into.
+TEST_F(RenderTargetCacheResourceTest, NestedScopeKeepsOuterLeases) {
+  RenderTargetCache cache(allocator_);
+  const uint64_t outer = cache.BeginScope();
+  const RenderTarget outer_target =
+      cache.CreateOffscreen(context_, {100, 100}, 1);
+  ASSERT_TRUE(outer_target.IsValid());
+
+  const uint64_t inner = cache.BeginScope();
+  const RenderTarget inner_target =
+      cache.CreateOffscreen(context_, {100, 100}, 1);
+  ASSERT_TRUE(inner_target.IsValid());
+  EXPECT_NE(inner_target.GetRenderTargetTexture(),
+            outer_target.GetRenderTargetTexture());
+  cache.EndScope(inner);
+
+  // Back in the outer scope: the inner texture is free again, the outer one
+  // is still leased.
+  const RenderTarget reused = cache.CreateOffscreen(context_, {100, 100}, 1);
+  EXPECT_EQ(reused.GetRenderTargetTexture(),
+            inner_target.GetRenderTargetTexture());
+  cache.EndScope(outer);
+  cache.End();
+  EXPECT_EQ(cache.CachedTextureCount(), 2u);
+}
+
+// The disable count belongs to the scope that set it.
+TEST_F(RenderTargetCacheResourceTest, DisableCacheIsPerScope) {
+  RenderTargetCache cache(allocator_);
+  cache.DisableCache();
+  const uint64_t scope = cache.BeginScope();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  EXPECT_EQ(cache.CachedTextureCount(), 1u);
+  cache.EndScope(scope);
+  // Still disabled outside the scope.
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {50, 50}, 1).IsValid());
+  EXPECT_EQ(cache.CachedTextureCount(), 1u);
+  cache.EnableCache();
+}
+
+// The usage report reads leases from the scopes: a scope's targets stay
+// leased until it closes, and closing it neither ages nor frees them.
+TEST_F(RenderTargetCacheResourceTest, ReportReadsLeasesFromScopes) {
+  RenderTargetCache cache(allocator_, /*keep_alive_frame_count=*/0);
+  const uint64_t outer = cache.BeginScope();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  const uint64_t inner = cache.BeginScope();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  EXPECT_EQ(cache.ReportUsage(false).leased_entries, 2u);
+  cache.EndScope(inner);
+  EXPECT_EQ(cache.ReportUsage(false).leased_entries, 1u);
+  cache.EndScope(outer);
+
+  const RenderResourceUsage report = cache.ReportUsage(false);
+  EXPECT_EQ(report.leased_entries, 0u);
+  EXPECT_EQ(report.entries, 2u);
+  EXPECT_EQ(report.distinct_keys, 1u);
+  EXPECT_EQ(report.duplicate_entries, 1u);
+  EXPECT_EQ(report.created_entries, 2u);
+
+  // Used in this epoch: the frame's End keeps both, even at keep-alive 0.
+  cache.End();
+  EXPECT_EQ(cache.CachedTextureCount(), 2u);
+  // The next epoch without a use drops both.
+  cache.End();
+  EXPECT_EQ(cache.CachedTextureCount(), 0u);
+}
+
 }  // namespace testing
 }  // namespace impeller

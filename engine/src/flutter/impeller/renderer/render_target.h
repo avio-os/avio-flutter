@@ -5,6 +5,7 @@
 #ifndef FLUTTER_IMPELLER_RENDERER_RENDER_TARGET_H_
 #define FLUTTER_IMPELLER_RENDERER_RENDER_TARGET_H_
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
@@ -215,7 +216,8 @@ class RenderTargetAllocator {
       const std::shared_ptr<Texture>& existing_depth_stencil_texture = nullptr,
       std::optional<PixelFormat> target_pixel_format = std::nullopt);
 
-  /// @brief Disable any caching until the next call to `EnabledCache`.
+  /// @brief Disable any caching until the next call to `EnabledCache`. The
+  ///        count is per lease scope (see `BeginScope`).
   virtual void DisableCache() {}
 
   /// @brief Re-enable any caching if disabled.
@@ -223,14 +225,27 @@ class RenderTargetAllocator {
 
   /// @brief Mark the beginning of a frame workload.
   ///
-  ///       This may be used to reset any tracking state on whether or not a
-  ///       particular texture instance is still in use.
+  ///       Releases leases taken outside any lease scope.
   virtual void Start();
 
-  /// @brief Mark the end of a frame workload.
+  /// @brief Mark the end of a frame workload: one aging epoch.
   ///
-  ///        This may be used to deallocate any unused textures.
+  ///        Releases leases taken outside any lease scope and may deallocate
+  ///        textures that went unused for the allocator's keep-alive number
+  ///        of frames. The owner of the frame (the rasterizer) calls this once
+  ///        per raster frame, after every view has rendered; a single
+  ///        workload never does.
   virtual void End();
+
+  /// @brief Open a lease scope for one workload (one Canvas replay). Targets
+  ///        handed out until the matching `EndScope` are leased by this
+  ///        scope, and a nested scope never reuses a target an outer scope
+  ///        still leases. Returns the scope's identity.
+  virtual uint64_t BeginScope() { return 0u; }
+
+  /// @brief Close the lease scope `scope`, releasing only its leases. Closing
+  ///        a scope does not age the cache.
+  virtual void EndScope(uint64_t scope) {}
 
   /// @brief Exact usage of the textures this allocator caches. Reporting
   ///        frees, ages and leases nothing. When `start_new_interval` is true
