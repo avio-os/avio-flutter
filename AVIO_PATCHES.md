@@ -82,6 +82,7 @@ already ancestors of the selected main target under their original commits.
 | 46a | One transient attachment set per key on the single graphics queue | permanent resource-lifecycle correction (restores patch 11's one-entry-per-key pool; the incoming depth/stencil dependency is upstreamable) | partial: flutter/flutter#144617 recycles one onscreen set upstream |
 | 46b | A transient set lives while an existing view holds its extent | permanent resource-lifecycle owner (ships only with Avio G2, which keeps a ShellItem's view across extent changes) | none — upstream frees with the swapchain |
 | 46u | Report-only render-resource accounting | permanent diagnostics (internal C++ API, no ABI change) | none |
+| 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -709,6 +710,26 @@ report. Regressions: `ContextVKTest.TransientsPoolAccountsNominalAndRealBytes`,
 `TransientsPoolReportsCreatedEntriesAndBytes`, and
 `RenderTargetCacheResourceTest.ReportsExactBytes` (GPU-free: a fake allocator
 with page-rounded allocations).
+
+### Patch 47: complete RenderTargetCache keys and miss attribution
+
+`RenderTargetConfig` is the complete identity of an offscreen's textures:
+extent, mip count, MSAA, depth/stencil, and now the color format, the color
+and resolve storage modes, and the depth/stencil format and storage. Before
+this patch a request for a different pixel format or storage mode could
+reuse a cached texture of another format; no current Avio caller differs in
+those fields, so hit rates are unchanged, but the latent bug is closed.
+
+Every miss emits a `RenderTargetCacheMiss` timeline instant with the request
+(`w`, `h`, `msaa`, `format`, `ds`, `label`) and a reason: `no_entry`,
+`extent_mismatch` (an unleased entry differs only in extent), `all_leased`
+(every entry of the key is leased), `aged_out` (one of the last 32 keys that
+aging dropped, unused for the keep-alive number of frames) or `disabled`.
+When its size changes the cache traces a `RenderTargetCache` counter with
+patch 46u's accounting: `entries`, `bytes` (nominal) and `real_bytes`. All of
+it is TRACE/timeline only; nothing is logged. Regressions:
+`RenderTargetCacheResourceTest.KeyDistinguishesPixelFormat`,
+`KeyDistinguishesStorageModes`, `MissReasonClassification`.
 
 ## Known baseline debt
 

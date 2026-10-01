@@ -19,20 +19,48 @@ namespace impeller {
 
 class Context;
 
+/// The complete identity of an offscreen render target's textures: two
+/// requests may share cached textures only when every field is equal.
 struct RenderTargetConfig {
   ISize size = ISize{0, 0};
   size_t mip_count = 0;
   bool has_msaa = false;
   bool has_depth_stencil = false;
+  /// The color (and resolve) pixel format.
+  PixelFormat color_format = PixelFormat::kUnknown;
+  /// The storage of the color attachment: the multisample texture of an MSAA
+  /// target, or the only color texture of a single-sample one.
+  StorageMode color_storage = StorageMode::kDevicePrivate;
+  /// The storage of an MSAA target's resolve texture. Unused without MSAA.
+  StorageMode resolve_storage = StorageMode::kDevicePrivate;
+  /// The depth/stencil format and storage. Unused without depth/stencil.
+  PixelFormat depth_stencil_format = PixelFormat::kUnknown;
+  StorageMode depth_stencil_storage = StorageMode::kDeviceTransient;
 
   constexpr bool operator==(const RenderTargetConfig& o) const {
     return size == o.size && mip_count == o.mip_count &&
-           has_msaa == o.has_msaa && has_depth_stencil == o.has_depth_stencil;
+           has_msaa == o.has_msaa && has_depth_stencil == o.has_depth_stencil &&
+           color_format == o.color_format && color_storage == o.color_storage &&
+           (!has_msaa || resolve_storage == o.resolve_storage) &&
+           (!has_depth_stencil ||
+            (depth_stencil_format == o.depth_stencil_format &&
+             depth_stencil_storage == o.depth_stencil_storage));
+  }
+
+  /// Equal in every field except the extent.
+  constexpr bool MatchesExceptSize(const RenderTargetConfig& o) const {
+    RenderTargetConfig sized = o;
+    sized.size = size;
+    return *this == sized;
   }
 
   constexpr size_t Hash() const {
-    return fml::HashCombine(size.width, size.height, mip_count, has_msaa,
-                            has_depth_stencil);
+    return fml::HashCombine(
+        size.width, size.height, mip_count, has_msaa, has_depth_stencil,
+        static_cast<int>(color_format), static_cast<int>(color_storage),
+        has_msaa ? static_cast<int>(resolve_storage) : 0,
+        has_depth_stencil ? static_cast<int>(depth_stencil_format) : 0,
+        has_depth_stencil ? static_cast<int>(depth_stencil_storage) : 0);
   }
 };
 

@@ -5,9 +5,12 @@
 #include "impeller/entity/render_target_cache.h"
 
 #include <algorithm>
+#include <string>
 #include <vector>
 
+#include "flutter/fml/trace_event.h"
 #include "impeller/core/formats.h"
+#include "impeller/renderer/context.h"
 #include "impeller/renderer/render_target.h"
 
 namespace impeller {
@@ -43,7 +46,85 @@ RenderTargetBytes MeasureRenderTarget(const RenderTarget& target) {
   return bytes;
 }
 
+// Bounds the memory of the aged-out classification.
+constexpr size_t kRecentlyDroppedKeys = 32u;
+
 }  // namespace
+
+std::string_view RenderTargetCache::MissReasonToString(MissReason reason) {
+  switch (reason) {
+    case MissReason::kNoEntry:
+      return "no_entry";
+    case MissReason::kExtentMismatch:
+      return "extent_mismatch";
+    case MissReason::kAllLeased:
+      return "all_leased";
+    case MissReason::kAgedOut:
+      return "aged_out";
+    case MissReason::kDisabled:
+      return "disabled";
+  }
+  FML_UNREACHABLE();
+}
+
+void RenderTargetCache::RecordMiss(const RenderTargetConfig& config,
+                                   std::string_view label) {
+  MissReason reason = MissReason::kNoEntry;
+  if (!CacheEnabled()) {
+    reason = MissReason::kDisabled;
+  } else {
+    bool same_key = false;
+    bool other_extent = false;
+    for (const RenderTargetData& td : render_target_data_) {
+      if (td.config == config) {
+        // A miss with an equal key means every such entry is leased.
+        same_key = true;
+      } else if (!td.used_this_frame && td.config.MatchesExceptSize(config)) {
+        other_extent = true;
+      }
+    }
+    if (same_key) {
+      reason = MissReason::kAllLeased;
+    } else if (std::find(recently_dropped_.begin(), recently_dropped_.end(),
+                         config) != recently_dropped_.end()) {
+      reason = MissReason::kAgedOut;
+    } else if (other_extent) {
+      reason = MissReason::kExtentMismatch;
+    }
+  }
+  last_miss_reason_ = reason;
+  const std::string target =
+      "w=" + std::to_string(config.size.width) +
+      " h=" + std::to_string(config.size.height) +
+      " msaa=" + std::to_string(config.has_msaa) +
+      " format=" + std::string(PixelFormatToString(config.color_format)) +
+      " ds=" + std::to_string(config.has_depth_stencil) +
+      " label=" + std::string(label);
+  TRACE_EVENT_INSTANT2("impeller", "RenderTargetCacheMiss", "reason",
+                       std::string(MissReasonToString(reason)).c_str(),
+                       "target", target.c_str());
+}
+
+void RenderTargetCache::RememberDropped(const RenderTargetConfig& config) {
+  if (recently_dropped_.size() == kRecentlyDroppedKeys) {
+    recently_dropped_.erase(recently_dropped_.begin());
+  }
+  recently_dropped_.push_back(config);
+}
+
+void RenderTargetCache::TraceCacheSize() const {
+  size_t nominal_bytes = 0u;
+  size_t real_bytes = 0u;
+  for (const RenderTargetData& td : render_target_data_) {
+    nominal_bytes += td.nominal_bytes;
+    real_bytes += td.real_bytes;
+  }
+  FML_TRACE_COUNTER("impeller", "RenderTargetCache",
+                    reinterpret_cast<int64_t>(this), "entries",
+                    static_cast<int64_t>(render_target_data_.size()), "bytes",
+                    static_cast<int64_t>(nominal_bytes), "real_bytes",
+                    static_cast<int64_t>(real_bytes));
+}
 
 RenderTargetCache::RenderTargetCache(std::shared_ptr<Allocator> allocator,
                                      uint32_t keep_alive_frame_count)
@@ -71,9 +152,14 @@ void RenderTargetCache::End() {
       retain.push_back(td);
     } else {
       AccountErased(td);
+      RememberDropped(td.config);
     }
   }
+  const bool changed = retain.size() != render_target_data_.size();
   render_target_data_.swap(retain);
+  if (changed) {
+    TraceCacheSize();
+  }
 }
 
 void RenderTargetCache::LeaseEntry(RenderTargetData& data) {
@@ -96,6 +182,7 @@ void RenderTargetCache::InsertEntry(const RenderTargetConfig& config,
   });
   created_entries_++;
   SampleLeased();
+  TraceCacheSize();
 }
 
 void RenderTargetCache::AccountErased(const RenderTargetData& data) {
@@ -189,12 +276,20 @@ RenderTarget RenderTargetCache::CreateOffscreen(
 
   FML_DCHECK(existing_color_texture == nullptr &&
              existing_depth_stencil_texture == nullptr);
+  const auto& capabilities = context.GetCapabilities();
   auto config = RenderTargetConfig{
       .size = size,
       .mip_count = static_cast<size_t>(mip_count),
       .has_msaa = false,
       .has_depth_stencil = stencil_attachment_config.has_value(),
+      .color_format =
+          target_pixel_format.value_or(capabilities->GetDefaultColorFormat()),
+      .color_storage = color_attachment_config.storage_mode,
   };
+  if (stencil_attachment_config.has_value()) {
+    config.depth_stencil_format = capabilities->GetDefaultDepthStencilFormat();
+    config.depth_stencil_storage = stencil_attachment_config->storage_mode;
+  }
 
   if (CacheEnabled()) {
     for (RenderTargetData& render_target_data : render_target_data_) {
@@ -213,6 +308,7 @@ RenderTarget RenderTargetCache::CreateOffscreen(
       }
     }
   }
+  RecordMiss(config, label);
   RenderTarget created_target = RenderTargetAllocator::CreateOffscreen(
       context, size, mip_count, label, color_attachment_config,
       stencil_attachment_config, nullptr, nullptr, target_pixel_format);
@@ -243,12 +339,21 @@ RenderTarget RenderTargetCache::CreateOffscreenMSAA(
   FML_DCHECK(existing_color_msaa_texture == nullptr &&
              existing_color_resolve_texture == nullptr &&
              existing_depth_stencil_texture == nullptr);
+  const auto& capabilities = context.GetCapabilities();
   auto config = RenderTargetConfig{
       .size = size,
       .mip_count = static_cast<size_t>(mip_count),
       .has_msaa = true,
       .has_depth_stencil = stencil_attachment_config.has_value(),
+      .color_format =
+          target_pixel_format.value_or(capabilities->GetDefaultColorFormat()),
+      .color_storage = color_attachment_config.storage_mode,
+      .resolve_storage = color_attachment_config.resolve_storage_mode,
   };
+  if (stencil_attachment_config.has_value()) {
+    config.depth_stencil_format = capabilities->GetDefaultDepthStencilFormat();
+    config.depth_stencil_storage = stencil_attachment_config->storage_mode;
+  }
   if (CacheEnabled()) {
     for (RenderTargetData& render_target_data : render_target_data_) {
       const RenderTargetConfig other_config = render_target_data.config;
@@ -266,6 +371,7 @@ RenderTarget RenderTargetCache::CreateOffscreenMSAA(
       }
     }
   }
+  RecordMiss(config, label);
   RenderTarget created_target = RenderTargetAllocator::CreateOffscreenMSAA(
       context, size, mip_count, label, color_attachment_config,
       stencil_attachment_config, nullptr, nullptr, nullptr,

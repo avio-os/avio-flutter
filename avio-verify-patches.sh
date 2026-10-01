@@ -431,6 +431,14 @@ need "the usage report carries created entries and bytes" \
   $F/impeller/renderer/render_resource_usage.h 'size_t created_real_bytes'
 absent "idle render-resource release (dropped with ABI v7) stays out" \
   'ReleaseAvioIdleResources|IdleResourceRelease|kIdleReleaseMinUnused|ReleaseIdle\(|ResourceManagerVK::Flush'
+need "RenderTargetCache keys include the pixel format" \
+  $F/impeller/renderer/render_target.h 'color_format == o\.color_format'
+need "RenderTargetCache keys include storage modes" \
+  $F/impeller/renderer/render_target.h 'color_storage == o\.color_storage'
+need "RenderTargetCache attributes every miss" \
+  $F/impeller/entity/render_target_cache.cc '"RenderTargetCacheMiss"'
+need "the RenderTargetCache size counter carries real bytes" \
+  $F/impeller/entity/render_target_cache.cc '"real_bytes",'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \
