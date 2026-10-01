@@ -4,10 +4,13 @@
 
 #include "impeller/display_list/canvas.h"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "display_list/dl_vertices.h"
 #include "display_list/effects/color_filters/dl_blend_color_filter.h"
@@ -35,6 +38,7 @@
 #include "impeller/entity/contents/external_coverage_contents.h"
 #include "impeller/entity/contents/filters/filter_contents.h"
 #include "impeller/entity/contents/framebuffer_blend_contents.h"
+#include "impeller/entity/contents/gradient_generator.h"
 #include "impeller/entity/contents/shadow_vertices_contents.h"
 #include "impeller/entity/contents/solid_color_contents.h"
 #include "impeller/entity/contents/solid_rrect_blur_contents.h"
@@ -60,6 +64,7 @@
 #include "impeller/entity/save_layer_utils.h"
 #include "impeller/geometry/color.h"
 #include "impeller/geometry/constants.h"
+#include "impeller/geometry/gradient.h"
 #include "impeller/geometry/round_superellipse_param.h"
 #include "impeller/geometry/rounding_radii.h"
 #include "impeller/geometry/rstransform.h"
@@ -238,6 +243,101 @@ static std::pair<Rect, Color> ExpandRectToPixelMinimum(const Rect& rect,
     return {Rect(), color};
   }
   return {expanded.value(), color.WithAlpha(color.alpha * alpha_scaling)};
+}
+
+/// Whether `m` maps the plane by a similarity: a translation, rotation and
+/// uniform scale, without perspective or shear. Mapping a gradient's
+/// defining points through such a matrix maps its whole color field.
+static bool IsSimilarity2D(const Matrix& m) {
+  if (!m.IsAffine()) {
+    return false;
+  }
+  const Scalar a = m.m[0];
+  const Scalar b = m.m[1];
+  const Scalar c = m.m[4];
+  const Scalar d = m.m[5];
+  const Scalar x_length_sq = a * a + b * b;
+  const Scalar y_length_sq = c * c + d * d;
+  const Scalar tolerance = kEhCloseEnough * std::max(x_length_sq, y_length_sq);
+  return std::abs(a * c + b * d) <= tolerance &&
+         std::abs(x_length_sq - y_length_sq) <= tolerance;
+}
+
+/// @brief  Creates UberSDF gradient parameters for a color source UberSDF
+///         shades itself: linear and radial gradients whose local matrix,
+///         combined with the inverse shape transform, is a similarity.
+///
+/// @return The parameters, or std::nullopt for any other color source, which
+///         keeps the masked kSrcIn path.
+static std::optional<UberSDFParameters::GradientParameters>
+CreateUberSDFGradientParameters(const ContentContext& renderer,
+                                const flutter::DlColorSource& color_source,
+                                const std::optional<Matrix>& shape_transform) {
+  if (!color_source.isGradient()) {
+    return std::nullopt;
+  }
+
+  UberSDFParameters::GradientParameters gradient;
+  std::vector<Color> colors;
+  std::vector<float> stops;
+
+  // UberSDF shades in the shape's local space. A shape transform maps that
+  // space into canvas space, so the gradient maps back through its inverse.
+  const Matrix inverted_shape_transform =
+      shape_transform.has_value() ? shape_transform->Invert() : Matrix();
+
+  if (color_source.type() == flutter::DlColorSourceType::kLinearGradient) {
+    const auto* linear = color_source.asLinearGradient();
+    FML_DCHECK(linear);
+    const Matrix gradient_transform =
+        inverted_shape_transform * linear->matrix();
+    if (!IsSimilarity2D(gradient_transform)) {
+      // Mapping the end points would not map the gradient's field.
+      return std::nullopt;
+    }
+    Paint::ConvertStops(linear, colors, stops);
+    gradient.type = UberSDFParameters::GradientParameters::Type::kLinear;
+    gradient.start = gradient_transform * linear->start_point();
+    gradient.end = gradient_transform * linear->end_point();
+    gradient.tile_mode = static_cast<Entity::TileMode>(linear->tile_mode());
+  } else if (color_source.type() ==
+             flutter::DlColorSourceType::kRadialGradient) {
+    const auto* radial = color_source.asRadialGradient();
+    FML_DCHECK(radial);
+    const Matrix gradient_transform =
+        inverted_shape_transform * radial->matrix();
+    if (!IsSimilarity2D(gradient_transform)) {
+      // A non-uniform scale or shear makes an elliptical gradient.
+      return std::nullopt;
+    }
+    const auto scales = gradient_transform.GetScales2D();
+    if (!scales.has_value()) {
+      return std::nullopt;
+    }
+    Paint::ConvertStops(radial, colors, stops);
+    gradient.type = UberSDFParameters::GradientParameters::Type::kRadial;
+    gradient.start = gradient_transform * radial->center();
+    // For radial gradients, gradient.end.x stores the radius.
+    gradient.end = Point(radial->radius() * scales->first, 0.0f);
+    gradient.tile_mode = static_cast<Entity::TileMode>(radial->tile_mode());
+  } else {
+    // Conical and sweep gradients keep the masked path.
+    return std::nullopt;
+  }
+
+  if (renderer.GetDeviceCapabilities().SupportsSSBO()) {
+    gradient.colors = std::move(colors);
+    gradient.stops = std::move(stops);
+  } else {
+    GradientData gradient_data = CreateGradientBuffer(colors, stops);
+    std::shared_ptr<Texture> texture =
+        CreateGradientTexture(gradient_data, renderer.GetContext());
+    if (!texture) {
+      return std::nullopt;
+    }
+    gradient.texture = std::move(texture);
+  }
+  return gradient;
 }
 
 }  // namespace
@@ -2293,7 +2393,15 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
     return;
   }
 
+  // Linear and radial gradients are shaded inside UberSDF itself. Any other
+  // color source is blended through a white SDF mask below.
   if (paint.color_source) {
+    params.gradient = CreateUberSDFGradientParameters(
+        renderer_, *paint.color_source, shape_transform);
+  }
+  const bool blend_color_source =
+      paint.color_source && !params.gradient.has_value();
+  if (blend_color_source) {
     // Since we are going to use BlendMode::kSrcIn to implement the color_source
     // the SDF portion of the blend should just be solid white to get the
     // correct color from the color_source.
@@ -2308,16 +2416,18 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
           ? paint.coverage_mode
           : flutter::DlCoverageMode::kPlatformDefault;
   contents->SetCoverageMode(coverage_mode);
-  const bool defer_coverage = raw_coverage || paint.color_source ||
+  // A gradient shaded here takes the coverage transfer in the shader, like a
+  // solid color; only the blended color-source path defers it.
+  const bool defer_coverage = raw_coverage || blend_color_source ||
                               paint.color_filter || paint.invert_colors ||
                               paint.image_filter ||
                               paint.mask_blur_descriptor.has_value();
   contents->SetDeferCoverageTransform(defer_coverage);
   const Geometry* geom = contents->GetGeometry();
 
-  if (paint.color_source) {
-    // UberSDF doesn't perform things like gradients so we blend the SDF
-    // with the color source.
+  if (blend_color_source) {
+    // UberSDF cannot shade this color source, so we blend the SDF mask with
+    // it.
     Paint source_paint = paint;
     source_paint.coverage_mode = flutter::DlCoverageMode::kPlatformDefault;
     std::shared_ptr<ColorSourceContents> color_source_contents =

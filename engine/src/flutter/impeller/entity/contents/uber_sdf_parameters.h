@@ -5,8 +5,12 @@
 #ifndef FLUTTER_IMPELLER_ENTITY_CONTENTS_UBER_SDF_PARAMETERS_H_
 #define FLUTTER_IMPELLER_ENTITY_CONTENTS_UBER_SDF_PARAMETERS_H_
 
+#include <memory>
 #include <optional>
+#include <vector>
 
+#include "impeller/core/texture.h"
+#include "impeller/entity/entity.h"
 #include "impeller/geometry/color.h"
 #include "impeller/geometry/point.h"
 #include "impeller/geometry/rect.h"
@@ -30,6 +34,42 @@ struct UberSDFParameters {
     kOval,
     kRoundedRect,
     kRoundedSuperellipseSymmetric,
+  };
+
+  /// A gradient color source shaded inside UberSDF.
+  struct GradientParameters {
+    enum class Type {
+      kLinear,
+      kRadial,
+    };
+
+    /// The type of gradient.
+    Type type = Type::kLinear;
+
+    /// Linear: the start point. Radial: the center. In the shape's local
+    /// coordinates.
+    Point start;
+
+    /// Linear: the end point. Radial: `(radius, 0)`.
+    Point end;
+
+    /// Tile mode for the gradient.
+    Entity::TileMode tile_mode = Entity::TileMode::kClamp;
+
+    /// The gradient ramp texture, for backends without storage buffers.
+    ///
+    /// Mutually exclusive with `colors`/`stops`.
+    std::shared_ptr<Texture> texture;
+
+    /// The gradient stop colors, unpremultiplied, for backends with storage
+    /// buffers.
+    ///
+    /// Mutually exclusive with `texture`.
+    std::vector<Color> colors;
+
+    /// The normalized position of each entry in `colors`, ascending. Always
+    /// the same length as `colors`.
+    std::vector<Scalar> stops;
   };
 
   /// Creates UberSDFParameters for a rectangle.
@@ -65,8 +105,12 @@ struct UberSDFParameters {
   /// The type of shape to render.
   Type type;
 
-  /// The color used for filling or stroking the shape.
+  /// The color used for filling or stroking the shape. With a gradient, only
+  /// its alpha is used, as the paint's opacity.
   Color color;
+
+  /// The gradient color source, when UberSDF shades one itself.
+  std::optional<GradientParameters> gradient;
 
   /// The center point of the shape in local coordinates.
   Point center;

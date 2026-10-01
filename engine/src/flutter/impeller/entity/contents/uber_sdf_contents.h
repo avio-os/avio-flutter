@@ -49,6 +49,16 @@ class UberSDFContents : public ColorSourceContents {
   explicit UberSDFContents(const UberSDFParameters& params,
                            std::unique_ptr<Geometry> geometry);
 
+  /// Renders with gradients sampled from a gradient ramp texture.
+  bool RenderTexture(const ContentContext& renderer,
+                     const Entity& entity,
+                     RenderPass& pass) const;
+
+  /// Renders with gradient stops in a storage buffer.
+  bool RenderSSBO(const ContentContext& renderer,
+                  const Entity& entity,
+                  RenderPass& pass) const;
+
   bool defer_coverage_transform_ = false;
   UberSDFParameters params_;
   std::unique_ptr<Geometry> geometry_;
