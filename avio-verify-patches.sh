@@ -456,6 +456,22 @@ need "color-source SDF snapshots are single-sample without depth/stencil" \
   $F/impeller/display_list/canvas.cc '/\*depth_stencil_enabled=\*/false\)'
 need "snapshots may omit depth/stencil" \
   $F/impeller/entity/contents/contents.h 'bool depth_stencil_enabled = true;'
+need "UberSDF shades linear and radial gradients (backport)" \
+  $F/impeller/display_list/canvas.cc 'CreateUberSDFGradientParameters\('
+need "UberSDF storage-buffer gradient variant" \
+  $F/impeller/entity/BUILD.gn 'shaders/uber_sdf_ssbo.frag'
+need "UberSDF gradient edges keep the masked look" \
+  $F/impeller/entity/shaders/uber_sdf_common.glsl \
+  'frag_info.color_source_type < 0.5 \? color.rgb : vec3\(1.0\)'
+need "UberSDF gradient pixel guard" \
+  $F/impeller/display_list/aiks_dl_sdf_gradient_unittests.cc \
+  'SdfGradientEdgesMatchMaskedComposite'
+need "UberSDF dithers a gradient before coverage" \
+  $F/impeller/entity/shaders/uber_sdf_common.glsl \
+  'finishGradientColor\(IPPremultiply\(color\)\) \* alpha'
+need "UberSDF uncovered gradient pixels stay transparent guard" \
+  $F/impeller/display_list/aiks_dl_sdf_gradient_unittests.cc \
+  'SdfGradientLeavesUncoveredQuadPixelsTransparent'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

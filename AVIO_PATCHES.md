@@ -86,6 +86,7 @@ already ancestors of the selected main target under their original commits.
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
+| 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -829,6 +830,60 @@ pre-patch composite: `ShaderRectContainingClipMatchesMaskedComposite` ((a)
 against the masked path, forced by a clip the rect does not contain) and
 `SingleSampleMaskInputsMatchMultisampledInputs` ((b): the same kSrcIn
 composite with multisampled, depth/stencil inputs as before, within 1/255).
+
+### Patch 50: gradients inside UberSDF (backport)
+
+Upstream moved linear and radial gradients into UberSDF (`fdb1d09ef8`,
+flutter#192124; `419f9dd65e`, flutter#192962, the storage-buffer variant).
+The fork base predates them and their prerequisites, and Avio's UberSDF
+carries patch 45's coverage fields, so this is an adapted backport in one
+commit rather than literal cherry-picks: `uber_sdf.frag` is split into
+`uber_sdf_common.glsl` plus a ramp-texture variant (`uber_sdf.frag`) and a
+storage-buffer variant (`uber_sdf_ssbo.frag`, used wherever the backend
+supports SSBOs, i.e. Avio's Vulkan Shell and greeter, for every UberSDF
+draw). `Canvas::AddRenderSDFEntityToCurrentPass` shades a linear or radial
+gradient whose local matrix (with the inverse shape transform) is a
+similarity directly in UberSDF: no snapshots, no blend target, no deferred
+coverage pass. Conical and sweep gradients, images, runtime effects and
+non-similarity gradient matrices keep the masked kSrcIn path that patch 52
+slims.
+
+Avio deltas against upstream, each to re-check at the rebase that drops this
+patch:
+- Edges keep Avio's look. A gradient's coverage uses the light-foreground
+  gamma correction of the white mask it was blended through before, not the
+  gradient color's luma; the storage-buffer variant dithers like the
+  storage-buffer gradient shaders, and like the masked composite it dithers
+  the gradient color before coverage scales it, so a pixel the shape does not
+  cover stays exactly transparent (upstream does not dither in UberSDF).
+  `AiksTest.SdfGradientEdgesMatchMaskedComposite` compares every pixel (rect,
+  rounded corners, oval, circle; opaque and glass; both coverage modes) with
+  the masked composite: alpha within 2/255, color within 2/255 on the
+  ramp-texture variant and 5/255 on the dithered storage-buffer variant (two
+  dither grids), and no pixel the composite leaves transparent may gain any
+  value. It runs on Vulkan with SDFs enabled, the storage-buffer variant
+  Avio ships, and on the OpenGL ES SDF backend, the ramp-texture variant.
+  `SdfGradientLeavesUncoveredQuadPixelsTransparent` checks the quad corners
+  around a circle are exactly zero in both coverage modes.
+- Linear gradients need a similarity matrix too (upstream checks only
+  affinity): mapping the end points through a shear or non-uniform scale does
+  not map the gradient's field.
+- Patch 45's `external_linear_backdrop` / `defer_coverage_transform` stay;
+  a gradient shaded in UberSDF takes the coverage transfer in the shader.
+- `#191925` and `#191980` (texture-gradient fixes and wide-gamut ramp
+  textures) are not brought in: the ramp-texture variant uses the fork's
+  current `GradientData`, and Avio's SDF users take the storage-buffer
+  variant.
+
+Revert this one commit to restore the masked path exactly; nothing else on
+the branch depends on it. Regressions:
+`UberSDFContentsTest.ApplyColorFilterWithGradient`,
+`AsBackgroundColorGradientReturnsNullopt`, and on every playground that
+renders with SDFs (`Playground::EnsureContextUsesSDFs`, patch 52)
+`AiksTest.SdfLinearGradientRectAllocatesNoOffscreen`,
+`SdfRadialGradientCircleUnderNonUniformScaleAllocatesNoOffscreen`,
+`UnsupportedColorSourceStillBlends`, `SdfGradientEdgesMatchMaskedComposite`,
+`SdfGradientLeavesUncoveredQuadPixelsTransparent`.
 
 ## Known baseline debt
 
