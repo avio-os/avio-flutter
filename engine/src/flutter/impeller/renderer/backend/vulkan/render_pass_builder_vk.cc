@@ -219,6 +219,22 @@ vk::UniqueRenderPass RenderPassBuilderVK::Build(
   if (loads_existing_color) {
     deps[0].dstAccessMask |= vk::AccessFlagBits::eColorAttachmentRead;
   }
+  // A depth/stencil attachment may be shared with earlier passes on the same
+  // queue: the context-scoped transients pool hands one attachment set to every
+  // same-sized root target, and RenderTargetCache recycles offscreen
+  // depth/stencil textures. This pass's depth/stencil clear is a write in the
+  // fragment-test stages, so order it after earlier passes' depth/stencil
+  // writes (WAW) and make it visible to this pass's own tests. Passes without a
+  // depth/stencil attachment keep the color-only scope.
+  if (depth_stencil_.has_value()) {
+    deps[0].srcStageMask |= vk::PipelineStageFlagBits::eEarlyFragmentTests |
+                            vk::PipelineStageFlagBits::eLateFragmentTests;
+    deps[0].srcAccessMask |= vk::AccessFlagBits::eDepthStencilAttachmentWrite;
+    deps[0].dstStageMask |= vk::PipelineStageFlagBits::eEarlyFragmentTests |
+                            vk::PipelineStageFlagBits::eLateFragmentTests;
+    deps[0].dstAccessMask |= vk::AccessFlagBits::eDepthStencilAttachmentRead |
+                             vk::AccessFlagBits::eDepthStencilAttachmentWrite;
+  }
   deps[0].dependencyFlags = kSelfDependencyFlags;
 
   // Self dependency for reading back the framebuffer, necessary for

@@ -6,6 +6,7 @@
 #include "flutter/fml/synchronization/waitable_event.h"
 
 #include <limits>
+#include <set>
 
 #include "flutter/testing/testing.h"  // IWYU pragma: keep
 #include "impeller/base/validation.h"
@@ -137,7 +138,9 @@ TEST(ContextVKTest, SurfaceRejectsFailedSingleSampleDepthAllocation) {
   CheckRequiredSurfaceAllocationFailure(true, false);
 }
 
-TEST(ContextVKTest, TransientsPoolDoesNotReuseLeasedEntries) {
+// Red before EN46a: a second acquisition of a leased key allocated a second
+// full attachment set.
+TEST(ContextVKTest, TransientsPoolSharesOneEntryPerKeyWhileWrapperLeased) {
   TextureDescriptor desc;
   desc.size = ISize(100, 100);
   desc.format = PixelFormat::kR8G8B8A8UNormInt;
@@ -152,33 +155,153 @@ TEST(ContextVKTest, TransientsPoolDoesNotReuseLeasedEntries) {
 
   auto first = pool.Acquire(desc, /*enable_msaa=*/true);
   ASSERT_TRUE(first);
-  auto* first_raw = first.get();
+  const auto usage = pool.GetUsage();
+  EXPECT_EQ(usage.entries, 1u);
 
+  // Two same-sized views in one frame: the second target shares the set.
   auto second = pool.Acquire(desc, /*enable_msaa=*/true);
   ASSERT_TRUE(second);
-  EXPECT_NE(first, second);
+  EXPECT_EQ(first, second);
+  EXPECT_EQ(pool.GetUsage(), usage);
 
   first.reset();
   auto third = pool.Acquire(desc, /*enable_msaa=*/true);
-  ASSERT_TRUE(third);
-  EXPECT_EQ(third.get(), first_raw);
+  EXPECT_EQ(third, second);
+  EXPECT_EQ(pool.GetUsage(), usage);
 }
 
-// Reproduce the shipped Avio host profile without allocating GPU memory.
-// Slower GPU completion keeps these texture leases alive longer; no OOM,
-// broken driver, or battery policy is needed to exhaust the six-entry cap.
-TEST(ContextVKTest, AvioSixEntryProfileRefusesBothSamplesUntilLeaseCompletes) {
+// Red before EN46a: a key whose textures were still referenced by submitted
+// GPU work allocated a second set for the next frame.
+TEST(ContextVKTest, TransientsPoolSharesOneEntryPerKeyWhileTracked) {
+  auto context = MockVulkanContextBuilder().Build();
+  auto pool = context->GetSwapchainTransientsPool();
+
+  TextureDescriptor desc;
+  desc.size = ISize(100, 100);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+
+  auto first = pool->Acquire(desc, /*enable_msaa=*/true);
+  ASSERT_TRUE(first);
+  auto* first_raw = first.get();
+  auto msaa = first->GetMSAATexture();
+  auto depth_stencil = first->GetDepthStencilTexture();
+  ASSERT_TRUE(msaa);
+  ASSERT_TRUE(depth_stencil);
+  auto* msaa_raw = msaa.get();
+  auto* depth_stencil_raw = depth_stencil.get();
+  auto command_buffer = context->CreateCommandBuffer();
+  ASSERT_TRUE(command_buffer);
+  auto& command_buffer_vk = CommandBufferVK::Cast(*command_buffer);
+  ASSERT_TRUE(command_buffer_vk.Track(msaa));
+  ASSERT_TRUE(command_buffer_vk.Track(depth_stencil));
+
+  first.reset();
+  msaa.reset();
+  depth_stencil.reset();
+  auto second = pool->Acquire(desc, /*enable_msaa=*/true);
+  ASSERT_TRUE(second);
+  EXPECT_EQ(second.get(), first_raw);
+  EXPECT_EQ(pool->GetUsage().entries, 1u);
+  // The shared set hands out the same attachments, not fresh allocations.
+  EXPECT_EQ(second->GetMSAATexture().get(), msaa_raw);
+  EXPECT_EQ(second->GetDepthStencilTexture().get(), depth_stencil_raw);
+
+  command_buffer.reset();
+  auto third = pool->Acquire(desc, /*enable_msaa=*/true);
+  EXPECT_EQ(third.get(), first_raw);
+  EXPECT_EQ(pool->GetUsage().entries, 1u);
+}
+
+TEST(ContextVKTest, TransientsPoolDistinctKeysStayDistinct) {
   TextureDescriptor desc;
   desc.size = ISize(64, 64);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+  TextureDescriptor wider = desc;
+  wider.size = ISize(65, 64);
+  TextureDescriptor taller = desc;
+  taller.size = ISize(64, 65);
+  TextureDescriptor other_format = desc;
+  other_format.format = PixelFormat::kB8G8R8A8UNormInt;
+
+  TransientsPoolVK pool(std::weak_ptr<Context>(), PixelFormat::kD24UnormS8Uint,
+                        /*supports_memoryless_textures=*/false,
+                        TransientsPoolLimitsVK{
+                            .max_entries = 8u,
+                            .max_bytes = 16u * 1024u * 1024u,
+                            .allow_environment_override = false,
+                        });
+
+  auto base = pool.Acquire(desc, /*enable_msaa=*/true);
+  auto single_sample = pool.Acquire(desc, /*enable_msaa=*/false);
+  auto wide = pool.Acquire(wider, /*enable_msaa=*/true);
+  auto tall = pool.Acquire(taller, /*enable_msaa=*/true);
+  auto formatted = pool.Acquire(other_format, /*enable_msaa=*/true);
+  ASSERT_TRUE(base && single_sample && wide && tall && formatted);
+  const std::set<SwapchainTransientsVK*> distinct = {
+      base.get(), single_sample.get(), wide.get(), tall.get(), formatted.get()};
+  EXPECT_EQ(distinct.size(), 5u);
+  EXPECT_EQ(pool.GetUsage().entries, 5u);
+
+  // Re-acquiring every key returns its one entry.
+  EXPECT_EQ(pool.Acquire(desc, /*enable_msaa=*/true), base);
+  EXPECT_EQ(pool.Acquire(desc, /*enable_msaa=*/false), single_sample);
+  EXPECT_EQ(pool.Acquire(wider, /*enable_msaa=*/true), wide);
+  EXPECT_EQ(pool.Acquire(taller, /*enable_msaa=*/true), tall);
+  EXPECT_EQ(pool.Acquire(other_format, /*enable_msaa=*/true), formatted);
+  EXPECT_EQ(pool.GetUsage().entries, 5u);
+}
+
+// A shared entry is never trimmed while any render target or submitted GPU
+// work still references its attachments.
+TEST(ContextVKTest, TransientsPoolTrimKeepsSharedEntryWhileTracked) {
+  auto context = MockVulkanContextBuilder().Build();
+  auto pool = context->GetSwapchainTransientsPool();
+
+  TextureDescriptor desc;
+  desc.size = ISize(100, 100);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+
+  auto first = pool->Acquire(desc, /*enable_msaa=*/true);
+  auto second = pool->Acquire(desc, /*enable_msaa=*/true);
+  ASSERT_TRUE(first);
+  ASSERT_EQ(first, second);
+  auto depth_stencil = first->GetDepthStencilTexture();
+  ASSERT_TRUE(depth_stencil);
+  auto command_buffer = context->CreateCommandBuffer();
+  ASSERT_TRUE(command_buffer);
+  ASSERT_TRUE(CommandBufferVK::Cast(*command_buffer).Track(depth_stencil));
+  depth_stencil.reset();
+
+  // Leased by one wrapper.
+  first.reset();
+  EXPECT_EQ(pool->TrimIdle().after.entries, 1u);
+  // No wrapper, still referenced by recorded GPU work.
+  second.reset();
+  EXPECT_EQ(pool->TrimIdle().after.entries, 1u);
+  // Idle.
+  command_buffer.reset();
+  EXPECT_EQ(pool->TrimIdle().after.entries, 0u);
+}
+
+// Reproduce the shipped Avio host profile without allocating GPU memory. A
+// leased key is shared, so only distinct extents can exhaust the six-entry
+// cap; slower GPU completion keeps those leases alive longer, and no OOM,
+// broken driver, or battery policy is needed.
+TEST(ContextVKTest, AvioSixEntryProfileRefusesBothSamplesUntilLeaseCompletes) {
+  TextureDescriptor desc;
   desc.format = PixelFormat::kR8G8B8A8UNormInt;
   TransientsPoolVK pool(std::weak_ptr<Context>(), PixelFormat::kD24UnormS8Uint,
                         false, {6u, 256u * 1024u * 1024u, false});
   std::vector<std::shared_ptr<SwapchainTransientsVK>> leases;
-  for (size_t i = 0; i < 6u; i++) {
+  for (int64_t i = 0; i < 6; i++) {
+    desc.size = ISize(64 + i, 64);
     auto lease = pool.Acquire(desc, true);
     ASSERT_TRUE(lease);
     leases.push_back(std::move(lease));
+    // A leased key never refuses its own re-acquisition.
+    EXPECT_EQ(pool.Acquire(desc, true), leases.back());
   }
+  desc.size = ISize(64, 70);
   for (size_t frame = 0; frame < 100u; frame++) {
     TransientsPoolRefusalVK refusal;
     EXPECT_FALSE(pool.Acquire(desc, true, &refusal));
@@ -296,40 +419,6 @@ TEST(ContextVKTest, TransientsPoolTrimDropsOnlyIdleEntries) {
   const auto second_trim = pool.TrimIdle();
   EXPECT_EQ(second_trim.before.entries, 1u);
   EXPECT_EQ(second_trim.after, ResourceCacheUsage{});
-}
-
-TEST(ContextVKTest, TransientsPoolDoesNotReuseTrackedTextureEntries) {
-  auto context = MockVulkanContextBuilder().Build();
-  auto pool = context->GetSwapchainTransientsPool();
-
-  TextureDescriptor desc;
-  desc.size = ISize(100, 100);
-  desc.format = PixelFormat::kR8G8B8A8UNormInt;
-
-  auto first = pool->Acquire(desc, /*enable_msaa=*/true);
-  ASSERT_TRUE(first);
-  auto* first_raw = first.get();
-  auto msaa = first->GetMSAATexture();
-  auto depth_stencil = first->GetDepthStencilTexture();
-  ASSERT_TRUE(msaa);
-  ASSERT_TRUE(depth_stencil);
-  auto command_buffer = context->CreateCommandBuffer();
-  ASSERT_TRUE(command_buffer);
-  auto& command_buffer_vk = CommandBufferVK::Cast(*command_buffer);
-  ASSERT_TRUE(command_buffer_vk.Track(msaa));
-  ASSERT_TRUE(command_buffer_vk.Track(depth_stencil));
-
-  first.reset();
-  msaa.reset();
-  depth_stencil.reset();
-  auto second = pool->Acquire(desc, /*enable_msaa=*/true);
-  ASSERT_TRUE(second);
-  EXPECT_NE(second.get(), first_raw);
-
-  command_buffer.reset();
-  auto third = pool->Acquire(desc, /*enable_msaa=*/true);
-  ASSERT_TRUE(third);
-  EXPECT_EQ(third.get(), first_raw);
 }
 
 TEST(ContextVKTest, DeletesCommandPoolsOnAllThreads) {

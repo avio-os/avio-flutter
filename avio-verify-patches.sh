@@ -382,6 +382,24 @@ need "transient admission fails instead of unaccounting leased entries" \
 need "transient trim requires wrapper and GPU idleness" \
   $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
   'entry\.transients\.use_count\(\) == 1u && entry\.transients->IsIdle\(\)'
+need "one transient attachment set per key, shared whatever its lease" \
+  $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
+  'if \(const auto found = FindLocked\(key\); found != lru_\.end\(\)\)'
+absent_in "per-lease transient exclusivity (0bdaa23b3b) stays removed" \
+  $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
+  'it->key == key && it->transients\.use_count\(\) == 1u'
+need "the single-queue sharing invariant is documented" \
+  $F/impeller/renderer/backend/vulkan/swapchain/swapchain_transients_vk.h \
+  'Sharing invariant'
+need "incoming dependency orders shared depth/stencil writes" \
+  $F/impeller/renderer/backend/vulkan/render_pass_builder_vk.cc \
+  'srcAccessMask \|= vk::AccessFlagBits::eDepthStencilAttachmentWrite'
+need "shared transient entry regression" \
+  $F/impeller/renderer/backend/vulkan/context_vk_unittests.cc \
+  'TransientsPoolSharesOneEntryPerKeyWhileTracked'
+need "shared transient synchronization-validation proof and control" \
+  $F/impeller/renderer/backend/vulkan/transients_sharing_vk_unittests.cc \
+  'SharedDepthStencilNeedsTheWidenedIncomingDependency'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

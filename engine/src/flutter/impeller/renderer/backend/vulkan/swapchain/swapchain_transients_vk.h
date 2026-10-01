@@ -29,10 +29,25 @@ namespace impeller {
 ///             The lazy texture initialization is mutex-guarded so a single
 ///             instance may be safely shared across multiple render targets
 ///             that draw on the same thread (e.g. multiple Flutter views in
-///             one frame). Concurrent rendering on different queues with the
-///             same instance is **not** supported — the GPU would alias the
-///             attachments. If parallel render submission is introduced,
-///             callers must lease distinct entries (see `TransientsPoolVK`).
+///             one frame, or the next frame of a view while the previous one
+///             is still executing on the GPU).
+///
+///             Sharing invariant: every render pass that uses these
+///             attachments is recorded on the raster thread and submitted to
+///             the context's one graphics queue, in raster-thread order
+///             (`CommandQueueVK::Submit` → `ContextVK::GetGraphicsQueue`).
+///             Within that queue the render pass's incoming subpass
+///             dependency orders this pass's color and depth/stencil clears
+///             after earlier passes' attachment writes
+///             (`RenderPassBuilderVK::Build`, `deps[0]`), and each pass
+///             clears both attachments, so no contents cross a pass boundary.
+///             Framebuffers are cached on the per-target resolve image, not on
+///             these attachments, so sharing never reuses a stale framebuffer.
+///
+///             Rendering with the same instance from a second queue or a
+///             second raster thread is **not** supported — the GPU would alias
+///             the attachments. If parallel render submission is ever
+///             introduced, the pool key must gain the submitting queue.
 ///
 class SwapchainTransientsVK {
  public:

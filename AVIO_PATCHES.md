@@ -79,6 +79,7 @@ already ancestors of the selected main target under their original commits.
 | 42 | Give the GTK framebuffer real multisampling | upstreamable bugfix — attach to flutter/flutter#191171 | open: flutter/flutter#191171, flutter/flutter#191234 |
 | 44 | Carry typed analytic clips with retained compositor materials | permanent ABI/scene extension | none |
 | 45 | Author semantic foreground coverage for an external linear-light backdrop | permanent composition-contract extension | none — Flutter otherwise cannot know that its transparent target receives a backdrop later |
+| 46a | One transient attachment set per key on the single graphics queue | permanent resource-lifecycle correction (restores patch 11's one-entry-per-key pool; the incoming depth/stencil dependency is upstreamable) | partial: flutter/flutter#144617 recycles one onscreen set upstream |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -129,6 +130,37 @@ completion watermark to decide when HostBuffer storage can be reused. A failed
 queue submission retires its never-executed ID immediately; failure to register
 the timeline callback waits for the exact submitted value and otherwise leaves
 the ID pending rather than asserting unsafe GPU completion.
+
+The ContextVK-owned transients pool keeps exactly one MSAA + depth/stencil set
+per key `(width, height, color format, MSAA)`. Patch 46a restores that rule:
+an acquisition returns the key's one entry whatever its lease, so same-sized
+views in one frame, and a view's next frame while the previous one is still on
+the GPU, share it. Sharing is safe because every user records on the raster
+thread and submits to ContextVK's one graphics queue, each root pass clears
+both attachments, and the framebuffer cache lives on the per-target resolve
+image. The invariant is written on `SwapchainTransientsVK`. Patch 46a also
+widens the incoming render-pass dependency (`deps[0]`) of passes that have a
+depth/stencil attachment to the early/late fragment-test stages and
+depth/stencil read/write access, so a pass's depth/stencil clear is ordered
+after earlier passes' writes to the shared attachment (the same latent hazard
+exists upstream for its shared swapchain depth and recycled RenderTargetCache
+depth). Passes without depth/stencil keep the color-only scope. The
+squashed `0bdaa23b3b` per-lease exclusivity, which allocated a second full set
+for every concurrent same-key acquisition, must not return. Regressions:
+`ContextVKTest.TransientsPoolSharesOneEntryPerKeyWhileTracked`,
+`TransientsPoolSharesOneEntryPerKeyWhileWrapperLeased`,
+`TransientsPoolDistinctKeysStayDistinct`,
+`TransientsPoolTrimKeepsSharedEntryWhileTracked`,
+`RenderPassBuilder.IncomingDependencyCoversDepthStencil`, and the Vulkan
+playground synchronization-validation pair (run with
+`VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`,
+for example on SwiftShader; they skip without it):
+`RendererTest.TwoSameSizeRootTargetsShareTransientsWithoutHazard` (two root
+targets sharing one pool entry, back to back in one submission, report no
+hazard) and its negative control
+`RendererTest.SharedDepthStencilNeedsTheWidenedIncomingDependency` (the same
+passes recorded with the pre-46a color-only incoming dependency must report a
+depth/stencil hazard; with the builder's pass, none).
 
 ### Patch 22: scoped render authority
 
@@ -366,6 +398,10 @@ candidate is leased, the acquisition fails instead of dropping a live entry
 from accounting and silently exceeding the configured limit. Footprint
 arithmetic is checked before allocation, and explicit profiles bypass the
 legacy process-environment override.
+
+Since patch 46a the entry count is one per distinct key, so the limits bound
+distinct live extents, not concurrent leases: a leased key is shared and never
+refused. Only an acquisition of a new key can be refused at the caps.
 
 Memory-pressure cleanup reaches Impeller in Slimpeller builds on the raster
 thread. The backend-neutral `TrimIdleResourceCaches` seam reports exact

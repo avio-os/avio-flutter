@@ -62,18 +62,26 @@ struct TransientsPoolLimitsVK {
 ///               Memoryless allocations contribute zero to the budget,
 ///               since they consume no VRAM.
 ///
+///             The pool holds at most one entry per key. Every acquisition of
+///             a key returns that one entry, whatever its lease: render
+///             targets that use it concurrently (several same-sized views in
+///             one frame, or a view's next frame while the previous one is
+///             still on the GPU) share it under the single-queue invariant
+///             documented on `SwapchainTransientsVK`.
+///
 ///             Entries are evicted in LRU order on insert until both
-///             constraints are satisfied. The most-recently-acquired entry
+///             constraints are satisfied. Only idle entries (no external
+///             wrapper owner and no texture referenced by submitted GPU work)
+///             are ever evicted or trimmed. The most-recently-acquired entry
 ///             is never evicted in the same call that produced it.
 ///
 class TransientsPoolVK {
  public:
-  /// Default cap on cached entries. An entry is leased for as long as some
-  /// render target still references its attachments, so the working set is
-  /// one entry per *concurrently live* render target, not one per distinct
-  /// size. A desktop session reconfiguring window chrome recreates many
-  /// views at once and briefly holds all of their targets, so this is sized
-  /// well above the number of distinct surface sizes in play.
+  /// Default cap on cached entries. The pool keeps one entry per key, so the
+  /// working set is one entry per distinct live surface extent and format.
+  /// A desktop session reconfiguring window chrome briefly holds the extents
+  /// of both the old and the new views, so this is sized well above the
+  /// number of distinct surface sizes in play.
   static constexpr size_t kDefaultMaxEntries = 24;
 
   /// Default cap on resident GPU memory held by cached attachments. Tuned
@@ -107,10 +115,12 @@ class TransientsPoolVK {
   TransientsPoolVK(const TransientsPoolVK&) = delete;
   TransientsPoolVK& operator=(const TransientsPoolVK&) = delete;
 
-  /// @brief  Return the cached `SwapchainTransientsVK` for the given
-  ///         color descriptor, constructing one on miss. The caller may
-  ///         hold the returned shared_ptr beyond a single render; the
-  ///         pool retains its own strong reference until eviction.
+  /// @brief  Return the key's one cached `SwapchainTransientsVK`, whatever
+  ///         its lease, constructing it on miss. The caller may hold the
+  ///         returned shared_ptr beyond a single render; the pool retains
+  ///         its own strong reference until an idle-only eviction or trim.
+  ///         Returns nullptr only when a miss cannot be admitted under the
+  ///         hard limits.
   std::shared_ptr<SwapchainTransientsVK> Acquire(
       const TextureDescriptor& desc,
       bool enable_msaa,
@@ -166,6 +176,9 @@ class TransientsPoolVK {
   bool ReserveFor(size_t byte_footprint) IPLR_REQUIRES(mutex_);
 
   bool EntryIsIdle(const Entry& entry) const IPLR_REQUIRES(mutex_);
+
+  // The key's one entry, or `lru_.end()`.
+  std::list<Entry>::iterator FindLocked(const Key& key) IPLR_REQUIRES(mutex_);
 
   ResourceCacheUsage GetUsageLocked() const IPLR_REQUIRES(mutex_);
 

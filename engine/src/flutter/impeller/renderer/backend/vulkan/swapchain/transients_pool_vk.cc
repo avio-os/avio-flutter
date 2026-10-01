@@ -68,21 +68,20 @@ std::shared_ptr<SwapchainTransientsVK> TransientsPoolVK::Acquire(
 
   std::scoped_lock lock(mutex_);
 
-  // Hit: promote an idle entry to MRU and return it. Entries with additional
-  // wrapper owners or cached texture refs may still be referenced by pending
-  // render targets or in-flight GPU work, so they cannot be handed out again
-  // for the same key.
-  for (auto it = lru_.begin(); it != lru_.end(); ++it) {
-    if (it->key == key && it->transients.use_count() == 1u &&
-        it->transients->IsIdle()) {
-      lru_.splice(lru_.begin(), lru_, it);
-      return lru_.front().transients;
-    }
+  // Hit: the key's one entry, whatever its lease. A leased entry may still be
+  // referenced by a pending render target or by in-flight GPU work; sharing
+  // it is safe because every user records on the raster thread and submits to
+  // the context's one graphics queue, where each render pass clears both
+  // attachments behind an incoming dependency that orders it after earlier
+  // passes' writes (see SwapchainTransientsVK).
+  if (const auto found = FindLocked(key); found != lru_.end()) {
+    lru_.splice(lru_.begin(), lru_, found);
+    return lru_.front().transients;
   }
 
-  // Miss, or all matching entries are leased: construct a fresh entry. Bind
-  // the transients to the same context we hold weakly so its lifetime cannot
-  // outlast the owning ContextVK.
+  // Miss: construct the key's one entry. Bind the transients to the same
+  // context we hold weakly so its lifetime cannot outlast the owning
+  // ContextVK.
   const auto footprint = ComputeFootprint(desc, enable_msaa);
   if (!footprint.has_value() || !ReserveFor(*footprint)) {
     if (refusal) {
@@ -100,6 +99,8 @@ std::shared_ptr<SwapchainTransientsVK> TransientsPoolVK::Acquire(
     }
     return nullptr;
   }
+  // ReserveFor only removes entries, so the key is still absent.
+  FML_DCHECK(FindLocked(key) == lru_.end());
   auto transients =
       std::make_shared<SwapchainTransientsVK>(context_, desc, enable_msaa);
   lru_.push_front(Entry{
@@ -190,6 +191,16 @@ bool TransientsPoolVK::ReserveFor(size_t byte_footprint) {
 
 bool TransientsPoolVK::EntryIsIdle(const Entry& entry) const {
   return entry.transients.use_count() == 1u && entry.transients->IsIdle();
+}
+
+std::list<TransientsPoolVK::Entry>::iterator TransientsPoolVK::FindLocked(
+    const Key& key) {
+  for (auto it = lru_.begin(); it != lru_.end(); ++it) {
+    if (it->key == key) {
+      return it;
+    }
+  }
+  return lru_.end();
 }
 
 ResourceCacheTrimResult TransientsPoolVK::TrimIdle() {

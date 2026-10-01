@@ -124,6 +124,78 @@ TEST(RenderPassBuilder, CreatesRenderPassWithCombinedDepthStencil) {
   EXPECT_EQ(depth_stencil.stencilStoreOp, vk::AttachmentStoreOp::eDontCare);
 }
 
+// Red before EN46a: deps[0] covered only color-attachment output, so a pass's
+// depth/stencil clear was not ordered after an earlier pass's depth/stencil
+// writes to a shared transient attachment.
+TEST(RenderPassBuilder, IncomingDependencyCoversDepthStencil) {
+  RenderPassBuilderVK builder = RenderPassBuilderVK();
+  auto const context = MockVulkanContextBuilder().Build();
+
+  builder.SetColorAttachment(0, PixelFormat::kR8G8B8A8UNormInt,
+                             SampleCount::kCount4, LoadAction::kClear,
+                             StoreAction::kMultisampleResolve);
+  builder.SetDepthStencilAttachment(PixelFormat::kD24UnormS8Uint,
+                                    SampleCount::kCount4, LoadAction::kClear,
+                                    StoreAction::kDontCare);
+
+  auto render_pass = builder.Build(context->GetDevice());
+  ASSERT_TRUE(!!render_pass);
+
+  const auto& dependencies = GetLastRenderPassDependencies();
+  ASSERT_EQ(dependencies.size(), 3u);
+  const VkSubpassDependency& incoming = dependencies[0];
+  EXPECT_EQ(incoming.srcSubpass, VK_SUBPASS_EXTERNAL);
+  EXPECT_EQ(incoming.dstSubpass, 0u);
+
+  constexpr VkPipelineStageFlags kFragmentTests =
+      VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+  constexpr VkAccessFlags kDepthStencilReadWrite =
+      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+  EXPECT_EQ(incoming.srcStageMask & kFragmentTests, kFragmentTests);
+  EXPECT_EQ(incoming.dstStageMask & kFragmentTests, kFragmentTests);
+  EXPECT_NE(
+      incoming.srcAccessMask & VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+      0u);
+  EXPECT_EQ(incoming.dstAccessMask & kDepthStencilReadWrite,
+            kDepthStencilReadWrite);
+
+  // The color scope is unchanged.
+  EXPECT_NE(
+      incoming.srcStageMask & VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      0u);
+  EXPECT_NE(
+      incoming.dstStageMask & VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      0u);
+  EXPECT_NE(incoming.dstAccessMask & VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0u);
+}
+
+// Passes without a depth/stencil attachment gain no new serialization.
+TEST(RenderPassBuilder, IncomingDependencyWithoutDepthStencilIsColorOnly) {
+  RenderPassBuilderVK builder = RenderPassBuilderVK();
+  auto const context = MockVulkanContextBuilder().Build();
+
+  builder.SetColorAttachment(0, PixelFormat::kR8G8B8A8UNormInt,
+                             SampleCount::kCount1, LoadAction::kClear,
+                             StoreAction::kStore);
+
+  auto render_pass = builder.Build(context->GetDevice());
+  ASSERT_TRUE(!!render_pass);
+
+  const auto& dependencies = GetLastRenderPassDependencies();
+  ASSERT_EQ(dependencies.size(), 3u);
+  EXPECT_EQ(dependencies[0].srcStageMask,
+            VkPipelineStageFlags{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT});
+  EXPECT_EQ(
+      dependencies[0].dstStageMask,
+      VkPipelineStageFlags{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT});
+  EXPECT_EQ(dependencies[0].srcAccessMask,
+            VkAccessFlags{VK_ACCESS_SHADER_READ_BIT |
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT});
+}
+
 TEST(RenderPassBuilder, CreatesRenderPassWithOnlyStencil) {
   RenderPassBuilderVK builder = RenderPassBuilderVK();
   auto const context = MockVulkanContextBuilder().Build();
