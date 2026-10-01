@@ -7,7 +7,9 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <string_view>
+#include <vector>
 
 #include "impeller/renderer/render_resource_usage.h"
 #include "impeller/renderer/render_target.h"
@@ -65,6 +67,29 @@ class RenderTargetCache : public RenderTargetAllocator {
       const std::shared_ptr<Texture>& existing_depth_stencil_texture = nullptr,
       std::optional<PixelFormat> target_pixel_format = std::nullopt) override;
 
+  /// Why a request allocated instead of reusing a cached target. Reported
+  /// on the timeline as a `RenderTargetCacheMiss` instant.
+  enum class MissReason {
+    /// No cached target resembles the request.
+    kNoEntry,
+    /// An unleased target differs from the request only in its extent.
+    kExtentMismatch,
+    /// Every cached target with this exact key is leased.
+    kAllLeased,
+    /// A target with this exact key was recently dropped by aging or an idle
+    /// release.
+    kAgedOut,
+    /// The cache is disabled for this request.
+    kDisabled,
+  };
+
+  static std::string_view MissReasonToString(MissReason reason);
+
+  /// The reason of the latest miss, for tests.
+  std::optional<MissReason> GetLastMissReasonForTesting() const {
+    return last_miss_reason_;
+  }
+
   // |RenderTargetAllocator|
   RenderResourceUsage ReportUsage(bool start_new_interval) override;
 
@@ -109,6 +134,15 @@ class RenderTargetCache : public RenderTargetAllocator {
 
   void SampleLeased();
 
+  // Classify and trace a miss for `config`.
+  void RecordMiss(const RenderTargetConfig& config, std::string_view label);
+
+  // Remember a key that aging or an idle release dropped.
+  void RememberDropped(const RenderTargetConfig& config);
+
+  // Trace the cache's size whenever it changes.
+  void TraceCacheSize() const;
+
   std::vector<RenderTargetData> render_target_data_;
   uint32_t keep_alive_frame_count_;
   uint32_t cache_disabled_count_ = 0;
@@ -121,6 +155,9 @@ class RenderTargetCache : public RenderTargetAllocator {
   size_t peak_leased_nominal_bytes_ = 0u;
   size_t created_entries_ = 0u;
   size_t created_erased_real_bytes_ = 0u;
+  // Keys recently dropped by aging or an idle release, oldest first.
+  std::vector<RenderTargetConfig> recently_dropped_;
+  std::optional<MissReason> last_miss_reason_;
 
   RenderTargetCache(const RenderTargetCache&) = delete;
 

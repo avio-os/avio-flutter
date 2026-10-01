@@ -441,6 +441,12 @@ need "released resources are destroyed before the raster task ends" \
   'void ResourceManagerVK::Flush\(\)'
 need "the release path flushes the resource manager" \
   $F/shell/common/rasterizer.cc 'context->FlushReleasedResources\(\)'
+need "RenderTargetCache keys include the pixel format" \
+  $F/impeller/renderer/render_target.h 'color_format == o\.color_format'
+need "RenderTargetCache keys include storage modes" \
+  $F/impeller/renderer/render_target.h 'color_storage == o\.color_storage'
+need "RenderTargetCache attributes every miss" \
+  $F/impeller/entity/render_target_cache.cc '"RenderTargetCacheMiss"'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

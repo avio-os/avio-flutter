@@ -332,11 +332,25 @@ RenderTargetConfig RenderTarget::ToConfig() const {
     return RenderTargetConfig{};
   }
   const auto& color_attachment = color0_.value();
-  return RenderTargetConfig{
+  const auto& color_desc = color_attachment.texture->GetTextureDescriptor();
+  RenderTargetConfig config{
       .size = color_attachment.texture->GetSize(),
       .mip_count = color_attachment.texture->GetMipCount(),
       .has_msaa = color_attachment.resolve_texture != nullptr,
-      .has_depth_stencil = depth_.has_value() && stencil_.has_value()};
+      .has_depth_stencil = depth_.has_value() && stencil_.has_value(),
+      .color_format = color_desc.format,
+      .color_storage = color_desc.storage_mode,
+  };
+  if (color_attachment.resolve_texture) {
+    config.resolve_storage =
+        color_attachment.resolve_texture->GetTextureDescriptor().storage_mode;
+  }
+  if (config.has_depth_stencil && depth_->texture) {
+    const auto& depth_desc = depth_->texture->GetTextureDescriptor();
+    config.depth_stencil_format = depth_desc.format;
+    config.depth_stencil_storage = depth_desc.storage_mode;
+  }
+  return config;
 }
 
 RenderTargetAllocator::RenderTargetAllocator(

@@ -359,5 +359,111 @@ TEST_F(RenderTargetCacheResourceTest, ReleaseIdleReportsExactBytes) {
   EXPECT_EQ(cache.ReportUsage(false), RenderResourceUsage{});
 }
 
+// Red before EN47: the key ignored the pixel format, so a request for a
+// 16-bit float target reused an 8-bit one.
+TEST_F(RenderTargetCacheResourceTest, KeyDistinguishesPixelFormat) {
+  RenderTargetCache cache(allocator_);
+  cache.Start();
+  const RenderTarget rgba8 = cache.CreateOffscreen(context_, {100, 100}, 1);
+  ASSERT_TRUE(rgba8.IsValid());
+  cache.End();
+
+  cache.Start();
+  const RenderTarget f16 =
+      cache.CreateOffscreen(context_, {100, 100}, 1, "Offscreen",
+                            RenderTarget::kDefaultColorAttachmentConfig,
+                            RenderTarget::kDefaultStencilAttachmentConfig,
+                            nullptr, nullptr, PixelFormat::kR16G16B16A16Float);
+  ASSERT_TRUE(f16.IsValid());
+  EXPECT_NE(f16.GetRenderTargetTexture(), rgba8.GetRenderTargetTexture());
+  EXPECT_EQ(f16.GetRenderTargetPixelFormat(), PixelFormat::kR16G16B16A16Float);
+  EXPECT_EQ(cache.GetLastMissReasonForTesting(),
+            RenderTargetCache::MissReason::kNoEntry);
+  cache.End();
+  EXPECT_EQ(cache.CachedTextureCount(), 2u);
+
+  // Each key still reuses its own entry.
+  cache.Start();
+  EXPECT_EQ(
+      cache.CreateOffscreen(context_, {100, 100}, 1).GetRenderTargetTexture(),
+      rgba8.GetRenderTargetTexture());
+  cache.End();
+}
+
+// Red before EN47: the key ignored storage modes.
+TEST_F(RenderTargetCacheResourceTest, KeyDistinguishesStorageModes) {
+  RenderTargetCache cache(allocator_);
+  cache.Start();
+  const RenderTarget device_private =
+      cache.CreateOffscreen(context_, {64, 64}, 1);
+  ASSERT_TRUE(device_private.IsValid());
+  cache.End();
+
+  RenderTarget::AttachmentConfig host_visible =
+      RenderTarget::kDefaultColorAttachmentConfig;
+  host_visible.storage_mode = StorageMode::kHostVisible;
+  cache.Start();
+  const RenderTarget other =
+      cache.CreateOffscreen(context_, {64, 64}, 1, "Offscreen", host_visible);
+  ASSERT_TRUE(other.IsValid());
+  EXPECT_NE(other.GetRenderTargetTexture(),
+            device_private.GetRenderTargetTexture());
+  EXPECT_EQ(other.GetRenderTargetTexture()->GetTextureDescriptor().storage_mode,
+            StorageMode::kHostVisible);
+  cache.End();
+
+  // MSAA resolve storage is part of the key too.
+  RenderTarget::AttachmentConfigMSAA msaa_config =
+      RenderTarget::kDefaultColorAttachmentConfigMSAA;
+  cache.Start();
+  const RenderTarget first_msaa =
+      cache.CreateOffscreenMSAA(context_, {64, 64}, 1, "MSAA", msaa_config);
+  cache.End();
+  msaa_config.resolve_storage_mode = StorageMode::kHostVisible;
+  cache.Start();
+  const RenderTarget second_msaa =
+      cache.CreateOffscreenMSAA(context_, {64, 64}, 1, "MSAA", msaa_config);
+  EXPECT_NE(second_msaa.GetRenderTargetTexture(),
+            first_msaa.GetRenderTargetTexture());
+  cache.End();
+}
+
+TEST_F(RenderTargetCacheResourceTest, MissReasonClassification) {
+  RenderTargetCache cache(allocator_, /*keep_alive_frame_count=*/0);
+
+  cache.Start();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  EXPECT_EQ(cache.GetLastMissReasonForTesting(),
+            RenderTargetCache::MissReason::kNoEntry);
+  // The only entry of this key is leased by this frame.
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  EXPECT_EQ(cache.GetLastMissReasonForTesting(),
+            RenderTargetCache::MissReason::kAllLeased);
+  cache.End();
+
+  // Both entries are unleased now; a different extent of the same kind.
+  cache.Start();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 101}, 1).IsValid());
+  EXPECT_EQ(cache.GetLastMissReasonForTesting(),
+            RenderTargetCache::MissReason::kExtentMismatch);
+  cache.End();
+  // keep_alive 0: the two 100x100 entries were dropped at that End.
+  ASSERT_EQ(cache.CachedTextureCount(), 1u);
+
+  cache.Start();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  EXPECT_EQ(cache.GetLastMissReasonForTesting(),
+            RenderTargetCache::MissReason::kAgedOut);
+  cache.End();
+
+  cache.Start();
+  cache.DisableCache();
+  ASSERT_TRUE(cache.CreateOffscreen(context_, {100, 100}, 1).IsValid());
+  EXPECT_EQ(cache.GetLastMissReasonForTesting(),
+            RenderTargetCache::MissReason::kDisabled);
+  cache.EnableCache();
+  cache.End();
+}
+
 }  // namespace testing
 }  // namespace impeller

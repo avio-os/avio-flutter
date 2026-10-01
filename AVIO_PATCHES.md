@@ -82,6 +82,7 @@ already ancestors of the selected main target under their original commits.
 | 46a | One transient attachment set per key on the single graphics queue | permanent resource-lifecycle correction (restores patch 11's one-entry-per-key pool; the incoming depth/stencil dependency is upstreamable) | partial: flutter/flutter#144617 recycles one onscreen set upstream |
 | 46b | A transient set lives while an existing view holds its extent | permanent resource-lifecycle owner (ships only with Avio G2, which keeps a ShellItem's view across extent changes) | none — upstream frees with the swapchain |
 | 46 | Release idle render resources on the embedder's request | permanent ABI/lifecycle extension (ABI v7) | none — flutter/flutter#193015 proposes a coarser low-memory variant |
+| 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -718,6 +719,26 @@ distinct key, no duplicate) and `AvioReleaseIdleFreesBeforeNextRasterTask`
 counted through the embedder's proc address callback, before the callback
 runs, and the frame posted right after the request renders on a newly created
 set).
+
+### Patch 47: complete RenderTargetCache keys and miss attribution
+
+`RenderTargetConfig` is the complete identity of an offscreen's textures:
+extent, mip count, MSAA, depth/stencil, and now the color format, the color
+and resolve storage modes, and the depth/stencil format and storage. Before
+this patch a request for a different pixel format or storage mode could
+reuse a cached texture of another format; no current Avio caller differs in
+those fields, so hit rates are unchanged, but the latent bug is closed.
+
+Every miss emits a `RenderTargetCacheMiss` timeline instant with the request
+(`w`, `h`, `msaa`, `format`, `ds`, `label`) and a reason: `no_entry`,
+`extent_mismatch` (an unleased entry differs only in extent), `all_leased`
+(every entry of the key is leased), `aged_out` (the key was dropped by aging
+or an idle release recently) or `disabled`. The cache traces a
+`RenderTargetCache {entries, bytes}` counter when its size changes and one
+`RenderTargetCacheReleaseIdle` instant per idle release. All of it is
+TRACE/timeline only; nothing is logged. Regressions:
+`RenderTargetCacheResourceTest.KeyDistinguishesPixelFormat`,
+`KeyDistinguishesStorageModes`, `MissReasonClassification`.
 
 ## Known baseline debt
 
