@@ -439,6 +439,8 @@ need "RenderTargetCache attributes every miss" \
   $F/impeller/entity/render_target_cache.cc '"RenderTargetCacheMiss"'
 need "the RenderTargetCache size counter carries real bytes" \
   $F/impeller/entity/render_target_cache.cc '"real_bytes",'
+need "Flip allocates one single-sample secondary" \
+  $F/impeller/entity/entity_pass_target.cc '"EntityPassTarget Secondary"'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

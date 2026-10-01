@@ -39,10 +39,32 @@ std::shared_ptr<Texture> EntityPassTarget::Flip(
 
   if (!secondary_color_texture_) {
     // The second texture is allocated lazily to avoid unused allocations.
-    TextureDescriptor new_descriptor =
+    const TextureDescriptor resolve_descriptor =
         color0.resolve_texture->GetTextureDescriptor();
-    RenderTarget target = renderer.GetRenderTargetCache()->CreateOffscreenMSAA(
-        *renderer.GetContext(), new_descriptor.size, 1);
+    RenderTarget target;
+    if (supports_implicit_msaa_) {
+      // Implicit resolve renders into the single texture it samples, so the
+      // secondary must come from an implicit-MSAA target as well.
+      target = renderer.GetRenderTargetCache()->CreateOffscreenMSAA(
+          *renderer.GetContext(), resolve_descriptor.size, 1);
+    } else {
+      // Only the resolve texture is swapped, so the secondary is exactly one
+      // single-sample texture in the resolve format: no multisample color
+      // and no depth/stencil, which would be allocated only to be dropped.
+      target = renderer.GetRenderTargetCache()->CreateOffscreen(
+          *renderer.GetContext(), resolve_descriptor.size, /*mip_count=*/1,
+          "EntityPassTarget Secondary",
+          RenderTarget::AttachmentConfig{
+              .storage_mode = resolve_descriptor.storage_mode,
+              .load_action = LoadAction::kDontCare,
+              .store_action = StoreAction::kStore,
+              .clear_color = Color::BlackTransparent(),
+          },
+          /*stencil_attachment_config=*/std::nullopt,
+          /*existing_color_texture=*/nullptr,
+          /*existing_depth_stencil_texture=*/nullptr,
+          /*target_pixel_format=*/resolve_descriptor.format);
+    }
     secondary_color_texture_ = target.GetRenderTargetTexture();
 
     if (!secondary_color_texture_) {

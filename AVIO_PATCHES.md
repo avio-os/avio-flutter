@@ -83,6 +83,7 @@ already ancestors of the selected main target under their original commits.
 | 46b | A transient set lives while an existing view holds its extent | permanent resource-lifecycle owner (ships only with Avio G2, which keeps a ShellItem's view across extent changes) | none — upstream frees with the swapchain |
 | 46u | Report-only render-resource accounting | permanent diagnostics (internal C++ API, no ABI change) | none |
 | 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
+| 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -730,6 +731,26 @@ patch 46u's accounting: `entries`, `bytes` (nominal) and `real_bytes`. All of
 it is TRACE/timeline only; nothing is logged. Regressions:
 `RenderTargetCacheResourceTest.KeyDistinguishesPixelFormat`,
 `KeyDistinguishesStorageModes`, `MissReasonClassification`.
+
+### Patch 48: single-sample Flip secondary
+
+Vulkan reports `SupportsReadFromResolve() == false`, so a backdrop inside
+another layer flips the MSAA pass target's resolve texture with a lazily
+allocated secondary. Upstream obtained that secondary from
+`CreateOffscreenMSAA` and kept only its resolve texture, allocating a 4x
+color texture and a 4x depth/stencil texture to be dropped (about 198 MiB
+requested to keep about 20 MiB at 2880x1800). On the explicit-resolve path
+the secondary is now one single-sample `CreateOffscreen` in the resolve
+texture's format and storage, labelled "EntityPassTarget Secondary", with no
+depth/stencil. The implicit-resolve (GLES) path is unchanged. The swap and
+return contract is unchanged. Regressions:
+`EntityPassTargetFlipTest.FlipAllocatesOneSingleSampleTexture`,
+`SecondFlipAllocatesNothing`, `FlipSwapAndReturnUnchanged`,
+`FlipKeepsNonDefaultResolveFormat`, and the pixel test
+`AiksTest.BackdropInsideOpacityLayerMatchesDirectDraw`: the snap-overlay
+shape (a backdrop filter inside an opacity layer, drawing after the
+backdrop) must equal the same picture drawn without a backdrop within
+1/255, and on Vulkan it must have taken the labelled secondary.
 
 ## Known baseline debt
 

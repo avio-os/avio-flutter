@@ -70,6 +70,7 @@ template("display_list_unittests_component") {
   target_name = invoker.target_name
   predefined_sources = [
     "aiks_dl_atlas_unittests.cc",
+    "aiks_dl_backdrop_flip_unittests.cc",
     "aiks_dl_basic_unittests.cc",
     "aiks_dl_blend_unittests.cc",
     "aiks_dl_blur_unittests.cc",
