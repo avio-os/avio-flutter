@@ -13,6 +13,7 @@
 #include "impeller/core/allocator.h"
 #include "impeller/core/formats.h"
 #include "impeller/geometry/size.h"
+#include "impeller/renderer/render_resource_usage.h"
 
 namespace impeller {
 
@@ -202,6 +203,22 @@ class RenderTargetAllocator {
   ///
   ///        This may be used to deallocate any unused textures.
   virtual void End();
+
+  /// @brief Exact usage of the textures this allocator caches. When
+  ///        `start_new_interval` is true the interval counters restart.
+  ///        Allocators that cache nothing report zero usage.
+  virtual RenderResourceUsage ReportUsage(bool start_new_interval) {
+    return {};
+  }
+
+  /// @brief Drop cached render targets that no open workload leases and that
+  ///        were last used at least `unused_for` ago. Called between frames.
+  ///        Textures still referenced by submitted GPU work stay alive through
+  ///        that reference until the work completes.
+  virtual ResourceCacheTrimResult ReleaseIdle(
+      std::chrono::nanoseconds unused_for) {
+    return {};
+  }
 
  private:
   std::shared_ptr<Allocator> allocator_;

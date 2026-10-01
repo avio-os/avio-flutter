@@ -118,6 +118,15 @@ class EmbedderEngine {
   /// active. Obscured and suspended views remain registered.
   bool SetViewVisibility(int64_t view_id, Animator::ViewVisibility visibility);
 
+  // Posts an idle render-resource release (or, for `kinds == 0`, a usage
+  // report) to the raster task runner. The engine selects the idle entries
+  // and destroys what it releases before the raster task ends; `callback`
+  // runs at most once on the raster thread. Returns false when the feature
+  // was not negotiated or the engine is not running.
+  bool ReleaseIdleResources(FlutterAvioIdleResourceKinds kinds,
+                            FlutterAvioIdleResourceReleaseCallback callback,
+                            void* user_data);
+
   bool ReloadSystemFonts();
 
   bool PostRenderThreadTask(const fml::closure& task);

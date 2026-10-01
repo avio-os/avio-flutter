@@ -488,6 +488,80 @@ bool EmbedderEngine::SetViewVisibility(int64_t view_id,
   return true;
 }
 
+namespace {
+
+FlutterAvioRenderResourceUsage ToAvioRenderResourceUsage(
+    const impeller::RenderResourceUsage& usage) {
+  return FlutterAvioRenderResourceUsage{
+      .struct_size = sizeof(FlutterAvioRenderResourceUsage),
+      .entries = usage.entries,
+      .nominal_bytes = usage.nominal_bytes,
+      .real_bytes = usage.real_bytes,
+      .leased_entries = usage.leased_entries,
+      .peak_leased_nominal_bytes = usage.peak_leased_nominal_bytes,
+      .distinct_keys = usage.distinct_keys,
+      .duplicate_entries = usage.duplicate_entries,
+      .orphans_released_entries = usage.orphans_released_entries,
+      .orphans_released_real_bytes = usage.orphans_released_real_bytes,
+      .created_entries = usage.created_entries,
+      .created_real_bytes = usage.created_real_bytes,
+  };
+}
+
+}  // namespace
+
+bool EmbedderEngine::ReleaseIdleResources(
+    FlutterAvioIdleResourceKinds kinds,
+    FlutterAvioIdleResourceReleaseCallback callback,
+    void* user_data) {
+  if (!IsValid() || (avio_extension_features_ &
+                     kFlutterAvioExtensionFeatureIdleResourceRelease) == 0) {
+    return false;
+  }
+
+  uint32_t rasterizer_kinds = 0u;
+  if ((kinds & kFlutterAvioIdleResourceTransientAttachments) != 0) {
+    rasterizer_kinds |= Rasterizer::kIdleTransientAttachments;
+  }
+  if ((kinds & kFlutterAvioIdleResourceOffscreenTargets) != 0) {
+    rasterizer_kinds |= Rasterizer::kIdleOffscreenTargets;
+  }
+  // Raster tasks run in order, so the release applies between frames and is
+  // ordered against any frame posted before or after it.
+  task_runners_.GetRasterTaskRunner()->PostTask([rasterizer =
+                                                     shell_->GetRasterizer(),
+                                                 rasterizer_kinds, callback,
+                                                 user_data]() {
+    if (!rasterizer) {
+      return;
+    }
+    const Rasterizer::IdleResourceReport report =
+        rasterizer->ReleaseIdleResources(rasterizer_kinds);
+    if (callback == nullptr) {
+      return;
+    }
+    FlutterAvioIdleResourceKinds kinds_applied = 0u;
+    if ((report.kinds_applied & Rasterizer::kIdleTransientAttachments) != 0) {
+      kinds_applied |= kFlutterAvioIdleResourceTransientAttachments;
+    }
+    if ((report.kinds_applied & Rasterizer::kIdleOffscreenTargets) != 0) {
+      kinds_applied |= kFlutterAvioIdleResourceOffscreenTargets;
+    }
+    const FlutterAvioIdleResourceReleaseResult result = {
+        .struct_size = sizeof(FlutterAvioIdleResourceReleaseResult),
+        .kinds_applied = kinds_applied,
+        .transient_before = ToAvioRenderResourceUsage(report.transient_before),
+        .transient_after = ToAvioRenderResourceUsage(report.transient_after),
+        .offscreen_before = ToAvioRenderResourceUsage(report.offscreen_before),
+        .offscreen_after = ToAvioRenderResourceUsage(report.offscreen_after),
+        .kept_in_use_entries = report.kept_in_use,
+        .kept_recent_entries = report.kept_recent,
+    };
+    callback(&result, user_data);
+  });
+  return true;
+}
+
 bool EmbedderEngine::ReloadSystemFonts() {
   if (!IsValid()) {
     return false;

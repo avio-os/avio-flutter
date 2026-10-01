@@ -41,6 +41,10 @@ TextureSourceVK::GetExternalImageOwnership() const {
   return std::nullopt;
 }
 
+size_t TextureSourceVK::GetAllocatedByteSize() const {
+  return 0u;
+}
+
 vk::ImageLayout TextureSourceVK::GetLayout() const {
   return layout_;
 }

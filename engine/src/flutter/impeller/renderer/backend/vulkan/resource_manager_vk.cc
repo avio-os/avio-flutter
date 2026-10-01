@@ -64,12 +64,30 @@ void ResourceManagerVK::Start() {
     lock.unlock();
 
     // Claim all resources while tracing.
+    const uint64_t collected = resources_to_collect.size();
     {
       TRACE_EVENT0("Impeller", "ReclaimResources");
       resources_to_collect.clear();  // Redundant because of scope but here so
                                      // we can add a trace around it.
     }
+    if (collected > 0u) {
+      {
+        std::scoped_lock destroyed_lock(reclaimables_mutex_);
+        destroyed_count_ += collected;
+      }
+      destroyed_cv_.notify_all();
+    }
   }
+}
+
+void ResourceManagerVK::Flush() {
+  FML_DCHECK(waiter_.get_id() != std::this_thread::get_id())
+      << "ResourceManagerVK::Flush would wait for its own thread.";
+  TRACE_EVENT0("Impeller", "ResourceManagerVK::Flush");
+  std::unique_lock lock(reclaimables_mutex_);
+  const uint64_t target = reclaimed_count_;
+  destroyed_cv_.wait(
+      lock, [&]() { return destroyed_count_ >= target || should_exit_; });
 }
 
 void ResourceManagerVK::Reclaim(std::unique_ptr<ResourceVK> resource) {
@@ -79,6 +97,7 @@ void ResourceManagerVK::Reclaim(std::unique_ptr<ResourceVK> resource) {
   {
     std::scoped_lock lock(reclaimables_mutex_);
     reclaimables_.emplace_back(std::move(resource));
+    reclaimed_count_++;
   }
   reclaimables_cv_.notify_one();
 }
@@ -92,6 +111,7 @@ void ResourceManagerVK::Terminate() {
     should_exit_ = true;
   }
   reclaimables_cv_.notify_one();
+  destroyed_cv_.notify_all();
 }
 
 }  // namespace impeller

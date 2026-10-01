@@ -81,6 +81,7 @@ already ancestors of the selected main target under their original commits.
 | 45 | Author semantic foreground coverage for an external linear-light backdrop | permanent composition-contract extension | none — Flutter otherwise cannot know that its transparent target receives a backdrop later |
 | 46a | One transient attachment set per key on the single graphics queue | permanent resource-lifecycle correction (restores patch 11's one-entry-per-key pool; the incoming depth/stencil dependency is upstreamable) | partial: flutter/flutter#144617 recycles one onscreen set upstream |
 | 46b | A transient set lives while an existing view holds its extent | permanent resource-lifecycle owner (ships only with Avio G2, which keeps a ShellItem's view across extent changes) | none — upstream frees with the swapchain |
+| 46 | Release idle render resources on the embedder's request | permanent ABI/lifecycle extension (ABI v7) | none — flutter/flutter#193015 proposes a coarser low-memory variant |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -423,6 +424,10 @@ Since patch 46a the entry count is one per distinct key, so the limits bound
 distinct live extents, not concurrent leases: a leased key is shared and never
 refused. Only an acquisition of a new key can be refused at the caps.
 
+Patch 46 keeps admission and both caps on nominal accounting; real bytes are
+reported, not enforced. `TrimIdle` is now `ReleaseIdle` with a zero window,
+and every release reports the entries it kept as in use or recent.
+
 Memory-pressure cleanup reaches Impeller in Slimpeller builds on the raster
 thread. The backend-neutral `TrimIdleResourceCaches` seam reports exact
 before/after usage, while Vulkan removes only the same provably idle entries;
@@ -672,6 +677,47 @@ until external composition. It must not become a platform-wide default or a
 Smithay heuristic over generic alpha: both would also alter text already
 flattened into opaque Flutter pixels and translucent materials whose linear
 coverage is intentional.
+
+### Patch 46: idle render-resource release (ABI v7)
+
+`FlutterEngineReleaseAvioIdleResources`, negotiated with
+`kFlutterAvioExtensionFeatureIdleResourceRelease` (which requires
+`RootRenderTarget` and `ResourceLifecycleConfig`), lets an embedder ask the
+engine to free idle engine-private render resources: transient attachment
+sets and RenderTargetCache offscreens. `kinds == 0` only reports. The engine
+alone decides which entries are idle: never one that a render target or
+submitted GPU work references, and never one used within
+`impeller::kIdleReleaseMinUnused` (5 s, an engine constant; the request
+carries no window). Orphans of patch 46b are always released when idle. The
+request runs on the raster task runner between raster tasks and never blocks
+the platform thread. `ResourceManagerVK::Flush` waits until everything the
+release queued is destroyed before the raster task ends, so no later raster
+submission can validate (and restore from eviction) memory that is about to
+be freed; the resource manager stays the one destroyer. The callback, if
+any, runs once on the raster thread with exact before/after reports.
+
+The usage report (`FlutterAvioRenderResourceUsage`) carries entries, nominal
+and real bytes (real from the backend allocation, `vmaCreateImage`'s
+allocation size), leased entries, and per-request intervals of peak leased
+nominal bytes, created entries and bytes, and released orphans. It also
+carries 46a/46b's health: `distinct_keys`, `duplicate_entries` (the
+transient pool must report 0) and `orphans_released_*`. The offscreen cache
+reports `duplicate_entries` as entries minus distinct keys and no orphans.
+
+The all-views-hidden trim of patch 36 is unchanged for every embedder and
+remains transient-only. The host's policy for when to ask (Avio's
+`IdleReleasePolicy`, gated on measured eviction of the Shell's own memory)
+lives in the Avio repo. Never call `FlutterEngineNotifyLowMemoryWarning` for
+this purpose: it forces a VM-wide Dart GC.
+
+Embedder regressions (Vulkan) beyond the negotiation, request and report
+tests: `EmbedderTest.AvioTwoSameSizeViewsInOneFrameUseOneTransientEntry`
+(patch 46a end to end: two 800x600 views in one frame report one entry, one
+distinct key, no duplicate) and `AvioReleaseIdleFreesBeforeNextRasterTask`
+(a set aged past the recency window is released; its images are destroyed,
+counted through the embedder's proc address callback, before the callback
+runs, and the frame posted right after the request renders on a newly created
+set).
 
 ## Known baseline debt
 

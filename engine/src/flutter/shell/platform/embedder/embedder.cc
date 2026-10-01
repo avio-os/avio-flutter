@@ -196,9 +196,14 @@ static constexpr FlutterAvioExtensionFeatures kAvioSupportedFeatures =
     kFlutterAvioExtensionFeaturePreSubmitFailure
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && \
     defined(IMPELLER_SUPPORTS_RENDERING)
-    | kFlutterAvioExtensionFeatureResourceLifecycleConfig
+    | kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+    kFlutterAvioExtensionFeatureIdleResourceRelease
 #endif
     ;
+
+static constexpr FlutterAvioIdleResourceKinds kAvioKnownIdleResourceKinds =
+    kFlutterAvioIdleResourceTransientAttachments |
+    kFlutterAvioIdleResourceOffscreenTargets;
 
 static const char* ValidateAvioExtensionRequest(
     const FlutterAvioExtensionRequest* request) {
@@ -262,6 +267,15 @@ static const char* ValidateAvioExtensionRequest(
       (request->required_features &
        kFlutterAvioExtensionFeatureFrameOpportunityOutcomes) == 0) {
     return "Render deadlines require exact frame opportunity outcomes.";
+  }
+  if ((request->required_features &
+       kFlutterAvioExtensionFeatureIdleResourceRelease) != 0 &&
+      ((request->required_features &
+        kFlutterAvioExtensionFeatureRootRenderTarget) == 0 ||
+       (request->required_features &
+        kFlutterAvioExtensionFeatureResourceLifecycleConfig) == 0)) {
+    return "Idle resource release requires root targets and a resource "
+           "lifecycle configuration.";
   }
   return nullptr;
 }
@@ -4492,6 +4506,33 @@ FlutterEngineResult FlutterEngineSetAvioViewVisibility(
   return kSuccess;
 }
 
+FlutterEngineResult FlutterEngineReleaseAvioIdleResources(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    const FlutterAvioIdleResourceRelease* request) {
+  if (engine == nullptr) {
+    return LOG_EMBEDDER_ERROR(kInvalidArguments, "Invalid engine handle.");
+  }
+  if (request == nullptr || !STRUCT_HAS_MEMBER(request, user_data)) {
+    return LOG_EMBEDDER_ERROR(kInvalidArguments,
+                              "Invalid Avio idle resource release request.");
+  }
+  if ((request->kinds & ~kAvioKnownIdleResourceKinds) != 0) {
+    return LOG_EMBEDDER_ERROR(kInvalidArguments,
+                              "Unknown Avio idle resource kinds.");
+  }
+
+  const std::string kinds = std::to_string(request->kinds);
+  TRACE_EVENT1("flutter", "FlutterEngineReleaseAvioIdleResources", "kinds",
+               kinds.c_str());
+  if (!reinterpret_cast<flutter::EmbedderEngine*>(engine)->ReleaseIdleResources(
+          request->kinds, request->callback, request->user_data)) {
+    return LOG_EMBEDDER_ERROR(
+        kInternalInconsistency,
+        "Idle resource release was not negotiated with this engine.");
+  }
+  return kSuccess;
+}
+
 FlutterEngineResult FlutterEngineReloadSystemFonts(
     FLUTTER_API_SYMBOL(FlutterEngine) engine) {
   if (engine == nullptr) {
@@ -5085,6 +5126,7 @@ FlutterEngineResult FlutterEngineGetProcAddresses(
   SET_PROC(OnVsyncForDisplay, FlutterEngineOnVsyncForDisplay);
   SET_PROC(SetViewDisplay, FlutterEngineSetViewDisplay);
   SET_PROC(SetAvioViewVisibility, FlutterEngineSetAvioViewVisibility);
+  SET_PROC(ReleaseAvioIdleResources, FlutterEngineReleaseAvioIdleResources);
   SET_PROC(ReloadSystemFonts, FlutterEngineReloadSystemFonts);
   SET_PROC(TraceEventDurationBegin, FlutterEngineTraceEventDurationBegin);
   SET_PROC(TraceEventDurationEnd, FlutterEngineTraceEventDurationEnd);

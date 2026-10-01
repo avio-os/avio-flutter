@@ -158,6 +158,13 @@ class TextureSourceVK {
   ///
   virtual bool IsSwapchainImage() const = 0;
 
+  //----------------------------------------------------------------------------
+  /// @brief      The bytes of device memory allocated for this image by the
+  ///             context's allocator, or 0 for images the context does not
+  ///             own (swapchain, external, or imported images).
+  ///
+  virtual size_t GetAllocatedByteSize() const;
+
   virtual std::optional<ExternalImageOwnershipVK> GetExternalImageOwnership()
       const;
 

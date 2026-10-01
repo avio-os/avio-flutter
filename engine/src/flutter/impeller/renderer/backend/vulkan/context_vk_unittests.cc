@@ -5,6 +5,7 @@
 #include "flutter/fml/file.h"
 #include "flutter/fml/synchronization/waitable_event.h"
 
+#include <chrono>
 #include <limits>
 #include <set>
 
@@ -563,6 +564,226 @@ TEST(ContextVKTest, TransientsPoolCapEvictsOrphansFirst) {
   EXPECT_EQ(
       pool.Acquire(hidden_view, true, TransientsOwnerVK{.view_id = 1}).get(),
       warm);
+}
+
+namespace {
+
+// A manually advanced clock for the pool's per-entry recency.
+struct TestPoolClock {
+  std::chrono::steady_clock::time_point now =
+      std::chrono::steady_clock::time_point() + std::chrono::hours(1);
+
+  TransientsPoolVK::Clock Get() {
+    return [this] { return now; };
+  }
+};
+
+constexpr auto kTestWindow = std::chrono::seconds(5);
+
+}  // namespace
+
+TEST(ContextVKTest, TransientsPoolReleaseKeepsEntriesUsedWithinWindow) {
+  auto pool = MakeOwnerTestPool();
+  TestPoolClock clock;
+  pool.SetClockForTesting(clock.Get());
+  ASSERT_TRUE(pool.Acquire(OwnerTestDescriptor(64, 64), true));
+  clock.now += kTestWindow - std::chrono::milliseconds(1);
+  const auto result = pool.ReleaseIdle(kTestWindow);
+  EXPECT_EQ(result.kept_recent, 1u);
+  EXPECT_EQ(result.kept_in_use, 0u);
+  EXPECT_EQ(pool.GetUsage().entries, 1u);
+}
+
+TEST(ContextVKTest, TransientsPoolReleasesIdleEntriesUnusedForWindow) {
+  auto pool = MakeOwnerTestPool();
+  TestPoolClock clock;
+  pool.SetClockForTesting(clock.Get());
+  ASSERT_TRUE(pool.Acquire(OwnerTestDescriptor(64, 64), true));
+  ASSERT_TRUE(pool.Acquire(OwnerTestDescriptor(32, 32), true));
+  clock.now += kTestWindow;
+  const auto result = pool.ReleaseIdle(kTestWindow);
+  EXPECT_EQ(result.before.entries, 2u);
+  EXPECT_EQ(result.after, ResourceCacheUsage{});
+  EXPECT_EQ(result.kept_recent, 0u);
+}
+
+// Neither a wrapper lease nor submitted GPU work can be released, however old.
+TEST(ContextVKTest, TransientsPoolReleaseNeverDropsLeasedOrTrackedEntries) {
+  auto context = MockVulkanContextBuilder().Build();
+  auto pool = context->GetSwapchainTransientsPool();
+  TestPoolClock clock;
+  pool->SetClockForTesting(clock.Get());
+
+  auto leased = pool->Acquire(OwnerTestDescriptor(64, 64), true);
+  auto tracked = pool->Acquire(OwnerTestDescriptor(32, 32), true);
+  ASSERT_TRUE(leased && tracked);
+  auto depth_stencil = tracked->GetDepthStencilTexture();
+  ASSERT_TRUE(depth_stencil);
+  auto command_buffer = context->CreateCommandBuffer();
+  ASSERT_TRUE(command_buffer);
+  ASSERT_TRUE(CommandBufferVK::Cast(*command_buffer).Track(depth_stencil));
+  depth_stencil.reset();
+  tracked.reset();
+
+  clock.now += kTestWindow * 100;
+  auto result = pool->ReleaseIdle(kTestWindow);
+  EXPECT_EQ(result.kept_in_use, 2u);
+  EXPECT_EQ(result.after.entries, 2u);
+
+  leased.reset();
+  command_buffer.reset();
+  result = pool->ReleaseIdle(kTestWindow);
+  EXPECT_EQ(result.after.entries, 0u);
+}
+
+TEST(ContextVKTest, TransientsPoolReleaseHitRefreshesLastUse) {
+  auto pool = MakeOwnerTestPool();
+  TestPoolClock clock;
+  pool.SetClockForTesting(clock.Get());
+  const auto desc = OwnerTestDescriptor(64, 64);
+  ASSERT_TRUE(pool.Acquire(desc, true));
+  clock.now += kTestWindow * 2;
+  // A hit just before the request makes the entry recent again.
+  ASSERT_TRUE(pool.Acquire(desc, true));
+  const auto result = pool.ReleaseIdle(kTestWindow);
+  EXPECT_EQ(result.kept_recent, 1u);
+  EXPECT_EQ(pool.GetUsage().entries, 1u);
+}
+
+TEST(ContextVKTest, TransientsPoolReleaseZeroWindowEqualsTrimIdle) {
+  auto pool = MakeOwnerTestPool();
+  TestPoolClock clock;
+  pool.SetClockForTesting(clock.Get());
+  auto leased = pool.Acquire(OwnerTestDescriptor(64, 64), true);
+  ASSERT_TRUE(pool.Acquire(OwnerTestDescriptor(32, 32), true));
+  ASSERT_TRUE(leased);
+  // Nothing has aged, yet a zero window releases every idle entry, exactly
+  // like the all-hidden trim.
+  const auto released = pool.ReleaseIdle(std::chrono::nanoseconds::zero());
+  EXPECT_EQ(released.before.entries, 2u);
+  EXPECT_EQ(released.after.entries, 1u);
+  EXPECT_EQ(released.kept_in_use, 1u);
+  EXPECT_EQ(released.kept_recent, 0u);
+  ASSERT_TRUE(pool.Acquire(OwnerTestDescriptor(32, 32), true));
+  const auto trimmed = pool.TrimIdle();
+  EXPECT_EQ(trimmed.after.entries, 1u);
+  EXPECT_EQ(trimmed.kept_in_use, 1u);
+}
+
+// The device memory the allocator actually made for a set's attachments.
+static size_t AttachmentAllocationBytes(SwapchainTransientsVK& set) {
+  size_t bytes = 0u;
+  if (const auto& msaa = set.GetMSAATexture()) {
+    bytes += msaa->GetAllocatedByteSize();
+  }
+  if (const auto& depth_stencil = set.GetDepthStencilTexture()) {
+    bytes += depth_stencil->GetAllocatedByteSize();
+  }
+  return bytes;
+}
+
+// Real bytes are the allocator's sizes (mock Vulkan reports a 1024-byte
+// memory requirement per image), recorded once the attachments exist.
+TEST(ContextVKTest, TransientsPoolAccountsNominalAndRealBytes) {
+  auto context = MockVulkanContextBuilder().Build();
+  auto pool = context->GetSwapchainTransientsPool();
+  const auto desc = OwnerTestDescriptor(100, 100);
+  auto set = pool->Acquire(desc, true);
+  ASSERT_TRUE(set);
+  // Nothing is allocated until a target materializes the attachments.
+  EXPECT_EQ(pool->ReportUsage(false).real_bytes, 0u);
+  ASSERT_TRUE(set->GetMSAATexture());
+  ASSERT_TRUE(set->GetDepthStencilTexture());
+  EXPECT_GE(set->GetMSAATexture()->GetAllocatedByteSize(), 1024u);
+  EXPECT_GE(set->GetDepthStencilTexture()->GetAllocatedByteSize(), 1024u);
+
+  const auto report = pool->ReportUsage(false);
+  EXPECT_EQ(report.entries, 1u);
+  EXPECT_EQ(report.nominal_bytes, pool->GetUsage().bytes);
+  EXPECT_GT(report.nominal_bytes, 0u);
+  EXPECT_EQ(report.real_bytes, AttachmentAllocationBytes(*set));
+  EXPECT_EQ(report.leased_entries, 1u);
+}
+
+TEST(ContextVKTest, TransientsPoolPeakLeasedResetsOnReport) {
+  auto pool = MakeOwnerTestPool();
+  auto first = pool.Acquire(OwnerTestDescriptor(64, 64), true);
+  auto second = pool.Acquire(OwnerTestDescriptor(32, 32), true);
+  ASSERT_TRUE(first && second);
+  const size_t both = pool.GetUsage().bytes;
+  first.reset();
+  second.reset();
+
+  const auto report = pool.ReportUsage(/*start_new_interval=*/true);
+  EXPECT_EQ(report.leased_entries, 0u);
+  EXPECT_EQ(report.peak_leased_nominal_bytes, both);
+  // The next interval starts from what is leased now.
+  EXPECT_EQ(pool.ReportUsage(false).peak_leased_nominal_bytes, 0u);
+  auto again = pool.Acquire(OwnerTestDescriptor(32, 32), true);
+  EXPECT_LT(pool.ReportUsage(false).peak_leased_nominal_bytes, both);
+  EXPECT_GT(pool.ReportUsage(false).peak_leased_nominal_bytes, 0u);
+}
+
+TEST(ContextVKTest, TransientsPoolReportsDistinctKeysDuplicatesAndOrphans) {
+  auto context = MockVulkanContextBuilder().Build();
+  auto pool = context->GetSwapchainTransientsPool();
+  const auto island = OwnerTestDescriptor(2880, 30);
+  const auto full = OwnerTestDescriptor(2880, 1800);
+  // Three views; two share one extent.
+  size_t island_bytes = 0u;
+  for (int64_t view : {1, 2}) {
+    auto set = pool->Acquire(island, true, TransientsOwnerVK{.view_id = view});
+    ASSERT_TRUE(set && set->GetMSAATexture() && set->GetDepthStencilTexture());
+    island_bytes = AttachmentAllocationBytes(*set);
+  }
+  ASSERT_GT(island_bytes, 0u);
+  ASSERT_TRUE(pool->Acquire(full, true, TransientsOwnerVK{.view_id = 3}));
+
+  auto report = pool->ReportUsage(true);
+  EXPECT_EQ(report.entries, 2u);
+  EXPECT_EQ(report.distinct_keys, 2u);
+  EXPECT_EQ(report.duplicate_entries, 0u);
+  EXPECT_EQ(report.orphans_released_entries, 0u);
+
+  pool->ReleaseOwner(TransientsOwnerVK{.view_id = 1});
+  pool->ReleaseOwner(TransientsOwnerVK{.view_id = 2});
+  report = pool->ReportUsage(true);
+  EXPECT_EQ(report.entries, 1u);
+  EXPECT_EQ(report.orphans_released_entries, 1u);
+  EXPECT_EQ(report.orphans_released_real_bytes, island_bytes);
+  EXPECT_EQ(pool->ReportUsage(false).orphans_released_entries, 0u);
+}
+
+TEST(ContextVKTest, TransientsPoolReportsCreatedEntriesAndBytes) {
+  auto context = MockVulkanContextBuilder().Build();
+  auto pool = context->GetSwapchainTransientsPool();
+  const auto desc = OwnerTestDescriptor(100, 100);
+  size_t first_bytes = 0u;
+  {
+    auto set = pool->Acquire(desc, true);
+    ASSERT_TRUE(set && set->GetMSAATexture() && set->GetDepthStencilTexture());
+    first_bytes = AttachmentAllocationBytes(*set);
+    // A hit creates nothing.
+    ASSERT_EQ(pool->Acquire(desc, true), set);
+  }
+  ASSERT_GT(first_bytes, 0u);
+  auto report = pool->ReportUsage(true);
+  EXPECT_EQ(report.created_entries, 1u);
+  EXPECT_EQ(report.created_real_bytes, first_bytes);
+
+  // A set created and freed within one interval is still counted.
+  size_t second_bytes = 0u;
+  {
+    auto set = pool->Acquire(OwnerTestDescriptor(50, 50), true);
+    ASSERT_TRUE(set && set->GetDepthStencilTexture());
+    second_bytes = set->GetDepthStencilTexture()->GetAllocatedByteSize();
+  }
+  ASSERT_GT(second_bytes, 0u);
+  EXPECT_EQ(pool->TrimIdle().after.entries, 0u);
+  report = pool->ReportUsage(true);
+  EXPECT_EQ(report.created_entries, 1u);
+  EXPECT_EQ(report.created_real_bytes, second_bytes);
+  EXPECT_EQ(pool->ReportUsage(false).created_entries, 0u);
 }
 
 TEST(ContextVKTest, TransientsPoolTrimDropsOnlyIdleEntries) {

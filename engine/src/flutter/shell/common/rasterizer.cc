@@ -208,6 +208,64 @@ void Rasterizer::TrimIdleResourceCaches() const {
   }
 }
 
+Rasterizer::IdleResourceReport Rasterizer::ReleaseIdleResources(
+    uint32_t kinds) {
+  IdleResourceReport report;
+#if IMPELLER_SUPPORTS_RENDERING
+  if (!surface_) {
+    return report;
+  }
+  auto aiks_context = surface_->GetAiksContext();
+  if (!aiks_context) {
+    return report;
+  }
+  auto context = aiks_context->GetContext();
+  if (!context) {
+    return report;
+  }
+  TRACE_EVENT0("flutter", "Rasterizer::ReleaseIdleResources");
+  const std::shared_ptr<impeller::RenderTargetAllocator>& offscreen =
+      aiks_context->GetContentContext().GetRenderTargetCache();
+
+  report.transient_before =
+      context->ReportTransientAttachments(/*start_new_interval=*/true);
+  if (offscreen) {
+    report.offscreen_before =
+        offscreen->ReportUsage(/*start_new_interval=*/true);
+  }
+
+  // The recency window is the engine's: an entry used within it is not idle.
+  const impeller::IdleResourceRelease request{};
+  if ((kinds & kIdleTransientAttachments) != 0) {
+    const auto released = context->ReleaseIdleResourceCaches(request);
+    report.kept_in_use += released.kept_in_use;
+    report.kept_recent += released.kept_recent;
+    report.kinds_applied |= kIdleTransientAttachments;
+  }
+  if ((kinds & kIdleOffscreenTargets) != 0 && offscreen) {
+    const auto released = offscreen->ReleaseIdle(request.unused_for);
+    report.kept_in_use += released.kept_in_use;
+    report.kept_recent += released.kept_recent;
+    report.kinds_applied |= kIdleOffscreenTargets;
+  }
+  if (report.kinds_applied != 0) {
+    // Destroy what was released before this raster task ends. Otherwise the
+    // next raster submission could validate the evicted memory, restoring it
+    // only to lose it a moment later.
+    TRACE_EVENT0("flutter", "Rasterizer::FlushReleasedResources");
+    context->FlushReleasedResources();
+  }
+
+  report.transient_after =
+      context->ReportTransientAttachments(/*start_new_interval=*/false);
+  if (offscreen) {
+    report.offscreen_after =
+        offscreen->ReportUsage(/*start_new_interval=*/false);
+  }
+#endif  // IMPELLER_SUPPORTS_RENDERING
+  return report;
+}
+
 void Rasterizer::EndRasterFrameResources() const {
   // Transient attachment sets whose extent no existing view holds any more
   // are freed once their last GPU use has completed. The free itself is

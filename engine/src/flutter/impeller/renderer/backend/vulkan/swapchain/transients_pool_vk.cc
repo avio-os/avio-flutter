@@ -4,6 +4,7 @@
 
 #include "impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <limits>
 #include <utility>
@@ -40,7 +41,8 @@ TransientsPoolVK::TransientsPoolVK(std::weak_ptr<Context> context,
       max_entries_(limits.max_entries),
       max_bytes_(limits.allow_environment_override
                      ? ResolveByteBudgetFromEnv(limits.max_bytes)
-                     : limits.max_bytes) {}
+                     : limits.max_bytes),
+      clock_([] { return std::chrono::steady_clock::now(); }) {}
 
 TransientsPoolVK::~TransientsPoolVK() {
   Reset();
@@ -121,6 +123,8 @@ std::list<TransientsPoolVK::Entry>::iterator TransientsPoolVK::AcquireLocked(
   // passes' writes (see SwapchainTransientsVK).
   if (const auto found = FindLocked(key); found != lru_.end()) {
     lru_.splice(lru_.begin(), lru_, found);
+    lru_.front().last_used = clock_();
+    SampleLeasedLocked(lru_.begin());
     return lru_.begin();
   }
 
@@ -151,9 +155,41 @@ std::list<TransientsPoolVK::Entry>::iterator TransientsPoolVK::AcquireLocked(
       .transients =
           std::make_shared<SwapchainTransientsVK>(context_, desc, enable_msaa),
       .byte_footprint = *footprint,
+      .last_used = clock_(),
+      .created_interval = interval_,
   });
   total_bytes_ += *footprint;
+  created_entries_++;
+  SampleLeasedLocked(lru_.begin());
   return lru_.begin();
+}
+
+void TransientsPoolVK::SampleLeasedLocked(
+    std::list<Entry>::const_iterator acquired) {
+  // The caller is about to hold `acquired`, so it counts as leased.
+  size_t leased = 0u;
+  for (auto it = lru_.cbegin(); it != lru_.cend(); ++it) {
+    if (it == acquired || !EntryIsIdle(*it)) {
+      leased += it->byte_footprint;
+    }
+  }
+  peak_leased_nominal_bytes_ = std::max(peak_leased_nominal_bytes_, leased);
+}
+
+std::list<TransientsPoolVK::Entry>::iterator TransientsPoolVK::EraseLocked(
+    std::list<Entry>::iterator it) {
+  const size_t real_bytes = it->transients->GetAllocatedByteSize();
+  if (EntryIsOrphanLocked(*it)) {
+    orphans_released_entries_++;
+    orphans_released_real_bytes_ += real_bytes;
+  }
+  if (it->created_interval == interval_) {
+    created_erased_real_bytes_ += real_bytes;
+  }
+  total_bytes_ -= it->byte_footprint;
+  // Dropping the pool's reference hands the textures to the context's
+  // resource manager, which destroys them off this thread.
+  return lru_.erase(it);
 }
 
 std::optional<size_t> TransientsPoolVK::ComputeFootprint(
@@ -234,8 +270,7 @@ bool TransientsPoolVK::ReserveFor(size_t byte_footprint) {
     if (candidate == lru_.end()) {
       return false;
     }
-    total_bytes_ -= candidate->byte_footprint;
-    lru_.erase(candidate);
+    EraseLocked(candidate);
   }
   return true;
 }
@@ -264,12 +299,9 @@ TransientsOrphansReleasedVK TransientsPoolVK::ReleaseIdleOrphansLocked() {
       ++it;
       continue;
     }
-    // Dropping the pool's reference hands the textures to the context's
-    // resource manager, which destroys them off this thread.
     released.entries++;
     released.bytes += it->byte_footprint;
-    total_bytes_ -= it->byte_footprint;
-    it = lru_.erase(it);
+    it = EraseLocked(it);
   }
   return released;
 }
@@ -297,18 +329,83 @@ std::list<TransientsPoolVK::Entry>::iterator TransientsPoolVK::FindLocked(
 }
 
 ResourceCacheTrimResult TransientsPoolVK::TrimIdle() {
+  return ReleaseIdle(std::chrono::nanoseconds::zero());
+}
+
+ResourceCacheTrimResult TransientsPoolVK::ReleaseIdle(
+    std::chrono::nanoseconds unused_for) {
   std::scoped_lock lock(mutex_);
   ResourceCacheTrimResult result{.before = GetUsageLocked()};
+  const auto now = clock_();
   for (auto it = lru_.begin(); it != lru_.end();) {
     if (!EntryIsIdle(*it)) {
+      result.kept_in_use++;
       ++it;
       continue;
     }
-    total_bytes_ -= it->byte_footprint;
-    it = lru_.erase(it);
+    // An orphan's extent is held by no existing view, so recency does not
+    // keep it.
+    if (!EntryIsOrphanLocked(*it) && now - it->last_used < unused_for) {
+      result.kept_recent++;
+      ++it;
+      continue;
+    }
+    it = EraseLocked(it);
   }
   result.after = GetUsageLocked();
   return result;
+}
+
+RenderResourceUsage TransientsPoolVK::ReportUsage(bool start_new_interval) {
+  std::scoped_lock lock(mutex_);
+  RenderResourceUsage report;
+  report.entries = lru_.size();
+  report.nominal_bytes = total_bytes_;
+  size_t leased_nominal_bytes = 0u;
+  size_t created_live_real_bytes = 0u;
+  for (auto it = lru_.begin(); it != lru_.end(); ++it) {
+    const size_t real_bytes = it->transients->GetAllocatedByteSize();
+    report.real_bytes += real_bytes;
+    if (!EntryIsIdle(*it)) {
+      report.leased_entries++;
+      leased_nominal_bytes += it->byte_footprint;
+    }
+    if (it->created_interval == interval_) {
+      created_live_real_bytes += real_bytes;
+    }
+    bool first_of_key = true;
+    for (auto earlier = lru_.begin(); earlier != it; ++earlier) {
+      if (earlier->key == it->key) {
+        first_of_key = false;
+        break;
+      }
+    }
+    if (first_of_key) {
+      report.distinct_keys++;
+    }
+  }
+  report.duplicate_entries = report.entries - report.distinct_keys;
+  report.peak_leased_nominal_bytes =
+      std::max(peak_leased_nominal_bytes_, leased_nominal_bytes);
+  report.orphans_released_entries = orphans_released_entries_;
+  report.orphans_released_real_bytes = orphans_released_real_bytes_;
+  report.created_entries = created_entries_;
+  report.created_real_bytes =
+      created_erased_real_bytes_ + created_live_real_bytes;
+  if (start_new_interval) {
+    interval_++;
+    peak_leased_nominal_bytes_ = 0u;
+    orphans_released_entries_ = 0u;
+    orphans_released_real_bytes_ = 0u;
+    created_entries_ = 0u;
+    created_erased_real_bytes_ = 0u;
+  }
+  return report;
+}
+
+void TransientsPoolVK::SetClockForTesting(Clock clock) {
+  std::scoped_lock lock(mutex_);
+  clock_ = std::move(clock);
 }
 
 ResourceCacheUsage TransientsPoolVK::GetUsage() const {

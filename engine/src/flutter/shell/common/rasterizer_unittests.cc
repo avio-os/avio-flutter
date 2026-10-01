@@ -158,6 +158,25 @@ TEST(RasterizerTest, create) {
   EXPECT_TRUE(rasterizer != nullptr);
 }
 
+TEST(RasterizerTest, IdleResourceReleaseWithoutSurfaceReturnsEmpty) {
+  NiceMock<MockDelegate> delegate;
+  Settings settings;
+  ON_CALL(delegate, GetSettings()).WillByDefault(ReturnRef(settings));
+  auto rasterizer = std::make_unique<Rasterizer>(delegate);
+
+  const auto report =
+      rasterizer->ReleaseIdleResources(Rasterizer::kIdleTransientAttachments |
+                                       Rasterizer::kIdleOffscreenTargets);
+  EXPECT_EQ(report.kinds_applied, 0u);
+  EXPECT_EQ(report.transient_before, impeller::RenderResourceUsage{});
+  EXPECT_EQ(report.transient_after, impeller::RenderResourceUsage{});
+  EXPECT_EQ(report.offscreen_before, impeller::RenderResourceUsage{});
+  EXPECT_EQ(report.offscreen_after, impeller::RenderResourceUsage{});
+  EXPECT_EQ(report.kept_in_use, 0u);
+  EXPECT_EQ(report.kept_recent, 0u);
+  EXPECT_EQ(rasterizer->ReportResources().kinds_applied, 0u);
+}
+
 TEST(RasterizerTest, isAiksContextInitialized) {
   NiceMock<MockDelegate> delegate;
   Settings settings;

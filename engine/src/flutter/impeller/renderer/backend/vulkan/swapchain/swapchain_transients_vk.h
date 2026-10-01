@@ -67,6 +67,9 @@ class SwapchainTransientsVK {
 
   bool IsIdle() const;
 
+  /// The device memory allocated for the attachments created so far.
+  size_t GetAllocatedByteSize() const;
+
   const std::shared_ptr<Texture>& GetMSAATexture();
 
   const std::shared_ptr<Texture>& GetDepthStencilTexture();

@@ -3,8 +3,11 @@
 // found in the LICENSE file.
 
 #include <sys/types.h>
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <utility>
 #include "fml/closure.h"
 #include "fml/synchronization/waitable_event.h"
@@ -82,6 +85,65 @@ TEST(ResourceManagerVKTest, IsThreadSafe) {
 
   // The thread should have terminated.
   EXPECT_EQ(manager.lock(), nullptr);
+}
+
+// Red before EN46: Flush did not exist, and a released texture was only
+// queued for destruction "at some point in the future".
+TEST(ResourceManagerVKTest, FlushWaitsForEveryReclaimQueuedBeforeIt) {
+  auto const manager = ResourceManagerVK::Create();
+
+  // Hold the manager thread inside the first resource's destructor so the
+  // second one is still queued when Flush starts.
+  fml::AutoResetWaitableEvent destroying_first;
+  fml::AutoResetWaitableEvent release_first;
+  std::atomic<int> destroyed = 0;
+  auto first = fml::ScopedCleanupClosure([&]() {
+    destroying_first.Signal();
+    release_first.Wait();
+    destroyed++;
+  });
+  auto second = fml::ScopedCleanupClosure([&]() { destroyed++; });
+  {
+    auto resource =
+        UniqueResourceVKT<fml::ScopedCleanupClosure>(manager, std::move(first));
+  }
+  destroying_first.Wait();
+  {
+    auto resource = UniqueResourceVKT<fml::ScopedCleanupClosure>(
+        manager, std::move(second));
+  }
+
+  std::atomic<bool> flushed = false;
+  std::thread flusher([&]() {
+    manager->Flush();
+    flushed = true;
+  });
+  // The flush cannot return while either resource is alive.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_FALSE(flushed.load());
+  EXPECT_EQ(destroyed.load(), 0);
+
+  release_first.Signal();
+  flusher.join();
+  EXPECT_TRUE(flushed.load());
+  EXPECT_EQ(destroyed.load(), 2);
+}
+
+TEST(ResourceManagerVKTest, FlushOnIdleManagerReturnsAtOnce) {
+  auto const manager = ResourceManagerVK::Create();
+  manager->Flush();
+
+  fml::AutoResetWaitableEvent destroyed;
+  {
+    auto resource = UniqueResourceVKT<fml::ScopedCleanupClosure>(
+        manager,
+        fml::ScopedCleanupClosure([&destroyed]() { destroyed.Signal(); }));
+  }
+  manager->Flush();
+  // Everything queued before the flush is gone when it returns.
+  EXPECT_TRUE(destroyed.IsSignaledForTest());
+  // A second flush with nothing pending returns at once.
+  manager->Flush();
 }
 
 }  // namespace testing

@@ -1585,6 +1585,8 @@ void render_selected_target_ready(List<String> arguments) {
       render_partial_repaint_with_root_backdrop_filter();
     case 'render_clipped_diagonal_edge':
       render_clipped_diagonal_edge();
+    case 'render_all_views':
+      render_all_views();
     default:
       throw ArgumentError.value(arguments.single, 'scene');
   }

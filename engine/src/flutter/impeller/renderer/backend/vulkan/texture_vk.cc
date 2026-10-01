@@ -167,6 +167,10 @@ ISize TextureVK::GetSize() const {
   return GetTextureDescriptor().size;
 }
 
+size_t TextureVK::GetAllocatedByteSize() const {
+  return source_ ? source_->GetAllocatedByteSize() : 0u;
+}
+
 vk::Image TextureVK::GetImage() const {
   return source_->GetImage();
 }

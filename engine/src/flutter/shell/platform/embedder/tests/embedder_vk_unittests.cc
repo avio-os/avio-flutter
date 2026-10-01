@@ -6,15 +6,19 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "embedder.h"
 #include "embedder_engine.h"
+#include "flutter/common/constants.h"
 #include "flutter/fml/file.h"
 #include "flutter/fml/synchronization/count_down_latch.h"
 #include "flutter/shell/platform/embedder/tests/embedder_config_builder.h"
@@ -1775,6 +1779,513 @@ TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
 TEST_F(EmbedderTest, SelectedTargetWithoutLayoutHandoffKeepsFullMSAARepaint) {
   CheckPreservedTargetMultisampling(
       GetEmbedderContext<EmbedderTestContextVulkan>(), false);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Idle render-resource release (Avio extension v7)
+////////////////////////////////////////////////////////////////////////////////
+
+namespace {
+
+constexpr FlutterAvioExtensionFeatures kIdleReleaseFeatures =
+    kExactSelectedTargetFeatures |
+    kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+    kFlutterAvioExtensionFeatureIdleResourceRelease;
+
+// Counts the vkDestroyImage calls the engine makes through the instance proc
+// address callback the embedder supplies (installed with
+// InstallImageDestroyCounter before the engine is configured).
+struct ImageDestroyCounter {
+  PFN_vkGetInstanceProcAddr get_instance_proc_addr = nullptr;
+  PFN_vkDestroyImage destroy_image = nullptr;
+  std::atomic<size_t> destroyed = 0u;
+};
+
+ImageDestroyCounter g_image_destroy_counter;
+
+void CountingDestroyImage(VkDevice device,
+                          VkImage image,
+                          const VkAllocationCallbacks* allocator) {
+  g_image_destroy_counter.destroyed++;
+  g_image_destroy_counter.destroy_image(device, image, allocator);
+}
+
+PFN_vkVoidFunction CountingGetInstanceProcAddr(VkInstance instance,
+                                               const char* name) {
+  PFN_vkVoidFunction proc =
+      g_image_destroy_counter.get_instance_proc_addr(instance, name);
+  if (proc != nullptr && std::strcmp(name, "vkDestroyImage") == 0) {
+    g_image_destroy_counter.destroy_image =
+        reinterpret_cast<PFN_vkDestroyImage>(proc);
+    return reinterpret_cast<PFN_vkVoidFunction>(CountingDestroyImage);
+  }
+  return proc;
+}
+
+static_assert(std::is_same_v<decltype(&CountingGetInstanceProcAddr),
+                             PFN_vkGetInstanceProcAddr>);
+static_assert(
+    std::is_same_v<decltype(&CountingDestroyImage), PFN_vkDestroyImage>);
+
+void InstallImageDestroyCounter(EmbedderTestContextVulkan& context) {
+  context.SetVulkanInstanceProcAddressCallback(
+      [](void* user_data, FlutterVulkanInstanceHandle instance,
+         const char* name) -> void* {
+        if (std::strcmp(name, "vkGetInstanceProcAddr") == 0) {
+          g_image_destroy_counter.get_instance_proc_addr =
+              reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+                  EmbedderTestContextVulkan::InstanceProcAddr(user_data,
+                                                              instance, name));
+          return reinterpret_cast<void*>(CountingGetInstanceProcAddr);
+        }
+        return EmbedderTestContextVulkan::InstanceProcAddr(user_data, instance,
+                                                           name);
+      });
+}
+
+struct IdleReleaseCapture {
+  fml::AutoResetWaitableEvent done;
+  std::atomic<int> calls = 0;
+  std::thread::id thread;
+  FlutterAvioIdleResourceReleaseResult result = {};
+  // Read on the raster thread when the callback runs.
+  const std::atomic<int>* present_count = nullptr;
+  int presents_at_callback = -1;
+  size_t destroyed_images_at_callback = 0u;
+};
+
+void CaptureIdleRelease(const FlutterAvioIdleResourceReleaseResult* result,
+                        void* user_data) {
+  auto* capture = reinterpret_cast<IdleReleaseCapture*>(user_data);
+  capture->thread = std::this_thread::get_id();
+  capture->result = *result;
+  if (capture->present_count != nullptr) {
+    capture->presents_at_callback = capture->present_count->load();
+  }
+  capture->destroyed_images_at_callback =
+      g_image_destroy_counter.destroyed.load();
+  capture->calls++;
+  capture->done.Signal();
+}
+
+FlutterAvioIdleResourceRelease MakeIdleRelease(
+    FlutterAvioIdleResourceKinds kinds,
+    IdleReleaseCapture* capture) {
+  return FlutterAvioIdleResourceRelease{
+      .struct_size = sizeof(FlutterAvioIdleResourceRelease),
+      .kinds = kinds,
+      .callback = capture ? CaptureIdleRelease : nullptr,
+      .user_data = capture,
+  };
+}
+
+// A running Vulkan Impeller engine that negotiated idle resource release and
+// renders the selected-target scene `scene` (every view, for
+// "render_all_views") into `target_count` backing stores.
+class IdleReleaseFixture {
+ public:
+  IdleReleaseFixture(EmbedderTestContextVulkan& context,
+                     FlutterAvioExtensionFeatures features,
+                     const char* scene = "render_gradient_retained",
+                     size_t target_count = 1u)
+      : selected_target_(context.GetCompositor(), target_count) {
+    EmbedderConfigBuilder builder(context);
+    builder.AddCommandLineArgument("--enable-impeller");
+    builder.SetDartEntrypoint("render_selected_target_ready");
+    builder.AddDartEntrypointArgument(scene);
+    context.AddNativeCallback(
+        "SignalNativeTest",
+        CREATE_NATIVE_ENTRY(
+            [this](Dart_NativeArguments args) { dart_ready_.Signal(); }));
+    builder.SetSurface(DlISize(800, 600));
+    builder.SetRootRenderTargetCompositor(/*avoid_backing_store_cache=*/true,
+                                          features);
+    builder.SetRenderTargetType(
+        EmbedderTestBackingStoreProducer::RenderTargetType::kVulkanImage);
+    builder.GetProjectArgs().avio_resource_lifecycle_config = &resources_;
+    builder.GetCompositor().user_data = &selected_target_;
+    builder.GetCompositor().acquire_render_target_callback =
+        AcquireSelectedTarget;
+    builder.GetCompositor().collect_backing_store_callback =
+        [](const FlutterBackingStore* store, void* user_data) {
+          return reinterpret_cast<SelectedTargetTestContext*>(user_data)
+              ->Collect(store);
+        };
+    builder.GetCompositor().present_render_target_callback =
+        [](const FlutterPresentRenderTargetInfo* info) {
+          return reinterpret_cast<SelectedTargetTestContext*>(info->user_data)
+              ->Present(*info);
+        };
+    selected_target_.on_result =
+        [this](const FlutterPresentRenderTargetInfo& info) {
+          if (info.status == kFlutterPresentRenderTargetStatusPresented) {
+            presents_++;
+          } else {
+            failed_results_++;
+          }
+          presented_.Signal();
+          return true;
+        };
+    engine_ = builder.LaunchEngine();
+  }
+
+  // Waits once for the Dart entrypoint. Window metrics must follow it.
+  bool WaitForDart() {
+    if (dart_waited_) {
+      return true;
+    }
+    if (!engine_.is_valid() ||
+        dart_ready_.WaitWithTimeout(fml::TimeDelta::FromSeconds(5))) {
+      return false;
+    }
+    dart_waited_ = true;
+    return true;
+  }
+
+  bool RenderOneFrame() { return WaitForDart() && RenderFrame(1); }
+
+  // Sends the implicit view's metrics, which schedules a frame, and waits
+  // until `presents` more targets have been presented.
+  bool RenderFrame(int presents) {
+    const int expected = presents_.load() + presents;
+    FlutterWindowMetricsEvent event = MakeMetrics(kFlutterImplicitViewId);
+    if (FlutterEngineSendWindowMetricsEvent(engine_.get(), &event) !=
+        kSuccess) {
+      return false;
+    }
+    while (presents_.load() < expected) {
+      if (failed_results_.load() != 0 ||
+          presented_.WaitWithTimeout(fml::TimeDelta::FromSeconds(5))) {
+        return false;
+      }
+    }
+    return failed_results_.load() == 0;
+  }
+
+  // Adds a view the size of the implicit view (on the default display).
+  bool AddView(FlutterViewId view_id) {
+    struct AddResult {
+      fml::AutoResetWaitableEvent done;
+      bool added = false;
+    };
+    AddResult add_result;
+    const FlutterWindowMetricsEvent metrics = MakeMetrics(view_id);
+    FlutterAddViewInfo info = {};
+    info.struct_size = sizeof(FlutterAddViewInfo);
+    info.view_id = view_id;
+    info.view_metrics = &metrics;
+    info.user_data = &add_result;
+    info.add_view_callback = [](const FlutterAddViewResult* result) {
+      auto* add_result = reinterpret_cast<AddResult*>(result->user_data);
+      add_result->added = result->added;
+      add_result->done.Signal();
+    };
+    if (FlutterEngineAddView(engine_.get(), &info) != kSuccess) {
+      return false;
+    }
+    return !add_result.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)) &&
+           add_result.added;
+  }
+
+  const std::atomic<int>& present_count() const { return presents_; }
+
+  FlutterEngine engine() const { return engine_.get(); }
+  bool is_valid() const { return engine_.is_valid(); }
+  void Shutdown() { engine_.reset(); }
+
+ private:
+  FlutterAvioResourceLifecycleConfig resources_ = {
+      .struct_size = sizeof(FlutterAvioResourceLifecycleConfig),
+      .transient_max_entries = 6u,
+      .transient_max_bytes = 512u * 1024u * 1024u,
+      .pipeline_cache_policy = kFlutterAvioPipelineCacheDisabled,
+      .pipeline_cache_directory_fd = -1,
+      .pipeline_cache_max_bytes = 0u,
+  };
+  static FlutterWindowMetricsEvent MakeMetrics(FlutterViewId view_id) {
+    FlutterWindowMetricsEvent event = {};
+    event.struct_size = sizeof(event);
+    event.width = 800;
+    event.height = 600;
+    event.pixel_ratio = 1.0;
+    event.view_id = view_id;
+    return event;
+  }
+
+  SelectedTargetTestContext selected_target_;
+  fml::AutoResetWaitableEvent dart_ready_;
+  bool dart_waited_ = false;
+  fml::AutoResetWaitableEvent presented_;
+  std::atomic<int> presents_ = 0;
+  std::atomic<int> failed_results_ = 0;
+  UniqueEngine engine_;
+};
+
+}  // namespace
+
+TEST_F(EmbedderTest, AvioIdleResourceReleaseRequiresNegotiation) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  IdleReleaseFixture fixture(
+      context, kExactSelectedTargetFeatures |
+                   kFlutterAvioExtensionFeatureResourceLifecycleConfig);
+  ASSERT_TRUE(fixture.is_valid());
+  IdleReleaseCapture capture;
+  const auto request = MakeIdleRelease(0u, &capture);
+  EXPECT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), &request),
+            kInternalInconsistency);
+  fixture.Shutdown();
+  EXPECT_EQ(capture.calls.load(), 0);
+}
+
+TEST_F(EmbedderTest, AvioIdleResourceReleaseRequiresResourceLifecycleConfig) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  EmbedderConfigBuilder builder(context);
+  builder.AddCommandLineArgument("--enable-impeller");
+  builder.SetSurface(DlISize(64, 64));
+  builder.SetRootRenderTargetCompositor(
+      /*avoid_backing_store_cache=*/true,
+      kExactSelectedTargetFeatures |
+          kFlutterAvioExtensionFeatureIdleResourceRelease);
+  EXPECT_FALSE(builder.InitializeEngine().is_valid());
+}
+
+TEST_F(EmbedderTest, AvioIdleResourceReleaseRejectsMalformedRequests) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  IdleReleaseFixture fixture(context, kIdleReleaseFeatures);
+  ASSERT_TRUE(fixture.is_valid());
+  IdleReleaseCapture capture;
+
+  auto request = MakeIdleRelease(0u, &capture);
+  EXPECT_EQ(FlutterEngineReleaseAvioIdleResources(nullptr, &request),
+            kInvalidArguments);
+  EXPECT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), nullptr),
+            kInvalidArguments);
+  request.struct_size = offsetof(FlutterAvioIdleResourceRelease, user_data);
+  EXPECT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), &request),
+            kInvalidArguments);
+  request = MakeIdleRelease(0x4u, &capture);
+  EXPECT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), &request),
+            kInvalidArguments);
+  fixture.Shutdown();
+  EXPECT_EQ(capture.calls.load(), 0);
+}
+
+TEST_F(EmbedderTest, AvioIdleResourceReportOnlyChangesNothing) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  IdleReleaseFixture fixture(context, kIdleReleaseFeatures);
+  ASSERT_TRUE(fixture.RenderOneFrame());
+
+  IdleReleaseCapture first;
+  const auto first_request = MakeIdleRelease(0u, &first);
+  ASSERT_EQ(
+      FlutterEngineReleaseAvioIdleResources(fixture.engine(), &first_request),
+      kSuccess);
+  ASSERT_FALSE(first.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  const auto& report = first.result;
+  EXPECT_EQ(report.struct_size, sizeof(FlutterAvioIdleResourceReleaseResult));
+  EXPECT_EQ(report.kinds_applied, 0u);
+  EXPECT_EQ(report.transient_before.struct_size,
+            sizeof(FlutterAvioRenderResourceUsage));
+  // One root target was rendered: one multisampled set for its extent.
+  EXPECT_EQ(report.transient_before.entries, 1u);
+  EXPECT_EQ(report.transient_before.distinct_keys, 1u);
+  EXPECT_EQ(report.transient_before.duplicate_entries, 0u);
+  EXPECT_EQ(report.transient_before.created_entries, 1u);
+  EXPECT_GT(report.transient_before.created_real_bytes, 0u);
+  EXPECT_GT(report.transient_before.real_bytes, 0u);
+  EXPECT_GT(report.transient_before.nominal_bytes, 0u);
+  EXPECT_EQ(report.transient_after.entries, report.transient_before.entries);
+  EXPECT_EQ(report.transient_after.real_bytes,
+            report.transient_before.real_bytes);
+  EXPECT_EQ(report.offscreen_after.entries, report.offscreen_before.entries);
+  EXPECT_EQ(report.kept_in_use_entries, 0u);
+  EXPECT_EQ(report.kept_recent_entries, 0u);
+
+  // The interval restarted: nothing was created since the first report.
+  IdleReleaseCapture second;
+  const auto second_request = MakeIdleRelease(0u, &second);
+  ASSERT_EQ(
+      FlutterEngineReleaseAvioIdleResources(fixture.engine(), &second_request),
+      kSuccess);
+  ASSERT_FALSE(second.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  EXPECT_EQ(second.result.transient_before.entries, 1u);
+  EXPECT_EQ(second.result.transient_before.created_entries, 0u);
+  fixture.Shutdown();
+}
+
+// The request names no window: the engine's own recency keeps the warm set of
+// a view that rendered moments ago.
+TEST_F(EmbedderTest, AvioIdleResourceReleaseUsesEngineRecency) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  IdleReleaseFixture fixture(context, kIdleReleaseFeatures);
+  ASSERT_TRUE(fixture.RenderOneFrame());
+
+  IdleReleaseCapture capture;
+  const auto request =
+      MakeIdleRelease(kFlutterAvioIdleResourceTransientAttachments |
+                          kFlutterAvioIdleResourceOffscreenTargets,
+                      &capture);
+  ASSERT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), &request),
+            kSuccess);
+  ASSERT_FALSE(capture.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  EXPECT_EQ(capture.result.kinds_applied,
+            kFlutterAvioIdleResourceTransientAttachments |
+                kFlutterAvioIdleResourceOffscreenTargets);
+  EXPECT_EQ(capture.result.transient_after.entries,
+            capture.result.transient_before.entries);
+  EXPECT_GE(
+      capture.result.kept_in_use_entries + capture.result.kept_recent_entries,
+      1u);
+  fixture.Shutdown();
+}
+
+TEST_F(EmbedderTest, AvioIdleResourceReleaseCallsBackOnceOnRasterThread) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  IdleReleaseFixture fixture(context, kIdleReleaseFeatures);
+  ASSERT_TRUE(fixture.RenderOneFrame());
+
+  IdleReleaseCapture first;
+  IdleReleaseCapture second;
+  const auto first_request =
+      MakeIdleRelease(kFlutterAvioIdleResourceTransientAttachments, &first);
+  const auto second_request = MakeIdleRelease(0u, &second);
+  ASSERT_EQ(
+      FlutterEngineReleaseAvioIdleResources(fixture.engine(), &first_request),
+      kSuccess);
+  ASSERT_EQ(
+      FlutterEngineReleaseAvioIdleResources(fixture.engine(), &second_request),
+      kSuccess);
+  // A request without a callback is accepted too.
+  const auto silent_request = MakeIdleRelease(0u, nullptr);
+  ASSERT_EQ(
+      FlutterEngineReleaseAvioIdleResources(fixture.engine(), &silent_request),
+      kSuccess);
+  ASSERT_FALSE(first.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_FALSE(second.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  EXPECT_EQ(first.calls.load(), 1);
+  EXPECT_EQ(second.calls.load(), 1);
+  // Both ran on the raster task runner, not on the calling thread.
+  EXPECT_NE(first.thread, std::this_thread::get_id());
+  EXPECT_EQ(first.thread, second.thread);
+  fixture.Shutdown();
+  EXPECT_EQ(first.calls.load(), 1);
+  EXPECT_EQ(second.calls.load(), 1);
+}
+
+// Patch 46a end to end: two same-sized views rendered in one frame share one
+// transient attachment set. Red on the unpatched base (EN46a), where the
+// second view's acquisition found the first view's set leased and in flight
+// and allocated a second one.
+TEST_F(EmbedderTest, AvioTwoSameSizeViewsInOneFrameUseOneTransientEntry) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  IdleReleaseFixture fixture(context, kIdleReleaseFeatures, "render_all_views",
+                             /*target_count=*/2u);
+  ASSERT_TRUE(fixture.WaitForDart());
+  ASSERT_TRUE(fixture.AddView(123));
+  // One frame renders the implicit view and view 123, both 800x600.
+  ASSERT_TRUE(fixture.RenderFrame(/*presents=*/2));
+
+  IdleReleaseCapture capture;
+  const auto request = MakeIdleRelease(0u, &capture);
+  ASSERT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), &request),
+            kSuccess);
+  ASSERT_FALSE(capture.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  const auto& transients = capture.result.transient_before;
+  EXPECT_EQ(transients.entries, 1u);
+  EXPECT_EQ(transients.distinct_keys, 1u);
+  EXPECT_EQ(transients.duplicate_entries, 0u);
+  EXPECT_EQ(transients.created_entries, 1u);
+  fixture.Shutdown();
+}
+
+// A release frees the memory before its raster task ends
+// (ResourceManagerVK::Flush). The released set's images are destroyed before
+// the callback runs, and the frame whose raster task was posted right after
+// the request renders on a newly created set, never on the released one.
+TEST_F(EmbedderTest, AvioReleaseIdleFreesBeforeNextRasterTask) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  InstallImageDestroyCounter(context);
+  IdleReleaseFixture fixture(context, kIdleReleaseFeatures);
+  ASSERT_TRUE(fixture.RenderOneFrame());
+  // Let the one set age past the engine's recency window
+  // (impeller::kIdleReleaseMinUnused, 5 s), so the release frees it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(5500));
+
+  IdleReleaseCapture capture;
+  capture.present_count = &fixture.present_count();
+  const size_t destroyed_before = g_image_destroy_counter.destroyed.load();
+  const int presents_before = fixture.present_count().load();
+  const auto request =
+      MakeIdleRelease(kFlutterAvioIdleResourceTransientAttachments, &capture);
+  ASSERT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), &request),
+            kSuccess);
+  // The next frame's raster task is posted after the release task.
+  ASSERT_TRUE(fixture.RenderFrame(1));
+  ASSERT_FALSE(capture.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+
+  EXPECT_EQ(capture.result.transient_before.entries, 1u);
+  EXPECT_EQ(capture.result.transient_after.entries, 0u);
+  // The set's multisampled color and depth/stencil images were destroyed
+  // inside the release's raster task, before its callback.
+  EXPECT_GE(capture.destroyed_images_at_callback - destroyed_before, 2u);
+  // The release ran before the next frame was presented.
+  EXPECT_EQ(capture.presents_at_callback, presents_before);
+
+  // That frame rendered on a newly created set.
+  IdleReleaseCapture after;
+  const auto report = MakeIdleRelease(0u, &after);
+  ASSERT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), &report),
+            kSuccess);
+  ASSERT_FALSE(after.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  EXPECT_EQ(after.result.transient_before.entries, 1u);
+  EXPECT_EQ(after.result.transient_before.created_entries, 1u);
+  fixture.Shutdown();
+}
+
+// The all-views-hidden trim (patch 36) still runs when idle release is
+// negotiated, and it trims only transient attachments.
+TEST_F(EmbedderTest, AvioHiddenEdgeTrimStillRunsWhenIdleReleaseNegotiated) {
+  auto& context = GetEmbedderContext<EmbedderTestContextVulkan>();
+  IdleReleaseFixture fixture(
+      context,
+      kIdleReleaseFeatures | kFlutterAvioExtensionFeatureViewVisibility);
+  ASSERT_TRUE(fixture.RenderOneFrame());
+
+  IdleReleaseCapture before;
+  const auto report = MakeIdleRelease(0u, &before);
+  ASSERT_EQ(FlutterEngineReleaseAvioIdleResources(fixture.engine(), &report),
+            kSuccess);
+  ASSERT_FALSE(before.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+  ASSERT_EQ(before.result.transient_before.entries, 1u);
+
+  FlutterAvioViewVisibilityEvent hidden = {
+      .struct_size = sizeof(FlutterAvioViewVisibilityEvent),
+      .view_id = kFlutterImplicitViewId,
+      .visibility = kFlutterAvioViewVisibilitySuspended,
+  };
+  ASSERT_EQ(FlutterEngineSetAvioViewVisibility(fixture.engine(), &hidden),
+            kSuccess);
+  // The hidden edge trims on the raster thread after a UI-thread hop. Poll
+  // report-only requests until the trim has run.
+  FlutterAvioIdleResourceReleaseResult after = {};
+  for (int attempt = 0; attempt < 50; attempt++) {
+    IdleReleaseCapture poll;
+    const auto poll_request = MakeIdleRelease(0u, &poll);
+    ASSERT_EQ(
+        FlutterEngineReleaseAvioIdleResources(fixture.engine(), &poll_request),
+        kSuccess);
+    ASSERT_FALSE(poll.done.WaitWithTimeout(fml::TimeDelta::FromSeconds(5)));
+    after = poll.result;
+    if (after.transient_before.entries == 0u) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  EXPECT_EQ(after.transient_before.entries, 0u);
+  // The hidden edge is not extended to offscreen targets.
+  EXPECT_EQ(after.offscreen_before.entries,
+            before.result.offscreen_before.entries);
+  fixture.Shutdown();
 }
 
 }  // namespace testing

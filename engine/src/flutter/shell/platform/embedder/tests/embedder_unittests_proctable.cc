@@ -84,13 +84,34 @@ TEST(EmbedderProcTable, ReportsAvioSemanticCapabilities) {
       kFlutterAvioExtensionFeatureViewVisibility |
       kFlutterAvioExtensionFeatureAtomicCompositorMaterials |
       kFlutterAvioExtensionFeatureTypedRenderTargetAcquisition |
-      kFlutterAvioExtensionFeatureRenderDeadline;
+      kFlutterAvioExtensionFeatureRenderDeadline |
+      kFlutterAvioExtensionFeatureAtomicWindowPreviews |
+      kFlutterAvioExtensionFeaturePreSubmitFailure;
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && \
     defined(IMPELLER_SUPPORTS_RENDERING)
-  expected_features |= kFlutterAvioExtensionFeatureResourceLifecycleConfig;
+  expected_features |= kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+                       kFlutterAvioExtensionFeatureIdleResourceRelease;
 #endif
   EXPECT_EQ(capabilities.supported_features, expected_features);
   EXPECT_NE(procs.SetAvioViewVisibility, nullptr);
+}
+
+// Version 7 adds idle render-resource release; its entry point is appended at
+// the end of the proc table.
+TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion7) {
+  static_assert(FLUTTER_AVIO_EXTENSION_VERSION == 7u);
+  static_assert(offsetof(FlutterEngineProcTable, ReleaseAvioIdleResources) +
+                    sizeof(FlutterEngineReleaseAvioIdleResourcesFnPtr) ==
+                sizeof(FlutterEngineProcTable));
+  FlutterEngineProcTable procs = {};
+  procs.struct_size = sizeof(FlutterEngineProcTable);
+  ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
+  EXPECT_NE(procs.ReleaseAvioIdleResources, nullptr);
+
+  FlutterAvioExtensionCapabilities capabilities = {};
+  capabilities.struct_size = sizeof(capabilities);
+  ASSERT_EQ(procs.GetAvioExtensionCapabilities(&capabilities), kSuccess);
+  EXPECT_EQ(capabilities.maximum_version, 7u);
 }
 
 TEST(EmbedderProcTable, RejectsTruncatedAvioCapabilities) {

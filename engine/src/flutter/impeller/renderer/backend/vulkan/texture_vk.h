@@ -43,6 +43,9 @@ class TextureVK final : public Texture, public BackendCast<TextureVK, Texture> {
   // |Texture|
   ISize GetSize() const override;
 
+  // |Texture|
+  size_t GetAllocatedByteSize() const override;
+
   void SetMipMapGenerated();
 
   bool IsSwapchainImage() const;

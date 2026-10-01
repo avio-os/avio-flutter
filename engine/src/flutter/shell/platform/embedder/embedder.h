@@ -73,7 +73,7 @@ extern "C" {
 // Flutter embedder ABI. The engine reports supported semantics through
 // FlutterEngineGetAvioExtensionCapabilities and validates the request again
 // during initialization, before creating a view or GPU resource.
-#define FLUTTER_AVIO_EXTENSION_VERSION 6u
+#define FLUTTER_AVIO_EXTENSION_VERSION 7u
 
 typedef uint64_t FlutterAvioExtensionFeatures;
 
@@ -95,6 +95,11 @@ typedef uint64_t FlutterAvioExtensionFeatures;
 #define kFlutterAvioExtensionFeatureRenderDeadline 0x0000000000000400ULL
 #define kFlutterAvioExtensionFeatureAtomicWindowPreviews 0x0000000000000800ULL
 #define kFlutterAvioExtensionFeaturePreSubmitFailure 0x0000000000001000ULL
+/// `FlutterEngineReleaseAvioIdleResources`: the embedder may ask the engine to
+/// free idle engine-private render resources and to report their usage.
+/// Requires kFlutterAvioExtensionFeatureRootRenderTarget and
+/// kFlutterAvioExtensionFeatureResourceLifecycleConfig.
+#define kFlutterAvioExtensionFeatureIdleResourceRelease 0x0000000000002000ULL
 #define FLUTTER_AVIO_MAX_WINDOW_PREVIEWS 64u
 
 /// Hard transaction bound shared by retained scene collection and embedders.
@@ -523,6 +528,77 @@ typedef struct {
   /// The new render relevance of the view.
   FlutterAvioViewVisibility visibility;
 } FlutterAvioViewVisibilityEvent;
+
+/// Engine-private render-resource kinds an idle release may apply to.
+typedef uint32_t FlutterAvioIdleResourceKinds;
+
+/// The context-scoped multisample color and depth/stencil attachment sets of
+/// root render targets.
+#define kFlutterAvioIdleResourceTransientAttachments 0x00000001u
+/// The offscreen render targets Impeller caches between frames
+/// (RenderTargetCache).
+#define kFlutterAvioIdleResourceOffscreenTargets 0x00000002u
+
+/// Exact usage of one engine-private render-resource cache. Nominal bytes are
+/// the engine's texel accounting; real bytes are the device-memory sizes the
+/// allocator made. Fields marked "interval" count since the previous
+/// `FlutterEngineReleaseAvioIdleResources` request.
+typedef struct {
+  /// The size of this struct. Must be sizeof(FlutterAvioRenderResourceUsage).
+  size_t struct_size;
+  uint64_t entries;
+  uint64_t nominal_bytes;
+  uint64_t real_bytes;
+  /// Entries a render target or submitted GPU work references right now.
+  uint64_t leased_entries;
+  /// Interval: peak nominal bytes of leased entries.
+  uint64_t peak_leased_nominal_bytes;
+  uint64_t distinct_keys;
+  /// Entries beyond one per key. Transient attachments must report 0.
+  uint64_t duplicate_entries;
+  /// Interval: transient sets freed because no existing view held their
+  /// extent. Always 0 for offscreen targets.
+  uint64_t orphans_released_entries;
+  uint64_t orphans_released_real_bytes;
+  /// Interval: entries created and the device memory they allocated.
+  uint64_t created_entries;
+  uint64_t created_real_bytes;
+} FlutterAvioRenderResourceUsage;
+
+typedef struct {
+  /// The size of this struct. Must be
+  /// sizeof(FlutterAvioIdleResourceReleaseResult).
+  size_t struct_size;
+  /// The kinds whose idle entries were released. 0 for a report-only request.
+  FlutterAvioIdleResourceKinds kinds_applied;
+  FlutterAvioRenderResourceUsage transient_before;
+  /// Read after the released entries were destroyed.
+  FlutterAvioRenderResourceUsage transient_after;
+  FlutterAvioRenderResourceUsage offscreen_before;
+  /// Read after the released entries were destroyed.
+  FlutterAvioRenderResourceUsage offscreen_after;
+  /// Entries kept because a render target or submitted GPU work referenced
+  /// them.
+  uint64_t kept_in_use_entries;
+  /// Idle entries kept because the engine considers them recently used.
+  uint64_t kept_recent_entries;
+} FlutterAvioIdleResourceReleaseResult;
+
+/// Invoked at most once, on the raster thread, after the request applied.
+/// `result` is valid only for the duration of the call.
+typedef void (*FlutterAvioIdleResourceReleaseCallback)(
+    const FlutterAvioIdleResourceReleaseResult* result,
+    void* user_data);
+
+typedef struct {
+  /// The size of this struct. Must include `user_data`.
+  size_t struct_size;
+  /// The kinds to release. 0 requests a usage report and releases nothing.
+  FlutterAvioIdleResourceKinds kinds;
+  /// Nullable. Invoked at most once on the raster thread.
+  FlutterAvioIdleResourceReleaseCallback callback;
+  void* user_data;
+} FlutterAvioIdleResourceRelease;
 
 typedef struct {
   /// horizontal scale factor
@@ -4206,6 +4282,33 @@ FlutterEngineResult FlutterEngineSetAvioViewVisibility(
     const FlutterAvioViewVisibilityEvent* event);
 
 //------------------------------------------------------------------------------
+/// @brief      Asks the engine to free idle engine-private render resources of
+///             the requested kinds, and reports their usage before and after.
+///
+///             The engine owns which entries are idle: it never releases an
+///             entry that a render target or submitted GPU work references,
+///             nor one used within its own recency window. The request is
+///             applied on the raster task runner between raster tasks and
+///             never blocks the calling thread. Released memory is destroyed
+///             before the raster task ends, so no later raster work can
+///             validate or restore it. `kinds == 0` only reports.
+///
+///             Requires kFlutterAvioExtensionFeatureIdleResourceRelease.
+///
+/// @param[in]  engine   A running engine instance.
+/// @param[in]  request  Caller-sized request.
+///
+/// @return     kInvalidArguments for a null engine, a missing or truncated
+///             request, or unknown kinds; kInternalInconsistency when the
+///             feature was not negotiated; kSuccess once the request is
+///             posted.
+///
+FLUTTER_EXPORT
+FlutterEngineResult FlutterEngineReleaseAvioIdleResources(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    const FlutterAvioIdleResourceRelease* request);
+
+//------------------------------------------------------------------------------
 /// @brief      Reloads the system fonts in engine.
 ///
 /// @param[in]  engine.                  A running engine instance.
@@ -4683,6 +4786,9 @@ typedef FlutterEngineResult (*FlutterEngineSetViewDisplayFnPtr)(
 typedef FlutterEngineResult (*FlutterEngineSetAvioViewVisibilityFnPtr)(
     FLUTTER_API_SYMBOL(FlutterEngine) engine,
     const FlutterAvioViewVisibilityEvent* event);
+typedef FlutterEngineResult (*FlutterEngineReleaseAvioIdleResourcesFnPtr)(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    const FlutterAvioIdleResourceRelease* request);
 typedef FlutterEngineResult (*FlutterEngineReloadSystemFontsFnPtr)(
     FLUTTER_API_SYMBOL(FlutterEngine) engine);
 typedef void (*FlutterEngineTraceEventDurationBeginFnPtr)(const char* name);
@@ -4825,6 +4931,7 @@ typedef struct {
   FlutterEngineCancelVsyncForDisplayFnPtr CancelVsyncForDisplay;
   FlutterEngineCancelFrameOpportunityFnPtr CancelFrameOpportunity;
   FlutterEngineSetAvioViewVisibilityFnPtr SetAvioViewVisibility;
+  FlutterEngineReleaseAvioIdleResourcesFnPtr ReleaseAvioIdleResources;
 } FlutterEngineProcTable;
 
 //------------------------------------------------------------------------------

@@ -75,9 +75,9 @@ echo "--- Exact frame opportunities ---"
 need "exact opportunity feature negotiation" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureFrameOpportunityOutcomes'
-need "render-deadline ABI extension version" \
+need "Avio ABI extension version (v7: idle resource release)" \
   $F/shell/platform/embedder/embedder.h \
-  'FLUTTER_AVIO_EXTENSION_VERSION 5'
+  'FLUTTER_AVIO_EXTENSION_VERSION 7u'
 need "render-deadline semantic feature" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureRenderDeadline'
@@ -410,6 +410,37 @@ need "idle orphaned transient sets are freed once per raster frame" \
 need "orphans are released only when idle" \
   $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
   'if \(!EntryIsOrphanLocked\(\*it\) \|\| !EntryIsIdle\(\*it\)\)'
+need "idle resource release feature bit" \
+  $F/shell/platform/embedder/embedder.h \
+  'kFlutterAvioExtensionFeatureIdleResourceRelease 0x0000000000002000ULL'
+need "idle resource release is the last proc-table entry" \
+  $F/shell/platform/embedder/embedder.h \
+  'ReleaseAvioIdleResources;'
+need "idle release requires root targets and lifecycle config" \
+  $F/shell/platform/embedder/embedder.cc \
+  'Idle resource release requires root targets and a resource'
+need "v7 usage report carries transient health" \
+  $F/shell/platform/embedder/embedder.h 'uint64_t duplicate_entries;'
+need "v7 usage report carries released orphans and created bytes" \
+  $F/shell/platform/embedder/embedder.h 'uint64_t created_real_bytes;'
+need "the engine owns the idle recency window" \
+  $F/impeller/renderer/render_resource_usage.h 'kIdleReleaseMinUnused'
+need "transient entries stamp last use on hit" \
+  $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
+  'lru_\.front\(\)\.last_used = clock_\(\)'
+need "transient entries stamp last use on insert" \
+  $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
+  '\.last_used = clock_\(\),'
+need "offscreen entries stamp last use" \
+  $F/impeller/entity/render_target_cache.cc 'data\.last_used = clock_\(\)'
+need "real bytes come from the backend allocation" \
+  $F/impeller/renderer/backend/vulkan/allocator_vk.cc \
+  'allocated_byte_size_ = static_cast<size_t>\(allocation_info\.size\)'
+need "released resources are destroyed before the raster task ends" \
+  $F/impeller/renderer/backend/vulkan/resource_manager_vk.cc \
+  'void ResourceManagerVK::Flush\(\)'
+need "the release path flushes the resource manager" \
+  $F/shell/common/rasterizer.cc 'context->FlushReleasedResources\(\)'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

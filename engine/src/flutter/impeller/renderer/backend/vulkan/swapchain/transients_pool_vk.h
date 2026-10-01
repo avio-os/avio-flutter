@@ -5,8 +5,10 @@
 #ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_SWAPCHAIN_TRANSIENTS_POOL_VK_H_
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_SWAPCHAIN_TRANSIENTS_POOL_VK_H_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -18,6 +20,7 @@
 #include "impeller/core/texture_descriptor.h"
 #include "impeller/renderer/backend/vulkan/swapchain/swapchain_transients_vk.h"
 #include "impeller/renderer/context.h"
+#include "impeller/renderer/render_resource_usage.h"
 
 namespace impeller {
 
@@ -181,8 +184,25 @@ class TransientsPoolVK {
   void Reset();
 
   /// Drop only entries which have no external wrapper owner and whose cached
-  /// textures are not referenced by in-flight GPU work.
+  /// textures are not referenced by in-flight GPU work. Equivalent to
+  /// `ReleaseIdle` with a zero window.
   ResourceCacheTrimResult TrimIdle();
+
+  /// Drop idle entries (as `TrimIdle`) that were last acquired at least
+  /// `unused_for` ago, and every idle orphan. Entries leased by a wrapper or
+  /// referenced by submitted GPU work are never dropped. Dropped textures are
+  /// handed to the context's resource manager for destruction.
+  ResourceCacheTrimResult ReleaseIdle(std::chrono::nanoseconds unused_for);
+
+  /// Exact usage report. Real bytes are the allocations the attachments
+  /// actually made. When `start_new_interval` is true, the interval counters
+  /// (peak leased bytes, released orphans, created entries) restart.
+  RenderResourceUsage ReportUsage(bool start_new_interval);
+
+  using Clock = std::function<std::chrono::steady_clock::time_point()>;
+
+  /// Replace the clock that stamps each entry's last use.
+  void SetClockForTesting(Clock clock);
 
   /// Snapshot exact accounted cache usage.
   ResourceCacheUsage GetUsage() const;
@@ -214,6 +234,10 @@ class TransientsPoolVK {
     // Whether any owner ever held this entry. Entries acquired only without
     // an owner have no lifetime owner and are never orphans.
     bool owned = false;
+    // The latest acquisition (hit or insert).
+    std::chrono::steady_clock::time_point last_used;
+    // The report interval in which this entry was created.
+    uint64_t created_interval = 0u;
   };
 
   // Compute the worst-case device memory footprint of an entry. Returns 0
@@ -248,6 +272,14 @@ class TransientsPoolVK {
 
   TransientsOrphansReleasedVK ReleaseIdleOrphansLocked() IPLR_REQUIRES(mutex_);
 
+  // Erase one entry and account for it in the interval counters.
+  std::list<Entry>::iterator EraseLocked(std::list<Entry>::iterator it)
+      IPLR_REQUIRES(mutex_);
+
+  // Record the leased bytes after an acquisition of `acquired`.
+  void SampleLeasedLocked(std::list<Entry>::const_iterator acquired)
+      IPLR_REQUIRES(mutex_);
+
   ResourceCacheUsage GetUsageLocked() const IPLR_REQUIRES(mutex_);
 
   static size_t ResolveByteBudgetFromEnv(size_t default_bytes);
@@ -264,6 +296,15 @@ class TransientsPoolVK {
   size_t total_bytes_ IPLR_GUARDED_BY(mutex_) = 0;
   // Each existing owner's current key.
   std::unordered_map<int64_t, Key> owner_keys_ IPLR_GUARDED_BY(mutex_);
+  Clock clock_ IPLR_GUARDED_BY(mutex_);
+  // Report interval counters.
+  uint64_t interval_ IPLR_GUARDED_BY(mutex_) = 0u;
+  size_t peak_leased_nominal_bytes_ IPLR_GUARDED_BY(mutex_) = 0u;
+  size_t orphans_released_entries_ IPLR_GUARDED_BY(mutex_) = 0u;
+  size_t orphans_released_real_bytes_ IPLR_GUARDED_BY(mutex_) = 0u;
+  size_t created_entries_ IPLR_GUARDED_BY(mutex_) = 0u;
+  // Real bytes of entries created in this interval and already erased.
+  size_t created_erased_real_bytes_ IPLR_GUARDED_BY(mutex_) = 0u;
 };
 
 }  // namespace impeller

@@ -805,6 +805,28 @@ void ContextVK::ReleaseOrphanedTransients() {
   swapchain_transients_pool_->ReleaseOrphans();
 }
 
+RenderResourceUsage ContextVK::ReportTransientAttachments(
+    bool start_new_interval) {
+  if (!swapchain_transients_pool_) {
+    return {};
+  }
+  return swapchain_transients_pool_->ReportUsage(start_new_interval);
+}
+
+ResourceCacheTrimResult ContextVK::ReleaseIdleResourceCaches(
+    const IdleResourceRelease& request) {
+  if (!swapchain_transients_pool_) {
+    return {};
+  }
+  return swapchain_transients_pool_->ReleaseIdle(request.unused_for);
+}
+
+void ContextVK::FlushReleasedResources() {
+  if (resource_manager_) {
+    resource_manager_->Flush();
+  }
+}
+
 const std::shared_ptr<YUVConversionLibraryVK>&
 ContextVK::GetYUVConversionLibrary() const {
   return yuv_conversion_library_;

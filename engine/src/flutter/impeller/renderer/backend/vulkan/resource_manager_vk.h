@@ -6,6 +6,7 @@
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_RESOURCE_MANAGER_VK_H_
 
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -64,6 +65,19 @@ class ResourceManagerVK final
   void Reclaim(std::unique_ptr<ResourceVK> resource);
 
   //----------------------------------------------------------------------------
+  /// @brief      Wait until every resource reclaimed before this call has been
+  ///             destroyed by the resource manager thread.
+  ///
+  /// Used where a caller must know that released device memory is gone before
+  /// it continues, for example an idle release that must not let a later
+  /// submission validate (and restore) the memory it just gave up. Returns at
+  /// once when nothing is pending or the manager is terminating; resources
+  /// reclaimed after the call starts are not waited for.
+  ///
+  /// @note       Must not be called on the resource manager thread.
+  void Flush();
+
+  //----------------------------------------------------------------------------
   /// @brief      Destroys the resource manager.
   ///
   /// The resource manager will stop collecting resources and will be destroyed
@@ -78,6 +92,11 @@ class ResourceManagerVK final
   std::condition_variable reclaimables_cv_;
   Reclaimables reclaimables_;
   bool should_exit_ = false;
+  // Resources ever handed to Reclaim, and how many of them the thread has
+  // destroyed. Both are guarded by reclaimables_mutex_.
+  uint64_t reclaimed_count_ = 0u;
+  uint64_t destroyed_count_ = 0u;
+  std::condition_variable destroyed_cv_;
   // This should be initialized last since it references the other instance
   // variables.
   std::thread waiter_;

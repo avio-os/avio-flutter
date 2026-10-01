@@ -5,8 +5,11 @@
 #ifndef FLUTTER_IMPELLER_ENTITY_RENDER_TARGET_CACHE_H_
 #define FLUTTER_IMPELLER_ENTITY_RENDER_TARGET_CACHE_H_
 
+#include <chrono>
+#include <functional>
 #include <string_view>
 
+#include "impeller/renderer/render_resource_usage.h"
 #include "impeller/renderer/render_target.h"
 
 namespace impeller {
@@ -62,6 +65,18 @@ class RenderTargetCache : public RenderTargetAllocator {
       const std::shared_ptr<Texture>& existing_depth_stencil_texture = nullptr,
       std::optional<PixelFormat> target_pixel_format = std::nullopt) override;
 
+  // |RenderTargetAllocator|
+  RenderResourceUsage ReportUsage(bool start_new_interval) override;
+
+  // |RenderTargetAllocator|
+  ResourceCacheTrimResult ReleaseIdle(
+      std::chrono::nanoseconds unused_for) override;
+
+  using Clock = std::function<std::chrono::steady_clock::time_point()>;
+
+  /// Replace the clock that stamps each entry's last use.
+  void SetClockForTesting(Clock clock);
+
   // visible for testing.
   size_t CachedTextureCount() const;
 
@@ -71,13 +86,41 @@ class RenderTargetCache : public RenderTargetAllocator {
     uint32_t keep_alive_frame_count;
     RenderTargetConfig config;
     RenderTarget render_target;
+    // The latest lease (hit or creation).
+    std::chrono::steady_clock::time_point last_used;
+    // Accounted texel bytes and the allocations the backend made.
+    size_t nominal_bytes = 0u;
+    size_t real_bytes = 0u;
+    // The report interval in which this entry was created.
+    uint64_t created_interval = 0u;
   };
 
   bool CacheEnabled() const;
 
+  // Lease a cached entry, stamping its use.
+  void LeaseEntry(RenderTargetData& data);
+
+  // Record a created entry.
+  void InsertEntry(const RenderTargetConfig& config,
+                   const RenderTarget& render_target);
+
+  // Account for an entry that leaves the cache.
+  void AccountErased(const RenderTargetData& data);
+
+  void SampleLeased();
+
   std::vector<RenderTargetData> render_target_data_;
   uint32_t keep_alive_frame_count_;
   uint32_t cache_disabled_count_ = 0;
+  // Whether a frame workload (Start..End) is open, so that used entries are
+  // leased.
+  bool frame_open_ = false;
+  Clock clock_;
+  // Report interval counters.
+  uint64_t interval_ = 0u;
+  size_t peak_leased_nominal_bytes_ = 0u;
+  size_t created_entries_ = 0u;
+  size_t created_erased_real_bytes_ = 0u;
 
   RenderTargetCache(const RenderTargetCache&) = delete;
 

@@ -259,6 +259,17 @@ class ContextVK final : public Context,
   // |Context|
   void ReleaseOrphanedTransients() override;
 
+  // |Context|
+  RenderResourceUsage ReportTransientAttachments(
+      bool start_new_interval) override;
+
+  // |Context|
+  ResourceCacheTrimResult ReleaseIdleResourceCaches(
+      const IdleResourceRelease& request) override;
+
+  // |Context|
+  void FlushReleasedResources() override;
+
   /// @brief Whether the Android Surface control based swapchain should be
   ///        enabled
   bool GetShouldEnableSurfaceControlSwapchain() const;

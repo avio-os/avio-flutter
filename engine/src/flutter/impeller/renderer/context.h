@@ -19,6 +19,7 @@
 #include "impeller/core/gpu_submission_tracker.h"
 #include "impeller/renderer/capabilities.h"
 #include "impeller/renderer/command_queue.h"
+#include "impeller/renderer/render_resource_usage.h"
 #include "impeller/renderer/sampler_library.h"
 
 namespace flutter::testing {
@@ -30,22 +31,6 @@ namespace impeller {
 class ShaderLibrary;
 class CommandBuffer;
 class PipelineLibrary;
-
-/// Accounted resources held by a context-owned idle cache.
-struct ResourceCacheUsage {
-  size_t entries = 0u;
-  size_t bytes = 0u;
-
-  constexpr bool operator==(const ResourceCacheUsage&) const = default;
-};
-
-/// Exact before/after accounting for an idle-only cache trim.
-struct ResourceCacheTrimResult {
-  ResourceCacheUsage before;
-  ResourceCacheUsage after;
-
-  constexpr bool operator==(const ResourceCacheTrimResult&) const = default;
-};
 
 /// A wrapper for provided a deferred initialization of impeller to various
 /// engine subsystems.
@@ -260,6 +245,30 @@ class Context {
   /// Called on the raster thread once per raster frame, after every view has
   /// rendered. Backends without such a cache do nothing.
   virtual void ReleaseOrphanedTransients() {}
+
+  /// Report the context-scoped transient attachment cache. When
+  /// `start_new_interval` is true the interval counters (peak leased bytes,
+  /// released orphans, created entries) restart after this report. Backends
+  /// without such a cache report zero usage.
+  virtual RenderResourceUsage ReportTransientAttachments(
+      bool start_new_interval) {
+    return {};
+  }
+
+  /// Free context-scoped transient attachment entries that are idle (no
+  /// render target or submitted GPU work references them) and unused for at
+  /// least `request.unused_for`, and every idle orphan. The memory is queued
+  /// for destruction; call `FlushReleasedResources` to wait for it.
+  /// Backends without such a cache return zero usage.
+  virtual ResourceCacheTrimResult ReleaseIdleResourceCaches(
+      const IdleResourceRelease& request) {
+    return {};
+  }
+
+  /// Wait until every resource released to the backend's deferred destroyer
+  /// before this call has been destroyed. Must not be called from that
+  /// destroyer. Backends that destroy synchronously return at once.
+  virtual void FlushReleasedResources() {}
 
   /// @brief Enqueue command_buffer for submission by the end of the frame.
   ///

@@ -36,6 +36,7 @@
 #include "flutter/shell/common/pipeline.h"
 #include "flutter/shell/common/snapshot_controller.h"
 #include "flutter/shell/common/snapshot_surface_producer.h"
+#include "impeller/renderer/render_resource_usage.h"  // nogncheck
 #include "third_party/skia/include/core/SkData.h"
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
@@ -287,6 +288,41 @@ class Rasterizer final : public SnapshotDelegate,
   /// Trims resources that are already idle without notifying Dart or purging
   /// live scene state. Safe to call when every hosted view is non-visible.
   void TrimIdleResourceCaches() const;
+
+  /// Engine-private render-resource kinds an idle release may apply to.
+  enum IdleResourceKind : uint32_t {
+    /// The context-scoped transient attachment sets of root targets.
+    kIdleTransientAttachments = 1u << 0,
+    /// Offscreen render targets cached between frames.
+    kIdleOffscreenTargets = 1u << 1,
+  };
+
+  struct IdleResourceReport {
+    /// The kinds that were released (a mask of IdleResourceKind).
+    uint32_t kinds_applied = 0u;
+    impeller::RenderResourceUsage transient_before;
+    impeller::RenderResourceUsage transient_after;
+    impeller::RenderResourceUsage offscreen_before;
+    impeller::RenderResourceUsage offscreen_after;
+    size_t kept_in_use = 0u;
+    size_t kept_recent = 0u;
+  };
+
+  //----------------------------------------------------------------------------
+  /// @brief      Frees idle engine-private render resources of `kinds` (a
+  ///             mask of IdleResourceKind) and reports usage before and
+  ///             after. Each cache selects its own idle entries: nothing a
+  ///             render target or submitted GPU work references, and nothing
+  ///             used within `impeller::kIdleReleaseMinUnused`. The released
+  ///             memory is destroyed before this returns, so no later raster
+  ///             task can validate or restore it. `kinds == 0` only reports.
+  ///             Every call starts a new report interval. Must be called on
+  ///             the raster task runner, between raster tasks.
+  ///
+  IdleResourceReport ReleaseIdleResources(uint32_t kinds);
+
+  /// A usage report that releases nothing.
+  IdleResourceReport ReportResources() { return ReleaseIdleResources(0u); }
 
   //----------------------------------------------------------------------------
   /// @brief      Gets a weak pointer to the rasterizer. The rasterizer may only
