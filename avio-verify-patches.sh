@@ -448,6 +448,14 @@ absent_in "a Canvas replay never ages the render-target cache" \
   $F/impeller/display_list/canvas.cc 'GetRenderTargetCache\(\)->(Start|End)\(\)'
 need "the rasterizer ages the render-target cache once per frame" \
   $F/shell/common/rasterizer.cc 'cache->End\(\);'
+need "a color-source rect containing the clip draws without an SDF mask" \
+  $F/impeller/display_list/canvas.cc 'SDFFillRectContainsVisibleClip\(params, transform\)'
+need "a per-draw image filter keeps the color-source SDF mask" \
+  $F/impeller/display_list/canvas.cc 'per-draw image filter is excluded'
+need "color-source SDF snapshots are single-sample without depth/stencil" \
+  $F/impeller/display_list/canvas.cc '/\*depth_stencil_enabled=\*/false\)'
+need "snapshots may omit depth/stencil" \
+  $F/impeller/entity/contents/contents.h 'bool depth_stencil_enabled = true;'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

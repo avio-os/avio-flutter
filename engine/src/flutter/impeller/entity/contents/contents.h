@@ -91,6 +91,9 @@ class Contents {
     int32_t coverage_expansion = 1;
     // Preserve physical sample positions when resolving coverage masks.
     bool pixel_aligned = false;
+    // Attach depth/stencil to the snapshot target. Contents that draw a
+    // single cover without clips or stencil fills do not need it.
+    bool depth_stencil_enabled = true;
   };
 
   //----------------------------------------------------------------------------

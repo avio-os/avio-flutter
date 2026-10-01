@@ -135,6 +135,13 @@ class GoldenPlaygroundTest
   // support wide gamuts.
   [[nodiscard]] bool EnsureContextSupportsWideGamut() { return true; }
 
+  // See |Playground::EnsureContextUsesSDFs|
+  // GoldenPlaygroundTest picks the context from the backend parameter in
+  // |SetUp|, so this only reports whether that context renders with SDFs.
+  [[nodiscard]] bool EnsureContextUsesSDFs() {
+    return GetContext()->GetFlags().use_sdfs;
+  }
+
  private:
 #if FML_OS_MACOSX
   // This must be placed first so that the autorelease pool is not destroyed

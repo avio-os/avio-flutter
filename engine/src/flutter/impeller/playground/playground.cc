@@ -196,6 +196,22 @@ bool Playground::EnsureContextSupportsWideGamut() {
   return true;
 }
 
+bool Playground::EnsureContextUsesSDFs() {
+  FML_CHECK(!context_) << "Must be called before a context is created.";
+  switch (backend_) {
+    case PlaygroundBackend::kMetalSDF:
+    case PlaygroundBackend::kOpenGLESSDF:
+      return true;
+    case PlaygroundBackend::kVulkan:
+      switches_.flags.use_sdfs = true;
+      return true;
+    case PlaygroundBackend::kMetal:
+    case PlaygroundBackend::kOpenGLES:
+      return false;
+  }
+  FML_UNREACHABLE();
+}
+
 std::shared_ptr<Context> Playground::GetContext() const {
   if (!context_) {
     SetupContext();

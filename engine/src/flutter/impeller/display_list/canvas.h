@@ -291,6 +291,15 @@ class Canvas {
   /// Visible for testing.
   static bool IsCompatibleWithSDFRendering(const Paint& paint);
 
+  /// Whether `params` is a filled rect that, under `transform`, contains
+  /// every pixel of `clip_coverage` (global coordinates) with its center at
+  /// least half a pixel inside the rect, so its SDF mask is exactly 1
+  /// wherever anything is visible. Such a rect needs no mask.
+  static bool SDFFillRectContainsClip(const UberSDFParameters& params,
+                                      const Matrix& transform,
+                                      const Rect& clip_coverage,
+                                      Point global_pass_position);
+
  private:
   class BlurShape {
    public:
@@ -409,6 +418,12 @@ class Canvas {
       UberSDFParameters params,
       bool reuse_depth = false,
       const std::optional<Matrix>& shape_transform = std::nullopt);
+
+  /// @brief  Whether `params` is a filled rect that, under `transform`,
+  ///         contains every pixel the current clip lets through, so its SDF
+  ///         mask is 1 wherever anything is visible.
+  bool SDFFillRectContainsVisibleClip(const UberSDFParameters& params,
+                                      const Matrix& transform) const;
 
   void AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth = false);
 

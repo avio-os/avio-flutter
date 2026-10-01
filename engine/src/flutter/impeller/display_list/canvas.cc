@@ -2275,6 +2275,24 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
   entity.SetTransform(transform);
   entity.SetBlendMode(paint.blend_mode);
 
+  if (paint.color_source && !shape_transform.has_value() &&
+      !paint.image_filter &&
+      SDFFillRectContainsVisibleClip(params, transform)) {
+    // Every pixel the clip lets through has its center at least half a pixel
+    // inside the rect, where the SDF mask is exactly 1: the mask carries no
+    // information. Draw the color source directly under the clip, as
+    // drawPaint does, with no mask, no snapshots and no blend target. No
+    // shape edge is inside the clip, so antialiasing is unchanged. A
+    // per-draw image filter is excluded: it moves or spreads the rect's
+    // edges into the clip after this test, and those edges need the mask.
+    FillRectGeometry rect_geometry(Rect::MakeLTRB(
+        params.center.x - params.size.x, params.center.y - params.size.y,
+        params.center.x + params.size.x, params.center.y + params.size.y));
+    AddRenderEntityWithFiltersToCurrentPass(entity, &rect_geometry, paint,
+                                            reuse_depth);
+    return;
+  }
+
   if (paint.color_source) {
     // Since we are going to use BlendMode::kSrcIn to implement the color_source
     // the SDF portion of the blend should just be solid white to get the
@@ -2304,9 +2322,16 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
     source_paint.coverage_mode = flutter::DlCoverageMode::kPlatformDefault;
     std::shared_ptr<ColorSourceContents> color_source_contents =
         source_paint.CreateContents(renderer_, geom, shape_transform);
+    // Each input is one draw over the SDF quad, and the analytic SDF masks
+    // the quad's edges, so multisampling and depth/stencil carry no
+    // information: snapshot both single-sample without depth/stencil (12
+    // instead of 84 bytes per pixel with the blend target).
     std::shared_ptr<Contents> final_contents = ColorFilterContents::MakeBlend(
-        BlendMode::kSrcIn, {FilterInput::Make(std::move(contents)),
-                            FilterInput::Make(color_source_contents)});
+        BlendMode::kSrcIn,
+        {FilterInput::Make(std::move(contents), /*msaa_enabled=*/false,
+                           /*depth_stencil_enabled=*/false),
+         FilterInput::Make(color_source_contents, /*msaa_enabled=*/false,
+                           /*depth_stencil_enabled=*/false)});
 
     Paint new_paint = paint;
     new_paint.color_source = nullptr;
@@ -2799,6 +2824,45 @@ bool Canvas::EndReplay() {
   Reset();
   Initialize(initial_cull_rect_);
   return !rendering_failed_;
+}
+
+bool Canvas::SDFFillRectContainsVisibleClip(const UberSDFParameters& params,
+                                            const Matrix& transform) const {
+  if (!clip_coverage_stack_.HasCoverage()) {
+    return false;
+  }
+  const std::optional<Rect> clip = clip_coverage_stack_.CurrentClipCoverage();
+  if (!clip.has_value()) {
+    return false;
+  }
+  return SDFFillRectContainsClip(params, transform, *clip,
+                                 GetGlobalPassPosition());
+}
+
+bool Canvas::SDFFillRectContainsClip(const UberSDFParameters& params,
+                                     const Matrix& transform,
+                                     const Rect& clip_coverage,
+                                     Point global_pass_position) {
+  if (params.type != UberSDFParameters::Type::kRect ||
+      params.stroke.has_value() || !transform.IsAligned2D() ||
+      clip_coverage.IsEmpty()) {
+    return false;
+  }
+  const Rect device_rect = Rect::MakeLTRB(params.center.x - params.size.x,
+                                          params.center.y - params.size.y,
+                                          params.center.x + params.size.x,
+                                          params.center.y + params.size.y)
+                               .TransformBounds(transform);
+  // A pixel the clip touches has its center half a pixel inside the clip's
+  // pixel-aligned bounds. If those bounds lie inside the rect, that center is
+  // at least half a pixel inside the rect, where the SDF's half-pixel fade
+  // has ended and the mask is exactly 1. Clip coverage is recorded in global
+  // coordinates; accept the rect only if it also contains the coverage as
+  // seen from this pass's origin, so the answer never depends on which of the
+  // two a nested pass recorded.
+  return device_rect.Contains(Rect::RoundOut(clip_coverage)) &&
+         device_rect.Contains(
+             Rect::RoundOut(clip_coverage.Shift(global_pass_position)));
 }
 
 bool Canvas::IsCompatibleWithSDFRendering(const Paint& paint) {
