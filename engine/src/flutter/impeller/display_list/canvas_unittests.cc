@@ -19,6 +19,7 @@
 #include "impeller/display_list/dl_vertices_geometry.h"
 #include "impeller/entity/geometry/rect_geometry.h"
 #include "impeller/entity/inline_pass_context.h"
+#include "impeller/entity/render_target_cache.h"
 #include "impeller/geometry/geometry_asserts.h"
 #include "impeller/playground/playground.h"
 #include "impeller/playground/widgets.h"
@@ -177,6 +178,46 @@ TEST_F(CanvasFailureTest, FailedMipmapPassIsConsumedWithoutSubmitting) {
   }
   EXPECT_EQ(encodes, 1u);
   EXPECT_TRUE(context->queued.empty());
+}
+
+// Red before EN51: every Canvas replay started and ended an aging epoch of
+// the shared RenderTargetCache, so in a multi-view frame an offscreen died
+// after keep-alive foreign replays. A replay now only leases.
+TEST_F(CanvasFailureTest, CanvasReplayLeasesButNeverAgesRenderTargetCache) {
+  auto cache = std::make_shared<RenderTargetCache>(
+      context->GetResourceAllocator(), /*keep_alive_frame_count=*/0);
+  ContentContext renderer(context, nullptr, cache);
+  cache->Start();
+  ASSERT_TRUE(cache->CreateOffscreen(*context, {64, 64}, 1).IsValid());
+  // Release the frame lease without an aging epoch.
+  cache->Start();
+  ASSERT_EQ(cache->CachedTextureCount(), 1u);
+
+  // Three views render in one frame.
+  for (int view = 0; view < 3; view++) {
+    Canvas canvas(renderer, target, false, false);
+    canvas.EndReplay();
+  }
+  EXPECT_EQ(cache->CachedTextureCount(), 1u);
+
+  // The frame's owner ages once: the entry was unused for its keep-alive.
+  cache->End();
+  EXPECT_EQ(cache->CachedTextureCount(), 0u);
+}
+
+// A Canvas that is destroyed without EndReplay still returns its leases.
+TEST_F(CanvasFailureTest, DestroyedCanvasReleasesItsLeaseScope) {
+  auto cache =
+      std::make_shared<RenderTargetCache>(context->GetResourceAllocator());
+  ContentContext renderer(context, nullptr, cache);
+  {
+    Canvas abandoned(renderer, target, false, false);
+  }
+  // A later frame-scope request reuses nothing leased by a dead scope and
+  // closing the epoch keeps the cache consistent.
+  ASSERT_TRUE(cache->CreateOffscreen(*context, {64, 64}, 1).IsValid());
+  cache->End();
+  EXPECT_EQ(cache->CachedTextureCount(), 1u);
 }
 
 TEST_F(CanvasFailureTest, EncodeFailureStillFlushesAndNextReplayCanSucceed) {

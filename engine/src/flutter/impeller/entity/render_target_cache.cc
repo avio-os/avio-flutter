@@ -79,7 +79,8 @@ void RenderTargetCache::RecordMiss(const RenderTargetConfig& config,
       if (td.config == config) {
         // A miss with an equal key means every such entry is leased.
         same_key = true;
-      } else if (!td.used_this_frame && td.config.MatchesExceptSize(config)) {
+      } else if (td.lease_scope == kUnleased &&
+                 td.config.MatchesExceptSize(config)) {
         other_extent = true;
       }
     }
@@ -130,20 +131,20 @@ RenderTargetCache::RenderTargetCache(std::shared_ptr<Allocator> allocator,
       clock_([] { return std::chrono::steady_clock::now(); }) {}
 
 void RenderTargetCache::Start() {
-  cache_disabled_count_ = 0;
-  frame_open_ = true;
-  for (auto& td : render_target_data_) {
-    td.used_this_frame = false;
-  }
+  frame_disabled_count_ = 0;
+  ReleaseLeases(kFrameScope);
 }
 
 void RenderTargetCache::End() {
-  cache_disabled_count_ = 0;
-  frame_open_ = false;
+  frame_disabled_count_ = 0;
+  ReleaseLeases(kFrameScope);
   std::vector<RenderTargetData> retain;
 
   for (RenderTargetData& td : render_target_data_) {
-    if (td.used_this_frame) {
+    if (td.used_this_frame || td.lease_scope != kUnleased) {
+      // Used in this epoch (or still leased by an open scope): keep it with
+      // its full keep-alive, and start the next epoch unused.
+      td.used_this_frame = false;
       retain.push_back(td);
     } else if (td.keep_alive_frame_count > 0) {
       td.keep_alive_frame_count--;
@@ -160,8 +161,45 @@ void RenderTargetCache::End() {
   }
 }
 
+uint64_t RenderTargetCache::BeginScope() {
+  const uint64_t id = next_scope_id_++;
+  scopes_.push_back(Scope{.id = id});
+  return id;
+}
+
+void RenderTargetCache::EndScope(uint64_t scope) {
+  const auto found =
+      std::find_if(scopes_.begin(), scopes_.end(),
+                   [scope](const Scope& open) { return open.id == scope; });
+  FML_DCHECK(found != scopes_.end()) << "Closing a scope that is not open.";
+  if (found == scopes_.end()) {
+    return;
+  }
+  FML_DCHECK(found->disabled_count == 0u);
+  scopes_.erase(found);
+  ReleaseLeases(scope);
+}
+
+uint64_t RenderTargetCache::CurrentScope() const {
+  return scopes_.empty() ? kFrameScope : scopes_.back().id;
+}
+
+uint32_t& RenderTargetCache::CurrentDisabledCount() {
+  return scopes_.empty() ? frame_disabled_count_
+                         : scopes_.back().disabled_count;
+}
+
+void RenderTargetCache::ReleaseLeases(uint64_t scope) {
+  for (RenderTargetData& td : render_target_data_) {
+    if (td.lease_scope == scope) {
+      td.lease_scope = kUnleased;
+    }
+  }
+}
+
 void RenderTargetCache::LeaseEntry(RenderTargetData& data) {
   data.used_this_frame = true;
+  data.lease_scope = CurrentScope();
   data.keep_alive_frame_count = keep_alive_frame_count_;
   data.last_used = clock_();
   SampleLeased();
@@ -179,6 +217,7 @@ void RenderTargetCache::InsertEntry(const RenderTargetConfig& config,
       .nominal_bytes = bytes.nominal,                     //
       .real_bytes = bytes.real,                           //
       .created_interval = interval_,                      //
+      .lease_scope = CurrentScope(),                      //
   });
   created_entries_++;
   SampleLeased();
@@ -192,12 +231,9 @@ void RenderTargetCache::AccountErased(const RenderTargetData& data) {
 }
 
 void RenderTargetCache::SampleLeased() {
-  if (!frame_open_) {
-    return;
-  }
   size_t leased = 0u;
   for (const RenderTargetData& td : render_target_data_) {
-    if (td.used_this_frame) {
+    if (td.lease_scope != kUnleased) {
       leased += td.nominal_bytes;
     }
   }
@@ -213,7 +249,7 @@ RenderResourceUsage RenderTargetCache::ReportUsage(bool start_new_interval) {
     const RenderTargetData& td = render_target_data_[index];
     report.nominal_bytes += td.nominal_bytes;
     report.real_bytes += td.real_bytes;
-    if (frame_open_ && td.used_this_frame) {
+    if (td.lease_scope != kUnleased) {
       report.leased_entries++;
       leased_nominal_bytes += td.nominal_bytes;
     }
@@ -257,8 +293,8 @@ ResourceCacheTrimResult RenderTargetCache::ReleaseIdle(
   const auto now = clock_();
   std::vector<RenderTargetData> retain;
   for (RenderTargetData& td : render_target_data_) {
-    if (frame_open_ && td.used_this_frame) {
-      // Leased by the open workload.
+    if (td.lease_scope != kUnleased) {
+      // Leased by an open workload.
       result.kept_in_use++;
       retain.push_back(td);
     } else if (now - td.last_used < unused_for) {
@@ -286,19 +322,21 @@ void RenderTargetCache::SetClockForTesting(Clock clock) {
 }
 
 void RenderTargetCache::DisableCache() {
-  cache_disabled_count_++;
+  CurrentDisabledCount()++;
 }
 
 bool RenderTargetCache::CacheEnabled() const {
-  return cache_disabled_count_ == 0;
+  return (scopes_.empty() ? frame_disabled_count_
+                          : scopes_.back().disabled_count) == 0;
 }
 
 void RenderTargetCache::EnableCache() {
-  FML_DCHECK(cache_disabled_count_ > 0);
-  if (cache_disabled_count_ == 0) {
+  uint32_t& count = CurrentDisabledCount();
+  FML_DCHECK(count > 0);
+  if (count == 0) {
     return;
   }
-  cache_disabled_count_--;
+  count--;
 }
 
 RenderTarget RenderTargetCache::CreateOffscreen(
@@ -335,7 +373,8 @@ RenderTarget RenderTargetCache::CreateOffscreen(
   if (CacheEnabled()) {
     for (RenderTargetData& render_target_data : render_target_data_) {
       const RenderTargetConfig other_config = render_target_data.config;
-      if (!render_target_data.used_this_frame && other_config == config) {
+      if (render_target_data.lease_scope == kUnleased &&
+          other_config == config) {
         LeaseEntry(render_target_data);
         ColorAttachment color0 =
             render_target_data.render_target.GetColorAttachment(0);
@@ -398,7 +437,8 @@ RenderTarget RenderTargetCache::CreateOffscreenMSAA(
   if (CacheEnabled()) {
     for (RenderTargetData& render_target_data : render_target_data_) {
       const RenderTargetConfig other_config = render_target_data.config;
-      if (!render_target_data.used_this_frame && other_config == config) {
+      if (render_target_data.lease_scope == kUnleased &&
+          other_config == config) {
         LeaseEntry(render_target_data);
         ColorAttachment color0 =
             render_target_data.render_target.GetColorAttachment(0);

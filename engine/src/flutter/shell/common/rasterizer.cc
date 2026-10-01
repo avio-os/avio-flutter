@@ -267,6 +267,20 @@ Rasterizer::IdleResourceReport Rasterizer::ReleaseIdleResources(
 }
 
 void Rasterizer::EndRasterFrameResources() const {
+#if IMPELLER_SUPPORTS_RENDERING
+  // One aging epoch of the offscreen render-target cache per raster frame,
+  // after every view. Each view's Canvas and each snapshot only opens and
+  // closes a lease scope, so in a multi-view frame an entry is no longer aged
+  // out by its sibling views' replays.
+  if (surface_) {
+    if (auto aiks_context = surface_->GetAiksContext()) {
+      if (const auto& cache =
+              aiks_context->GetContentContext().GetRenderTargetCache()) {
+        cache->End();
+      }
+    }
+  }
+#endif  // IMPELLER_SUPPORTS_RENDERING
   // Transient attachment sets whose extent no existing view holds any more
   // are freed once their last GPU use has completed. The free itself is
   // asynchronous (the context's resource manager destroys the images).

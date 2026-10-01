@@ -84,6 +84,7 @@ already ancestors of the selected main target under their original commits.
 | 46 | Release idle render resources on the embedder's request | permanent ABI/lifecycle extension (ABI v7) | none — flutter/flutter#193015 proposes a coarser low-memory variant |
 | 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
+| 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -760,6 +761,34 @@ return contract is unchanged. Regressions:
 shape (a backdrop filter inside an opacity layer, drawing after the
 backdrop) must equal the same picture drawn without a backdrop within
 1/255, and on Vulkan it must have taken the labelled secondary.
+
+### Patch 51: one RenderTargetCache aging epoch per raster frame
+
+The cache's header promised that textures live "for at least one frame" and
+die after keep-alive "frames", but `Canvas::SetupRenderPass` and
+`Canvas::EndReplay` called `Start`/`End` on every Canvas: every view's
+replay and every toImage snapshot reset every lease and aged every entry. In
+Avio's multi-view engine an offscreen died after a few foreign Canvases
+(flutter/flutter#190613 describes the same misnomer upstream). A nested
+Canvas could also be handed a texture its outer Canvas was still rendering
+into.
+
+Leases and aging are now separate. A Canvas opens a lease scope in
+`SetupRenderPass` and closes it in `EndReplay` (or its destructor);
+`EndScope` releases only that scope's leases, a nested scope never reuses an
+outer scope's lease, and `DisableCache` counts belong to the scope that set
+them. The Rasterizer ages the cache once per raster frame, after every view
+(`End`, from `Rasterizer::EndRasterFrameResources`). Snapshot Canvases
+(`DisplayListToTexture`, `RenderToTarget`) never age it. The Impeller
+interop toolkit's `Surface::DrawDisplayList` is its own frame and ends one
+epoch per draw. No new knob is added; patch 46's `ReleaseIdle` remains the
+only idle release, since nothing ages without frames. Retention rises by at
+most the entries unused for keep-alive raster frames. Regressions:
+`CanvasFailureTest.CanvasReplayLeasesButNeverAgesRenderTargetCache`,
+`RenderTargetCacheResourceTest.ForeignCanvasesWithinOneFrameDoNotAge`,
+`EntryUnusedForKeepAliveFramesIsDropped`, `ToImageCanvasDoesNotAge`,
+`NestedScopeKeepsOuterLeases`, `DisableCacheIsPerScope`, and the unchanged
+playground `CachesUsedTexturesAcrossFrames*`.
 
 ## Known baseline debt
 
