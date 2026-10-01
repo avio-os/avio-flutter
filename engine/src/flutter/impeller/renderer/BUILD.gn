@@ -62,6 +62,7 @@ impeller_component("renderer") {
     "pool.h",
     "render_pass.cc",
     "render_pass.h",
+    "render_resource_usage.h",
     "render_target.cc",
     "render_target.h",
     "sampler_library.cc",

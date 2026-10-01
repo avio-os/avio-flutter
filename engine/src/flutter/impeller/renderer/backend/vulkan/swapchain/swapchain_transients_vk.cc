@@ -102,6 +102,18 @@ bool SwapchainTransientsVK::IsIdle() const {
   return msaa_idle && depth_stencil_idle;
 }
 
+size_t SwapchainTransientsVK::GetAllocatedByteSize() const {
+  std::scoped_lock lock(init_mutex_);
+  size_t bytes = 0u;
+  if (cached_msaa_texture_) {
+    bytes += cached_msaa_texture_->GetAllocatedByteSize();
+  }
+  if (cached_depth_stencil_) {
+    bytes += cached_depth_stencil_->GetAllocatedByteSize();
+  }
+  return bytes;
+}
+
 const std::weak_ptr<Context>& SwapchainTransientsVK::GetContext() const {
   return context_;
 }

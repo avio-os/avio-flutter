@@ -81,6 +81,7 @@ already ancestors of the selected main target under their original commits.
 | 45 | Author semantic foreground coverage for an external linear-light backdrop | permanent composition-contract extension | none — Flutter otherwise cannot know that its transparent target receives a backdrop later |
 | 46a | One transient attachment set per key on the single graphics queue | permanent resource-lifecycle correction (restores patch 11's one-entry-per-key pool; the incoming depth/stencil dependency is upstreamable) | partial: flutter/flutter#144617 recycles one onscreen set upstream |
 | 46b | A transient set lives while an existing view holds its extent | permanent resource-lifecycle owner (ships only with Avio G2, which keeps a ShellItem's view across extent changes) | none — upstream frees with the swapchain |
+| 46u | Report-only render-resource accounting | permanent diagnostics (internal C++ API, no ABI change) | none |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -423,6 +424,9 @@ Since patch 46a the entry count is one per distinct key, so the limits bound
 distinct live extents, not concurrent leases: a leased key is shared and never
 refused. Only an acquisition of a new key can be refused at the caps.
 
+Patch 46u keeps admission and both caps on nominal accounting; real bytes are
+reported, not enforced.
+
 Memory-pressure cleanup reaches Impeller in Slimpeller builds on the raster
 thread. The backend-neutral `TrimIdleResourceCaches` seam reports exact
 before/after usage, while Vulkan removes only the same provably idle entries;
@@ -672,6 +676,39 @@ until external composition. It must not become a platform-wide default or a
 Smithay heuristic over generic alpha: both would also alter text already
 flattened into opaque Flutter pixels and translucent materials whose linear
 coverage is intentional.
+
+### Patch 46u: report-only render-resource accounting
+
+The engine-private render-resource caches report exactly what they hold, and
+reporting frees, ages and leases nothing. `TransientsPoolVK::ReportUsage` and
+`RenderTargetCache::ReportUsage` (through the
+`RenderTargetAllocator::ReportUsage` virtual) return an
+`impeller::RenderResourceUsage`: entries, nominal bytes (the cache's own texel
+accounting), real bytes, leased entries (a wrapper, an open frame, or
+submitted GPU work references them), distinct keys and duplicate entries (the
+transient pool must report 0 since patch 46a; the offscreen cache reports
+entries minus distinct keys), and per-interval counters: peak leased nominal
+bytes, created entries and the real bytes they allocated (an entry created
+and freed within one interval still counts), and orphans released by patch
+46b (transient pool only). `ReportUsage(true)` starts a new interval.
+
+Real bytes come from the backend: `Texture::GetAllocatedByteSize` (0 where
+unknown) is `vmaCreateImage`'s allocation size for `AllocatedTextureSourceVK`
+images, and `SwapchainTransientsVK::GetAllocatedByteSize` sums the
+attachments a set has materialized. Every transient-pool erase (cap eviction,
+orphan release, idle trim) goes through one accounting edge.
+
+This is an internal C++ API: no embedder ABI, no new policy, and
+`FLUTTER_AVIO_EXTENSION_VERSION` stays 6. It is the accounting half of the
+dropped idle-release patch (kept for reference on `avio/vram-dropped-r`);
+nothing releases on the host's request, nothing is stamped with a last use,
+and the resource manager gains no flush. A later ABI extension exposes the
+report. Regressions: `ContextVKTest.TransientsPoolAccountsNominalAndRealBytes`,
+`TransientsPoolPeakLeasedResetsOnReport`,
+`TransientsPoolReportsDistinctKeysDuplicatesAndOrphans`,
+`TransientsPoolReportsCreatedEntriesAndBytes`, and
+`RenderTargetCacheResourceTest.ReportsExactBytes` (GPU-free: a fake allocator
+with page-rounded allocations).
 
 ## Known baseline debt
 

@@ -44,6 +44,11 @@ class Texture {
 
   virtual ISize GetSize() const = 0;
 
+  /// The bytes of device memory the backend allocated for this texture, or 0
+  /// when the backend does not know them (for example a wrapped external
+  /// image). Used for exact cache accounting, never for rendering decisions.
+  virtual size_t GetAllocatedByteSize() const { return 0u; }
+
   bool IsOpaque() const;
 
   size_t GetMipCount() const;

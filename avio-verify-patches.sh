@@ -75,9 +75,9 @@ echo "--- Exact frame opportunities ---"
 need "exact opportunity feature negotiation" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureFrameOpportunityOutcomes'
-need "render-deadline ABI extension version" \
+need "Avio ABI extension version (v6; patch 46u adds no ABI)" \
   $F/shell/platform/embedder/embedder.h \
-  'FLUTTER_AVIO_EXTENSION_VERSION 5'
+  'FLUTTER_AVIO_EXTENSION_VERSION 6u'
 need "render-deadline semantic feature" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureRenderDeadline'
@@ -410,6 +410,27 @@ need "idle orphaned transient sets are freed once per raster frame" \
 need "orphans are released only when idle" \
   $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
   'if \(!EntryIsOrphanLocked\(\*it\) \|\| !EntryIsIdle\(\*it\)\)'
+need "real bytes come from the backend allocation" \
+  $F/impeller/renderer/backend/vulkan/allocator_vk.cc \
+  'allocated_byte_size_ = static_cast<size_t>\(allocation_info\.size\)'
+need "a transient set reports its attachments' allocations" \
+  $F/impeller/renderer/backend/vulkan/swapchain/swapchain_transients_vk.cc \
+  'size_t SwapchainTransientsVK::GetAllocatedByteSize\(\) const'
+need "the transient pool reports usage" \
+  $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
+  'RenderResourceUsage TransientsPoolVK::ReportUsage\(bool start_new_interval\)'
+need "every transient pool erase is accounted" \
+  $F/impeller/renderer/backend/vulkan/swapchain/transients_pool_vk.cc \
+  'it = EraseLocked\(it\);'
+need "the offscreen cache reports usage" \
+  $F/impeller/entity/render_target_cache.cc \
+  'RenderResourceUsage RenderTargetCache::ReportUsage\(bool start_new_interval\)'
+need "the usage report carries transient health" \
+  $F/impeller/renderer/render_resource_usage.h 'size_t duplicate_entries'
+need "the usage report carries created entries and bytes" \
+  $F/impeller/renderer/render_resource_usage.h 'size_t created_real_bytes'
+absent "idle render-resource release (dropped with ABI v7) stays out" \
+  'ReleaseAvioIdleResources|IdleResourceRelease|kIdleReleaseMinUnused|ReleaseIdle\(|ResourceManagerVK::Flush'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \

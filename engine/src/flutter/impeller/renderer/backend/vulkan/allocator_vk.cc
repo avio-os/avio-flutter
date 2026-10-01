@@ -461,12 +461,16 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
         ImageVMA{allocator, allocation, image}, std::move(image_view),
         std::move(rt_image_views), context.GetResourceAllocator(),
         context.GetDeviceHolder()));
+    allocated_byte_size_ = static_cast<size_t>(allocation_info.size);
     is_valid_ = true;
   }
 
   ~AllocatedTextureSourceVK() = default;
 
   bool IsValid() const { return is_valid_; }
+
+  // |TextureSourceVK|
+  size_t GetAllocatedByteSize() const override { return allocated_byte_size_; }
 
   vk::Image GetImage() const override { return resource_->image.get().image; }
 
@@ -518,6 +522,8 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
   };
 
   UniqueResourceVKT<ImageResource> resource_;
+  // The VMA allocation size of the image (its memory requirements).
+  size_t allocated_byte_size_ = 0u;
   bool is_valid_ = false;
 
   AllocatedTextureSourceVK(const AllocatedTextureSourceVK&) = delete;
