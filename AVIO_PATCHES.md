@@ -85,6 +85,7 @@ already ancestors of the selected main target under their original commits.
 | 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
+| 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -789,6 +790,48 @@ most the entries unused for keep-alive raster frames. Regressions:
 `EntryUnusedForKeepAliveFramesIsDropped`, `ToImageCanvasDoesNotAge`,
 `NestedScopeKeepsOuterLeases`, `DisableCacheIsPerScope`, and the unchanged
 playground `CachesUsedTexturesAcrossFrames*`.
+
+### Patch 52: color sources UberSDF cannot shade
+
+With `use_sdfs`, an antialiased srcOver rect, rrect, oval or circle with a
+color source takes UberSDF, which cannot shade the color source itself, so
+`AddRenderSDFEntityToCurrentPass` blends the SDF mask with the color source
+through `ColorFilterContents::MakeBlend(kSrcIn, ...)`: two snapshots and a
+"Pipeline Blend Filter" target per draw. This patch removes what carries no
+information, without depending on patch 50.
+
+(a) A filled rect whose device bounds, under an axis-aligned transform,
+contain the pixel-aligned bounds of the current clip coverage has an SDF
+mask of exactly 1 at every visible pixel center (each lies at least half a
+pixel inside the rect, where the SDF's half-pixel fade has ended). It draws
+its color source directly with rect geometry under the clip, as `drawPaint`
+does: no mask, no snapshot, no blend target, and no shape edge inside the
+clip, so antialiasing is unchanged. The containment test also requires the
+coverage as seen from the current pass's origin, so it never depends on
+which coordinate space a nested pass recorded. Lines (shape transforms),
+rounded or stroked shapes, and paints with a per-draw image filter (which
+moves or spreads the rect's edges into the clip after the test) keep the
+mask. This covers the greeter's full-screen halftone shader rect (about
+416 MiB of snapshots per repaint before).
+
+(b) Every other color-source SDF draw snapshots both blend inputs
+single-sample without depth/stencil (`FilterInput::Make(..., msaa_enabled,
+depth_stencil_enabled)`, `Contents::SnapshotOptions::depth_stencil_enabled`):
+12 instead of 84 bytes per pixel with the blend target. Each input is one
+draw over the SDF quad and the analytic SDF masks the quad's edges, so
+multisampling and depth/stencil carried no information.
+
+Regressions: `CanvasTest.SDFFillRectContainingClipNeedsNoMask`,
+`CanvasFailureTest.SingleSampleSnapshotRequestsNoDepthStencil`, and on every
+playground that renders with SDFs (`Playground::EnsureContextUsesSDFs`: the
+OpenGL ES and Metal SDF backends, and Vulkan with SDFs enabled, the only
+multisampled one on Linux) `AiksTest.ShaderRectContainingClipAllocatesNoOffscreen`,
+`ShaderRRectInsideClipStillMasks`, `ShaderRectContainingClipMatchesDrawPaint`,
+`ShaderRectWithImageFilterKeepsMask`, and the pixel goldens against the
+pre-patch composite: `ShaderRectContainingClipMatchesMaskedComposite` ((a)
+against the masked path, forced by a clip the rect does not contain) and
+`SingleSampleMaskInputsMatchMultisampledInputs` ((b): the same kSrcIn
+composite with multisampled, depth/stencil inputs as before, within 1/255).
 
 ## Known baseline debt
 

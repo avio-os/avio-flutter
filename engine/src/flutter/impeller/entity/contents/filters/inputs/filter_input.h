@@ -38,7 +38,11 @@ class FilterInput {
 
   virtual ~FilterInput();
 
-  static FilterInput::Ref Make(Variant input, bool msaa_enabled = true);
+  /// `msaa_enabled` and `depth_stencil_enabled` apply when `input` is a
+  /// Contents that must be snapshotted.
+  static FilterInput::Ref Make(Variant input,
+                               bool msaa_enabled = true,
+                               bool depth_stencil_enabled = true);
 
   static FilterInput::Ref Make(std::shared_ptr<Texture> input,
                                Matrix local_transform);

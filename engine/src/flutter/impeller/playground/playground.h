@@ -174,6 +174,21 @@ class Playground {
   /// @see PlatformSupportsWideGamut()
   [[nodiscard]] virtual bool EnsureContextSupportsWideGamut();
 
+  /// @brief Make sure that when the context is later created it renders
+  ///        with SDFs, and return whether this backend runs the SDF
+  ///        renderer. The SDF variants of Metal and OpenGL ES always do.
+  ///        Vulkan has no SDF variant, so this enables SDFs for it: that is
+  ///        the only playground that runs the storage-buffer UberSDF shader.
+  ///        Plain Metal and OpenGL ES return false; their SDF variants
+  ///        already cover them.
+  ///
+  /// Must be called before any other method except for the Ensure family
+  /// of methods.
+  ///
+  /// Callers should abort (such as via GTEST_SKIP) if the method returns
+  /// false.
+  [[nodiscard]] bool EnsureContextUsesSDFs();
+
   /// @brief  Return an unmodifiable reference to the current switches.
   ///         The switches might change at the start of a test as it
   ///         has a brief opportunity to call any of the Ensure* methods

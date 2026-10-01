@@ -10,8 +10,11 @@
 namespace impeller {
 
 ContentsFilterInput::ContentsFilterInput(std::shared_ptr<Contents> contents,
-                                         bool msaa_enabled)
-    : contents_(std::move(contents)), msaa_enabled_(msaa_enabled) {}
+                                         bool msaa_enabled,
+                                         bool depth_stencil_enabled)
+    : contents_(std::move(contents)),
+      msaa_enabled_(msaa_enabled),
+      depth_stencil_enabled_(depth_stencil_enabled) {}
 
 ContentsFilterInput::~ContentsFilterInput() = default;
 
@@ -25,16 +28,17 @@ std::optional<Snapshot> ContentsFilterInput::GetSnapshot(
     coverage_limit = entity.GetContents()->GetCoverageHint();
   }
   if (!snapshot_.has_value()) {
-    snapshot_ =
-        contents_->RenderToSnapshot(renderer,  // renderer
-                                    entity,    // entity
-                                    {
-                                        .coverage_limit = coverage_limit,    //
-                                        .sampler_descriptor = std::nullopt,  //
-                                        .msaa_enabled = msaa_enabled_,       //
-                                        .mip_count = mip_count,              //
-                                        .label = label                       //
-                                    });
+    snapshot_ = contents_->RenderToSnapshot(
+        renderer,  // renderer
+        entity,    // entity
+        {
+            .coverage_limit = coverage_limit,                 //
+            .sampler_descriptor = std::nullopt,               //
+            .msaa_enabled = msaa_enabled_,                    //
+            .mip_count = mip_count,                           //
+            .label = label,                                   //
+            .depth_stencil_enabled = depth_stencil_enabled_,  //
+        });
   }
   return snapshot_;
 }

@@ -16,7 +16,9 @@
 
 namespace impeller {
 
-FilterInput::Ref FilterInput::Make(Variant input, bool msaa_enabled) {
+FilterInput::Ref FilterInput::Make(Variant input,
+                                   bool msaa_enabled,
+                                   bool depth_stencil_enabled) {
   if (auto filter = std::get_if<std::shared_ptr<FilterContents>>(&input)) {
     return std::static_pointer_cast<FilterInput>(
         std::shared_ptr<FilterContentsFilterInput>(
@@ -25,8 +27,8 @@ FilterInput::Ref FilterInput::Make(Variant input, bool msaa_enabled) {
 
   if (auto contents = std::get_if<std::shared_ptr<Contents>>(&input)) {
     return std::static_pointer_cast<FilterInput>(
-        std::shared_ptr<ContentsFilterInput>(
-            new ContentsFilterInput(*contents, msaa_enabled)));
+        std::shared_ptr<ContentsFilterInput>(new ContentsFilterInput(
+            *contents, msaa_enabled, depth_stencil_enabled)));
   }
 
   if (auto texture = std::get_if<std::shared_ptr<Texture>>(&input)) {

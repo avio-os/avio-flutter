@@ -17,6 +17,8 @@
 #include "impeller/display_list/dl_image_impeller.h"
 #include "impeller/display_list/dl_runtime_effect_impeller.h"
 #include "impeller/display_list/dl_vertices_geometry.h"
+#include "impeller/entity/contents/filters/inputs/filter_input.h"
+#include "impeller/entity/contents/uber_sdf_parameters.h"
 #include "impeller/entity/geometry/rect_geometry.h"
 #include "impeller/entity/inline_pass_context.h"
 #include "impeller/entity/render_target_cache.h"
@@ -65,6 +67,7 @@ class CanvasFailureTest : public ::testing::Test {
     auto allocator = std::make_shared<::testing::NiceMock<MockAllocator>>();
     auto capabilities =
         std::make_shared<::testing::NiceMock<MockCapabilities>>();
+    capabilities_mock_ = capabilities;
     capabilities_ = capabilities;
     ON_CALL(*capabilities, GetDefaultDepthStencilFormat())
         .WillByDefault(Return(PixelFormat::kD24UnormS8Uint));
@@ -127,6 +130,7 @@ class CanvasFailureTest : public ::testing::Test {
   }
 
   std::shared_ptr<FailingFrameContext> context;
+  std::shared_ptr<::testing::NiceMock<MockCapabilities>> capabilities_mock_;
   std::shared_ptr<const Capabilities> capabilities_;
   std::unique_ptr<ContentContext> content;
   RenderTarget target;
@@ -203,6 +207,113 @@ TEST_F(CanvasFailureTest, CanvasReplayLeasesButNeverAgesRenderTargetCache) {
   // The frame's owner ages once: the entry was unused for its keep-alive.
   cache->End();
   EXPECT_EQ(cache->CachedTextureCount(), 0u);
+}
+
+namespace {
+
+// Records every offscreen request, then defers to the real cache.
+class CountingRenderTargetCache final : public RenderTargetCache {
+ public:
+  struct Request {
+    bool msaa = false;
+    bool depth_stencil = false;
+  };
+
+  using RenderTargetCache::RenderTargetCache;
+
+  RenderTarget CreateOffscreen(
+      const Context& context,
+      ISize size,
+      int mip_count,
+      std::string_view label = "Offscreen",
+      RenderTarget::AttachmentConfig color_attachment_config =
+          RenderTarget::kDefaultColorAttachmentConfig,
+      std::optional<RenderTarget::AttachmentConfig> stencil_attachment_config =
+          RenderTarget::kDefaultStencilAttachmentConfig,
+      const std::shared_ptr<Texture>& existing_color_texture = nullptr,
+      const std::shared_ptr<Texture>& existing_depth_stencil_texture = nullptr,
+      std::optional<PixelFormat> target_pixel_format = std::nullopt) override {
+    requests.push_back(
+        {.msaa = false,
+         .depth_stencil = stencil_attachment_config.has_value()});
+    return RenderTargetCache::CreateOffscreen(
+        context, size, mip_count, label, color_attachment_config,
+        stencil_attachment_config, existing_color_texture,
+        existing_depth_stencil_texture, target_pixel_format);
+  }
+
+  RenderTarget CreateOffscreenMSAA(
+      const Context& context,
+      ISize size,
+      int mip_count,
+      std::string_view label = "Offscreen MSAA",
+      RenderTarget::AttachmentConfigMSAA color_attachment_config =
+          RenderTarget::kDefaultColorAttachmentConfigMSAA,
+      std::optional<RenderTarget::AttachmentConfig> stencil_attachment_config =
+          RenderTarget::kDefaultStencilAttachmentConfig,
+      const std::shared_ptr<Texture>& existing_color_msaa_texture = nullptr,
+      const std::shared_ptr<Texture>& existing_color_resolve_texture = nullptr,
+      const std::shared_ptr<Texture>& existing_depth_stencil_texture = nullptr,
+      std::optional<PixelFormat> target_pixel_format = std::nullopt) override {
+    requests.push_back(
+        {.msaa = true, .depth_stencil = stencil_attachment_config.has_value()});
+    return RenderTargetCache::CreateOffscreenMSAA(
+        context, size, mip_count, label, color_attachment_config,
+        stencil_attachment_config, existing_color_msaa_texture,
+        existing_color_resolve_texture, existing_depth_stencil_texture,
+        target_pixel_format);
+  }
+
+  std::vector<Request> requests;
+};
+
+// A single cover draw that needs no pipeline.
+class CoverContents final : public Contents {
+ public:
+  explicit CoverContents(Rect coverage) : coverage_(coverage) {}
+
+  bool Render(const ContentContext& renderer,
+              const Entity& entity,
+              RenderPass& pass) const override {
+    return true;
+  }
+
+  std::optional<Rect> GetCoverage(const Entity& entity) const override {
+    return coverage_.TransformBounds(entity.GetTransform());
+  }
+
+ private:
+  Rect coverage_;
+};
+
+}  // namespace
+
+// Red before EN52: the color-source inputs of the SDF fallback were
+// snapshotted multisampled with depth/stencil (84 instead of 12 bytes per
+// pixel). The API to request otherwise did not exist.
+TEST_F(CanvasFailureTest, SingleSampleSnapshotRequestsNoDepthStencil) {
+  auto cache = std::make_shared<CountingRenderTargetCache>(
+      context->GetResourceAllocator());
+  ContentContext renderer(context, nullptr, cache);
+  ON_CALL(*capabilities_mock_, SupportsOffscreenMSAA())
+      .WillByDefault(::testing::Return(true));
+
+  auto input = FilterInput::Make(
+      std::make_shared<CoverContents>(Rect::MakeXYWH(10, 10, 40, 30)),
+      /*msaa_enabled=*/false, /*depth_stencil_enabled=*/false);
+  Entity entity;
+  ASSERT_TRUE(input->GetSnapshot("Test", renderer, entity).has_value());
+  ASSERT_EQ(cache->requests.size(), 1u);
+  EXPECT_FALSE(cache->requests[0].msaa);
+  EXPECT_FALSE(cache->requests[0].depth_stencil);
+
+  // The defaults are unchanged: multisampled with depth/stencil.
+  auto default_input = FilterInput::Make(
+      std::make_shared<CoverContents>(Rect::MakeXYWH(10, 10, 40, 30)));
+  ASSERT_TRUE(default_input->GetSnapshot("Test", renderer, entity).has_value());
+  ASSERT_EQ(cache->requests.size(), 2u);
+  EXPECT_TRUE(cache->requests[1].msaa);
+  EXPECT_TRUE(cache->requests[1].depth_stencil);
 }
 
 // A Canvas that is destroyed without EndReplay still returns its leases.
@@ -805,6 +916,60 @@ TEST_P(AiksTest, BlendModeCompatibilityWithSDFRendering) {
               Canvas::IsCompatibleWithSDFRendering(paint))
         << "Failure for BlendMode: " << BlendModeToString(blend_mode);
   }
+}
+
+// EN52 (a): a color-source rect that contains every visible pixel needs no
+// SDF mask. Red before EN52 (the predicate did not exist; every color-source
+// SDF rect took the masked kSrcIn path).
+TEST(CanvasTest, SDFFillRectContainingClipNeedsNoMask) {
+  const auto rect = [](Rect r) {
+    return UberSDFParameters::MakeRect(Color::White(), r, std::nullopt);
+  };
+  const Rect clip = Rect::MakeLTRB(0, 0, 100, 60);
+  const Point origin;
+
+  // Exactly the clip: every pixel center is half a pixel inside the rect.
+  EXPECT_TRUE(
+      Canvas::SDFFillRectContainsClip(rect(clip), Matrix(), clip, origin));
+  // Larger than the clip, under a scale and translation.
+  EXPECT_TRUE(Canvas::SDFFillRectContainsClip(
+      rect(Rect::MakeLTRB(-5, -5, 30, 20)),
+      Matrix::MakeTranslation({10, 10, 0}) * Matrix::MakeScale({4, 4, 1}), clip,
+      origin));
+  // A 90 degree rotation keeps the rect axis aligned.
+  EXPECT_TRUE(Canvas::SDFFillRectContainsClip(
+      rect(Rect::MakeLTRB(-10, -110, 70, 10)),
+      Matrix::MakeRotationZ(Degrees(90)), clip, origin));
+
+  // An edge inside the clip.
+  EXPECT_FALSE(Canvas::SDFFillRectContainsClip(
+      rect(Rect::MakeLTRB(0, 0, 99, 60)), Matrix(), clip, origin));
+  // A fractional clip edge touches a pixel whose center is too close to the
+  // rect's edge.
+  EXPECT_FALSE(Canvas::SDFFillRectContainsClip(
+      rect(Rect::MakeLTRB(0.4f, 0, 100, 60)), Matrix(),
+      Rect::MakeLTRB(0.5f, 0, 100, 60), origin));
+  // A rotated rect.
+  EXPECT_FALSE(Canvas::SDFFillRectContainsClip(
+      rect(Rect::MakeLTRB(-1000, -1000, 1000, 1000)),
+      Matrix::MakeRotationZ(Degrees(30)), clip, origin));
+  // A stroked rect has an inner edge.
+  EXPECT_FALSE(Canvas::SDFFillRectContainsClip(
+      UberSDFParameters::MakeRect(Color::White(),
+                                  Rect::MakeLTRB(-10, -10, 200, 200),
+                                  StrokeParameters{.width = 4}),
+      Matrix(), clip, origin));
+  // Rounded shapes always mask.
+  EXPECT_FALSE(Canvas::SDFFillRectContainsClip(
+      UberSDFParameters::MakeRoundedRect(
+          Color::White(), Rect::MakeLTRB(-10, -10, 200, 200),
+          RoundingRadii::MakeRadius(8), std::nullopt),
+      Matrix(), clip, origin));
+  // Coverage recorded from a nested pass's origin must be contained too.
+  EXPECT_FALSE(Canvas::SDFFillRectContainsClip(rect(clip), Matrix(), clip,
+                                               Point(20, 0)));
+  EXPECT_FALSE(
+      Canvas::SDFFillRectContainsClip(rect(clip), Matrix(), Rect(), origin));
 }
 
 TEST(CanvasTest, NonAntialiasedPaintIncompatibleWithSDFRendering) {
