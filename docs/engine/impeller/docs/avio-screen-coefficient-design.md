@@ -1,9 +1,11 @@
 # Avio Screen coefficient design
 
-Status: implemented source slice of ENDGOAL-PLAN EG-2, awaiting engine build,
-GPU evidence and visual review. This note records the design for review; it
-does not claim the required pre-implementation DN review occurred. The full
-EG-2 AA contract and its TL-3 harness prerequisite remain incomplete.
+Status: implemented Screen source slice of ENDGOAL-PLAN EG-2, with native engine
+build and GPU execution still unverified. The user waived the visual-comparison
+campaign for this iteration. This note records the design for review; it does
+not claim the pre-implementation DN review occurred. The combined coverage
+policy and its current execution gates are documented in AVIO_PATCHES.md,
+patch 55; TL-3 comparison tooling is outside this Screen slice.
 
 ## Decision owners and scope
 
@@ -25,8 +27,9 @@ row is `{1, 0, 1, 0, -1}` and Screen is its own inverse when texture/vertex
 inputs exchange roles. The GPU fixtures cover both representations instead
 of folding a solid-color filter through `Color::Blend` on the CPU.
 
-No public ABI, SDK contract, host negotiation, sample policy, pool key or
-depth/stencil policy changes in this slice. Existing render/encode/submit
+The Screen slice alone changes no public ABI, SDK contract, host negotiation,
+sample policy, pool key or depth/stencil policy. The separately integrated
+patch 55 adds an explicit coverage policy and ABI v8. Existing render/encode/submit
 failure propagation remains intact. The separately adapted upstream
 flutter#193306 and #193176 backports prevent single-sample feedback and keep
 shared-backdrop content depth; they do not enable a 1x policy. EN48's Flip
@@ -37,9 +40,10 @@ The shared boundary is a constant comparison, with no new runtime allocation,
 input-path work, cross-process GPU wait, release timer or buffer custody.
 Ordinary Screen draws stop allocating advanced-blend source snapshots and,
 on non-fetch backends, stop requesting backdrop flips. First-use pipeline
-creation can still allocate: prewarm and the required no-first-frame-compile
-measurement are outstanding. This slice does not claim the entire engine
-raster path is allocation-free.
+creation can still allocate. Patch 55 prewarms common coverage pipelines and
+reports successful first-use compiles from raster-frame cache misses; device
+measurements and application-specific compilation remain unverified. This
+slice does not claim the entire engine raster path is allocation-free.
 
 ## Pixel operator and acceptance
 
@@ -66,8 +70,10 @@ normal clip depth and draw ordering; production routing has no test switch.
 
 The comparison's clip mask is not TL-3's general aliased-versus-msaa4 edge
 mask. It is evidence about this specific operator change. ENDGOAL-PLAN §1.6
-still requires byte-identical pixels outside its edge mask, a maximum delta
-of 1 inside it, and user-approved captures for any larger or intended change.
+describes byte-identical pixels outside its edge mask, a maximum delta of 1
+inside it, and approved captures for any larger or intended change. The user
+waived this comparison campaign for the current iteration; that waiver does
+not establish Screen parity or approve a particular changed pixel.
 Passing a comparison test that detects differences does not approve them.
 The 1/255 tolerances in the new CPU-oracle GPU fixtures test the new Screen
 semantics, not parity with the previous path.
@@ -102,39 +108,39 @@ skipped [laptop]"; backend/setup skips do not satisfy the gate. Run the full
 engine suites and the preserved-target multisampling regression too.
 
 TL-3's headless Linux Vulkan screenshotter, SwiftShader target and strict
-edge-mask diff tooling are not implemented by this patch. The stock Linux
-golden stub skips tests and supplies no look proof. TL-3 must run the Screen
-golden and site replicas, plus the EN50-reverted matrix, before the larger
-AA program can satisfy its acceptance gates.
+edge-mask diff tooling are not implemented by this Screen patch. The stock
+Linux golden stub skips tests and supplies no look proof. The comparison
+campaign, when run in a future iteration, includes the Screen golden and site
+replicas plus the EN50-reverted matrix. It was waived for this iteration.
 
 On the laptop, capture Spaces in light and dark at scales 1, 1.25 and 2 with
 the plan's `scripts/dev-screenshot.sh` procedure, against the frozen L0
-references. Preserve candidate/base images and diffs, include the real card
-clip and glow edges, and obtain the user's visual approval for changed pixels.
-Do not merge or package this candidate as a validated look change before
-that evidence and review. No laptop capture or approval is claimed here.
+references. Preserve candidate/base images and diffs and include the real card
+clip and glow edges for review of changed pixels. This is the deferred
+comparison procedure, not a required user approval step for the current
+iteration. No laptop capture, pixel parity or look approval is claimed here.
 
-## Remaining coverage prerequisites and local evidence
+## Starting coverage prerequisites and current local evidence
 
-Current depth/stencil consumers remain: Canvas clip-depth ordering and replay,
-ClipContents difference/intersection clips, InlinePassContext depth/stencil
-requirements, stencil-then-cover fills, and overdraw-preventing geometry.
-The fractional-rect 0.124-pixel clip rule assumes the existing sample grid.
-Patch 45's foreground masks use the default MSAA snapshot request. Explicit
-layer-versus-coverage sample requests, coverage clips/paths, bounded coverage
-and layer regions, classifier reports, pool keys and prewarm are still needed
-before lowering root/layer samples or removing depth/stencil. No such policy
-change is enabled here.
+Before patch 55, depth/stencil consumers included Canvas clip-depth ordering
+and replay, difference/intersection clips, InlinePassContext attachments,
+stencil-then-cover fills and overdraw-preventing geometry. Fractional-rect
+rounding and patch 45's default MSAA snapshot request also coupled coverage to
+layer samples. Patch 55 retains the legacy route and adds explicit sample
+requests, native4 masks, bounded coverage/layer regions, tiled color islands,
+common-pipeline prewarm and typed resource reports for its opt-in policy.
+The Screen coefficient slice alone does not lower samples or remove attachments.
 
 Local source checks compile the production coefficient header and
 `Color::Blend` in a standalone C++20 oracle (50 color/decal cases), check
 changed-line clang-format and whitespace, and reverse-check the original
 EN50 patch. They are not an Impeller build or GN/GPU result. This checkout
-lacks full engine dependencies, generated shader headers, a configured GN
-output and a GPU. The newly authored engine fixtures have not been built or
-executed here; engine, golden, first-use and laptop gates above remain open.
-The patch-inventory script passes its eight new Screen checks but retains the
-base's miss for the Animator global-frame-clock pattern; `animator.cc` is
-unchanged by this slice. The standalone compiler also reports the existing
-`Color::Blend` exhaustiveness warning. Neither is reported as a green full
-engine build.
+still lacks a dependency-complete configured GN build and a GPU. Actual
+shader headers have now been generated with the official impellerc tool for
+the combined integration's source checks. The named Screen GPU fixtures have
+not been built or executed here; native engine/GPU and first-use measurements
+remain unverified, and laptop comparisons were waived. The current
+patch-inventory script passes all checks, including the corrected existing
+Animator pattern. The standalone compiler also reports the existing
+`Color::Blend` exhaustiveness warning. Targeted source checks and the static
+inventory are not a green full engine build.

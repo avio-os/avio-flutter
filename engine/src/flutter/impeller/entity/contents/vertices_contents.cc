@@ -106,9 +106,22 @@ bool VerticesSimpleBlendContents::Render(const ContentContext& renderer,
   }
 
   std::shared_ptr<Texture> texture;
+  std::optional<Snapshot> lazy_snapshot;
   if (blend_mode != BlendMode::kDst) {
     if (!texture_) {
-      texture = lazy_texture_(renderer);
+      lazy_snapshot = lazy_texture_(renderer);
+      if (lazy_snapshot) {
+        // DrawVertices' generated UVs address the complete physical image.
+        // The producer must normalize a cropped bank region to an exact
+        // texture; silently dropping its crop samples unrelated bank pixels.
+        if (!lazy_snapshot->texture ||
+            lazy_snapshot->GetTextureRect() !=
+                Rect::MakeSize(lazy_snapshot->texture->GetSize())) {
+          VALIDATION_LOG << "DrawVertices requires an exact lazy texture";
+          return false;
+        }
+        texture = lazy_snapshot->texture;
+      }
     } else {
       texture = texture_;
     }
@@ -138,6 +151,11 @@ bool VerticesSimpleBlendContents::Render(const ContentContext& renderer,
       inverse_matrix_, renderer, entity, pass);
   if (geometry_result.vertex_buffer.vertex_count == 0) {
     return true;
+  }
+  if (lazy_snapshot) {
+    // Recording may outlive the callback's borrowed result. Texture custody
+    // protects destruction; this separate owner also prevents region reuse.
+    pass.RetainResource(lazy_snapshot->resource_owner);
   }
   FML_DCHECK(geometry_result.mode == GeometryResult::Mode::kNormal);
 

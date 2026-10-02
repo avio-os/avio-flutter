@@ -1023,6 +1023,26 @@ void FirstPassDispatcher::saveLayer(const DlRect& bounds,
         data.last_backdrop = shared_backdrop;
       }
     }
+    if (renderer_.UsesAvioCoverage()) {
+      auto& data = backdrop_data_[backdrop_id.value()];
+      const Rect output = bounds.TransformBounds(matrix_).IntersectionOrEmpty(
+          cull_rect_state_.back());
+      flutter::DlIRect input;
+      // The first pass cannot infer the affected bounds through an enclosing
+      // image filter. Freeze the complete prefix rather than omit its input.
+      if (has_image_filter_ || output.IsMaximum() || !output.IsFinite() ||
+          !backdrop->get_input_device_bounds(flutter::DlIRect::RoundOut(output),
+                                             matrix_, input)) {
+        data.requires_full_backdrop = true;
+      } else if (!input.IsEmpty()) {
+        const Rect needed = Rect::MakeLTRB(input.GetLeft(), input.GetTop(),
+                                           input.GetRight(), input.GetBottom());
+        data.required_input_coverage =
+            data.required_input_coverage
+                ? data.required_input_coverage->Union(needed)
+                : needed;
+      }
+    }
   }
 
   // This dispatcher does not track enough state to accurately compute
@@ -1249,7 +1269,8 @@ std::shared_ptr<Texture> DisplayListToTexture(
       impeller::RenderTargetAllocator(
           context.GetContext()->GetResourceAllocator());
   impeller::RenderTarget target;
-  if (context.GetContext()->GetCapabilities()->SupportsOffscreenMSAA() &&
+  if (!context.GetContentContext().UsesAvioCoverage() &&
+      context.GetContext()->GetCapabilities()->SupportsOffscreenMSAA() &&
       PixelFormatSupportsMSAA(target_pixel_format)) {
     target = render_target_allocator.CreateOffscreenMSAA(
         *context.GetContext(),  // context

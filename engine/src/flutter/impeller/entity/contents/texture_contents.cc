@@ -44,6 +44,10 @@ void TextureContents::SetTexture(std::shared_ptr<Texture> texture) {
   texture_ = std::move(texture);
 }
 
+void TextureContents::SetResourceOwner(std::shared_ptr<void> owner) {
+  resource_owner_ = std::move(owner);
+}
+
 std::shared_ptr<Texture> TextureContents::GetTexture() const {
   return texture_;
 }
@@ -79,23 +83,31 @@ std::optional<Snapshot> TextureContents::RenderToSnapshot(
     const ContentContext& renderer,
     const Entity& entity,
     const SnapshotOptions& options) const {
-  // Passthrough textures that have simple rectangle paths and complete source
-  // rects.
+  // A rectangle snapshot retains its exact source view and physical texture.
   auto bounds = destination_rect_;
   auto opacity = GetOpacity();
   if (coverage_mode_ == flutter::DlCoverageMode::kPlatformDefault &&
-      source_rect_ == Rect::MakeSize(texture_->GetSize()) &&
+      !options.exact_texture_extent && texture_ && !source_rect_.IsEmpty() &&
+      Rect::MakeSize(texture_->GetSize()).Contains(source_rect_) &&
+      (resource_owner_ ||
+       source_rect_ == Rect::MakeSize(texture_->GetSize())) &&
       (opacity >= 1 - kEhCloseEnough || defer_applying_opacity_)) {
-    auto scale = Vector2(bounds.GetSize() / Size(texture_->GetSize()));
-    return Snapshot{.texture = texture_,
-                    .transform = entity.GetTransform() *
-                                 Matrix::MakeTranslation(bounds.GetOrigin()) *
-                                 Matrix::MakeScale(scale),
-                    .sampler_descriptor = options.sampler_descriptor.value_or(
-                        sampler_descriptor_),
-                    .opacity = opacity,
-                    .needs_rasterization_for_runtime_effects =
-                        snapshots_need_rasterization_for_runtime_effects_};
+    auto scale = Vector2(bounds.GetSize() / source_rect_.GetSize());
+    return Snapshot{
+        .texture = texture_,
+        .transform = entity.GetTransform() *
+                     Matrix::MakeTranslation(bounds.GetOrigin()) *
+                     Matrix::MakeScale(scale) *
+                     Matrix::MakeTranslation(-source_rect_.GetOrigin()),
+        .sampler_descriptor =
+            options.sampler_descriptor.value_or(sampler_descriptor_),
+        .opacity = opacity,
+        .needs_rasterization_for_runtime_effects =
+            snapshots_need_rasterization_for_runtime_effects_,
+        .texture_rect = source_rect_ == Rect::MakeSize(texture_->GetSize())
+                            ? std::nullopt
+                            : std::optional<Rect>(source_rect_),
+        .resource_owner = resource_owner_};
   }
   return Contents::RenderToSnapshot(
       renderer, entity,
@@ -105,7 +117,10 @@ std::optional<Snapshot> TextureContents::RenderToSnapshot(
        .msaa_enabled = true,
        .mip_count = options.mip_count,
        .label = options.label,
-       .coverage_expansion = options.coverage_expansion});
+       .coverage_expansion = options.coverage_expansion,
+       .pixel_aligned = options.pixel_aligned,
+       .depth_stencil_enabled = options.depth_stencil_enabled,
+       .exact_texture_extent = options.exact_texture_extent});
 }
 
 bool TextureContents::Render(const ContentContext& renderer,
@@ -241,6 +256,7 @@ bool TextureContents::Render(const ContentContext& renderer,
         renderer.GetContext()->GetSamplerLibrary()->GetSampler(
             sampler_descriptor_));
   }
+  pass.RetainResource(resource_owner_);
   return pass.Draw().ok();
 }
 

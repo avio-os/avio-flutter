@@ -6,17 +6,52 @@
 
 #include <optional>
 
+#include "impeller/renderer/render_target.h"
+
 namespace impeller {
+
+Snapshot Snapshot::FromRenderTarget(
+    const RenderTarget& target,
+    Matrix transform,
+    std::optional<SamplerDescriptor> sampler,
+    Scalar opacity,
+    bool needs_rasterization_for_runtime_effects) {
+  Snapshot snapshot;
+  snapshot.texture = target.GetRenderTargetTexture();
+  snapshot.transform = transform;
+  if (target.GetContentRect()) {
+    snapshot.texture_rect = Rect::Make(*target.GetContentRect());
+    snapshot.transform = transform * Matrix::MakeTranslation(
+                                         -snapshot.texture_rect->GetOrigin());
+  }
+  if (sampler) {
+    snapshot.sampler_descriptor = *sampler;
+  }
+  snapshot.opacity = opacity;
+  snapshot.needs_rasterization_for_runtime_effects =
+      needs_rasterization_for_runtime_effects;
+  snapshot.resource_owner = target.GetResourceOwner();
+  return snapshot;
+}
+
+Rect Snapshot::GetTextureRect() const {
+  return texture_rect.value_or(texture ? Rect::MakeSize(texture->GetSize())
+                                       : Rect());
+}
 
 std::optional<Rect> Snapshot::GetCoverage() const {
   if (!texture) {
     return std::nullopt;
   }
-  return Rect::MakeSize(texture->GetSize()).TransformBounds(transform);
+  const auto rect = GetTextureRect();
+  if (rect.IsEmpty() || !Rect::MakeSize(texture->GetSize()).Contains(rect)) {
+    return std::nullopt;
+  }
+  return rect.TransformBounds(transform);
 }
 
 std::optional<Matrix> Snapshot::GetUVTransform() const {
-  if (!texture || texture->GetSize().IsEmpty()) {
+  if (!texture || texture->GetSize().IsEmpty() || !GetCoverage()) {
     return std::nullopt;
   }
   return Matrix::MakeScale(1 / Vector2(texture->GetSize())) *

@@ -66,8 +66,8 @@ std::optional<Entity> BorderMaskBlurFilterContents::RenderFilter(
     return std::nullopt;
   }
 
-  auto input_snapshot =
-      inputs[0]->GetSnapshot("BorderMaskBlur", renderer, entity);
+  auto input_snapshot = inputs[0]->GetSnapshotWithExactTextureExtent(
+      "BorderMaskBlur", renderer, entity);
   if (!input_snapshot.has_value()) {
     return std::nullopt;
   }
@@ -124,6 +124,7 @@ std::optional<Entity> BorderMaskBlurFilterContents::RenderFilter(
         renderer.GetContext()->GetSamplerLibrary()->GetSampler({});
     FS::BindTextureSampler(pass, input_snapshot->texture, sampler);
 
+    pass.RetainResource(input_snapshot->resource_owner);
     return pass.Draw().ok();
   };
 

@@ -12,6 +12,7 @@
 #include "impeller/entity/entity.h"
 #include "impeller/entity/geometry/vertices_geometry.h"
 #include "impeller/geometry/color.h"
+#include "impeller/renderer/snapshot.h"
 
 namespace impeller {
 
@@ -24,7 +25,7 @@ class VerticesSimpleBlendContents final : public Contents {
   ~VerticesSimpleBlendContents() override;
 
   using LazyTexture =
-      std::function<std::shared_ptr<Texture>(const ContentContext& renderer)>;
+      std::function<std::optional<Snapshot>(const ContentContext& renderer)>;
 
   void SetGeometry(std::shared_ptr<VerticesGeometry> geometry);
 

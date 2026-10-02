@@ -51,12 +51,14 @@ std::optional<Entity> SrgbToLinearFilterContents::RenderFilter(
     pass.SetPipeline(renderer.GetSrgbToLinearFilterPipeline(options));
 
     auto size = input_snapshot->texture->GetSize();
+    auto uv_rect =
+        Rect::MakeSize(size).Project(input_snapshot->GetTextureRect());
 
     std::array<VS::PerVertexData, 4> vertices = {
-        VS::PerVertexData{Point(0, 0)},
-        VS::PerVertexData{Point(1, 0)},
-        VS::PerVertexData{Point(0, 1)},
-        VS::PerVertexData{Point(1, 1)},
+        VS::PerVertexData{uv_rect.GetLeftTop()},
+        VS::PerVertexData{uv_rect.GetRightTop()},
+        VS::PerVertexData{uv_rect.GetLeftBottom()},
+        VS::PerVertexData{uv_rect.GetRightBottom()},
     };
 
     auto& data_host_buffer = renderer.GetTransientsDataBuffer();
@@ -80,6 +82,7 @@ std::optional<Entity> SrgbToLinearFilterContents::RenderFilter(
     FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
     VS::BindFrameInfo(pass, data_host_buffer.EmplaceUniform(frame_info));
 
+    pass.RetainResource(input_snapshot->resource_owner);
     return pass.Draw().ok();
   };
 

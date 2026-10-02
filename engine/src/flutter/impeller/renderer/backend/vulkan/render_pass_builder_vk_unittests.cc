@@ -187,13 +187,39 @@ TEST(RenderPassBuilder, IncomingDependencyWithoutDepthStencilIsColorOnly) {
   ASSERT_EQ(dependencies.size(), 3u);
   EXPECT_EQ(dependencies[0].srcStageMask,
             VkPipelineStageFlags{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT});
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT});
   EXPECT_EQ(
       dependencies[0].dstStageMask,
       VkPipelineStageFlags{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT});
   EXPECT_EQ(dependencies[0].srcAccessMask,
             VkAccessFlags{VK_ACCESS_SHADER_READ_BIT |
-                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT});
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                          VK_ACCESS_TRANSFER_READ_BIT |
+                          VK_ACCESS_TRANSFER_WRITE_BIT});
+}
+
+TEST(RenderPassBuilder, ReusedTileResolveOrdersTransferReadsAndWrites) {
+  auto context = MockVulkanContextBuilder().Build();
+  RenderPassBuilderVK builder;
+  builder.SetColorAttachment(0, PixelFormat::kR8G8B8A8UNormInt,
+                             SampleCount::kCount4, LoadAction::kClear,
+                             StoreAction::kMultisampleResolve);
+  ASSERT_TRUE(builder.Build(context->GetDevice()));
+  const auto& dependencies = GetLastRenderPassDependencies();
+  ASSERT_EQ(dependencies.size(), 3u);
+  const auto& incoming = dependencies[0];
+  const auto& outgoing = dependencies[2];
+  EXPECT_NE(incoming.srcStageMask & VK_PIPELINE_STAGE_TRANSFER_BIT, 0u);
+  EXPECT_NE(incoming.srcAccessMask & VK_ACCESS_TRANSFER_READ_BIT, 0u);
+  EXPECT_NE(incoming.srcAccessMask & VK_ACCESS_TRANSFER_WRITE_BIT, 0u);
+  EXPECT_NE(outgoing.dstStageMask & VK_PIPELINE_STAGE_TRANSFER_BIT, 0u);
+  EXPECT_NE(outgoing.dstAccessMask & VK_ACCESS_TRANSFER_READ_BIT, 0u);
+  EXPECT_NE(outgoing.dstAccessMask & VK_ACCESS_TRANSFER_WRITE_BIT, 0u);
+  // Transfer copies can use different source/destination pixel coordinates;
+  // framebuffer-local BY_REGION dependencies would be insufficient.
+  EXPECT_EQ(incoming.dependencyFlags & VK_DEPENDENCY_BY_REGION_BIT, 0u);
+  EXPECT_EQ(outgoing.dependencyFlags & VK_DEPENDENCY_BY_REGION_BIT, 0u);
 }
 
 TEST(RenderPassBuilder, CreatesRenderPassWithOnlyStencil) {

@@ -35,6 +35,7 @@ impeller_component("vulkan_unittests") {
     "pipeline_cache_data_vk_unittests.cc",
     "render_pass_builder_vk_unittests.cc",
     "render_pass_cache_unittests.cc",
+    "render_pass_region_policy_vk_unittests.cc",
     "render_pass_vk_unittests.cc",
     "resource_manager_vk_unittests.cc",
     "surface_context_vk_unittests.cc",

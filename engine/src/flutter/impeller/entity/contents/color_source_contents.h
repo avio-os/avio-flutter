@@ -9,6 +9,7 @@
 #include "impeller/entity/contents/clip_contents.h"
 #include "impeller/entity/contents/content_context.h"
 #include "impeller/entity/contents/contents.h"
+#include "impeller/entity/contents/coverage_mask_contents.h"
 #include "impeller/entity/contents/pipelines.h"
 #include "impeller/entity/geometry/geometry.h"
 #include "impeller/entity/geometry/rect_geometry.h"
@@ -115,17 +116,30 @@ class ColorSourceContents : public Contents {
                            const BindFragmentCallback& bind_fragment_callback,
                            bool force_stencil = false,
                            const CreateGeometryCallback& create_geom_callback =
-                               DefaultCreateGeometryCallback) {
+                               DefaultCreateGeometryCallback,
+                           bool allow_coverage_mask_cache = true) {
     auto options = OptionsFromPassAndEntity(pass, entity);
 
     GeometryResult::Mode geometry_mode = geometry->GetResultMode();
     bool do_cover_draw = false;
     Rect cover_area = {};
 
+    auto cached_mask = allow_coverage_mask_cache
+                           ? CoverageMaskContents::TryPrepareFillPath(
+                                 renderer, entity, pass, *geometry)
+                           : PreparedFillMaskStatus::kNotApplicable;
+    if (cached_mask == PreparedFillMaskStatus::kFailed) {
+      return false;
+    }
+    if (cached_mask == PreparedFillMaskStatus::kEmpty) {
+      return true;
+    }
+
     bool is_stencil_then_cover =
         geometry_mode == GeometryResult::Mode::kNonZero ||
         geometry_mode == GeometryResult::Mode::kEvenOdd;
-    if (!is_stencil_then_cover && force_stencil) {
+    if (!is_stencil_then_cover &&
+        (force_stencil || cached_mask == PreparedFillMaskStatus::kPrepared)) {
       geometry_mode = GeometryResult::Mode::kNonZero;
       is_stencil_then_cover = true;
     }
@@ -135,45 +149,47 @@ class ColorSourceContents : public Contents {
 
       /// Stencil preparation draw.
 
-      GeometryResult stencil_geometry_result =
-          geometry->GetPositionBuffer(renderer, entity, pass);
-      if (stencil_geometry_result.vertex_buffer.vertex_count == 0u) {
-        return true;
-      }
-      pass.SetVertexBuffer(std::move(stencil_geometry_result.vertex_buffer));
-      options.primitive_type = stencil_geometry_result.type;
+      if (cached_mask != PreparedFillMaskStatus::kPrepared) {
+        GeometryResult stencil_geometry_result =
+            geometry->GetPositionBuffer(renderer, entity, pass);
+        if (stencil_geometry_result.vertex_buffer.vertex_count == 0u) {
+          return true;
+        }
+        pass.SetVertexBuffer(std::move(stencil_geometry_result.vertex_buffer));
+        options.primitive_type = stencil_geometry_result.type;
 
-      options.blend_mode = BlendMode::kDst;
-      switch (stencil_geometry_result.mode) {
-        case GeometryResult::Mode::kNonZero:
-          pass.SetCommandLabel("Stencil preparation (NonZero)");
-          options.stencil_mode =
-              ContentContextOptions::StencilMode::kStencilNonZeroFill;
-          break;
-        case GeometryResult::Mode::kEvenOdd:
-          pass.SetCommandLabel("Stencil preparation (EvenOdd)");
-          options.stencil_mode =
-              ContentContextOptions::StencilMode::kStencilEvenOddFill;
-          break;
-        default:
-          if (force_stencil) {
+        options.blend_mode = BlendMode::kDst;
+        switch (stencil_geometry_result.mode) {
+          case GeometryResult::Mode::kNonZero:
             pass.SetCommandLabel("Stencil preparation (NonZero)");
             options.stencil_mode =
                 ContentContextOptions::StencilMode::kStencilNonZeroFill;
             break;
-          }
-          FML_UNREACHABLE();
-      }
-      pass.SetPipeline(renderer.GetClipPipeline(options));
-      ClipPipeline::VertexShader::FrameInfo clip_frame_info;
-      clip_frame_info.depth = entity.GetShaderClipDepth();
-      clip_frame_info.mvp = stencil_geometry_result.transform;
-      ClipPipeline::VertexShader::BindFrameInfo(
-          pass,
-          renderer.GetTransientsDataBuffer().EmplaceUniform(clip_frame_info));
+          case GeometryResult::Mode::kEvenOdd:
+            pass.SetCommandLabel("Stencil preparation (EvenOdd)");
+            options.stencil_mode =
+                ContentContextOptions::StencilMode::kStencilEvenOddFill;
+            break;
+          default:
+            if (force_stencil) {
+              pass.SetCommandLabel("Stencil preparation (NonZero)");
+              options.stencil_mode =
+                  ContentContextOptions::StencilMode::kStencilNonZeroFill;
+              break;
+            }
+            FML_UNREACHABLE();
+        }
+        pass.SetPipeline(renderer.GetClipPipeline(options));
+        ClipPipeline::VertexShader::FrameInfo clip_frame_info;
+        clip_frame_info.depth = entity.GetShaderClipDepth();
+        clip_frame_info.mvp = stencil_geometry_result.transform;
+        ClipPipeline::VertexShader::BindFrameInfo(
+            pass,
+            renderer.GetTransientsDataBuffer().EmplaceUniform(clip_frame_info));
 
-      if (!pass.Draw().ok()) {
-        return false;
+        if (!pass.Draw().ok()) {
+          return false;
+        }
       }
 
       /// Cover draw.

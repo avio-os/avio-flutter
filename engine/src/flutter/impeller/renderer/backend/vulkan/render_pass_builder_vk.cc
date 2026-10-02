@@ -43,7 +43,8 @@ RenderPassBuilderVK& RenderPassBuilderVK::SetColorAttachment(
     StoreAction store_action,
     vk::ImageLayout current_layout,
     bool is_swapchain,
-    std::optional<vk::ImageLayout> preserved_resolve_layout) {
+    std::optional<vk::ImageLayout> preserved_resolve_layout,
+    std::optional<vk::ImageLayout> preserved_colour_layout) {
   vk::AttachmentDescription desc;
   desc.format = ToVKImageFormat(format);
   desc.samples = ToVKSampleCount(sample_count);
@@ -51,7 +52,13 @@ RenderPassBuilderVK& RenderPassBuilderVK::SetColorAttachment(
   desc.storeOp = ToVKAttachmentStoreOp(store_action, false);
   desc.stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
   desc.stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
-  if (load_action == LoadAction::kLoad) {
+  if (preserved_colour_layout) {
+    // A clear applies only within the render area, but an UNDEFINED initial
+    // layout would discard the entire image. Native multisample mask atlases
+    // retain samples outside this area without using a resolve attachment.
+    // Keep the clear load op and preserve those samples through the transition.
+    desc.initialLayout = *preserved_colour_layout;
+  } else if (load_action == LoadAction::kLoad) {
     desc.initialLayout = current_layout;
   } else {
     desc.initialLayout = vk::ImageLayout::eUndefined;
@@ -204,9 +211,12 @@ vk::UniqueRenderPass RenderPassBuilderVK::Build(
   deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
   deps[0].dstSubpass = 0u;
   deps[0].srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput |
-                         vk::PipelineStageFlagBits::eFragmentShader;
+                         vk::PipelineStageFlagBits::eFragmentShader |
+                         vk::PipelineStageFlagBits::eTransfer;
   deps[0].srcAccessMask = vk::AccessFlagBits::eShaderRead |
-                          vk::AccessFlagBits::eColorAttachmentWrite;
+                          vk::AccessFlagBits::eColorAttachmentWrite |
+                          vk::AccessFlagBits::eTransferRead |
+                          vk::AccessFlagBits::eTransferWrite;
   deps[0].dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
   deps[0].dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
   bool loads_existing_color =
@@ -235,7 +245,7 @@ vk::UniqueRenderPass RenderPassBuilderVK::Build(
     deps[0].dstAccessMask |= vk::AccessFlagBits::eDepthStencilAttachmentRead |
                              vk::AccessFlagBits::eDepthStencilAttachmentWrite;
   }
-  deps[0].dependencyFlags = kSelfDependencyFlags;
+  deps[0].dependencyFlags = {};
 
   // Self dependency for reading back the framebuffer, necessary for
   // programmable blend support / framebuffer fetch.
@@ -255,9 +265,12 @@ vk::UniqueRenderPass RenderPassBuilderVK::Build(
   deps[2].dstSubpass = VK_SUBPASS_EXTERNAL;
   deps[2].srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput;
   deps[2].srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
-  deps[2].dstStageMask = vk::PipelineStageFlagBits::eFragmentShader;
-  deps[2].dstAccessMask = vk::AccessFlagBits::eShaderRead;
-  deps[2].dependencyFlags = kSelfDependencyFlags;
+  deps[2].dstStageMask = vk::PipelineStageFlagBits::eFragmentShader |
+                         vk::PipelineStageFlagBits::eTransfer;
+  deps[2].dstAccessMask = vk::AccessFlagBits::eShaderRead |
+                          vk::AccessFlagBits::eTransferRead |
+                          vk::AccessFlagBits::eTransferWrite;
+  deps[2].dependencyFlags = {};
 
   vk::RenderPassCreateInfo render_pass_desc;
   render_pass_desc.setPAttachments(attachments.data());

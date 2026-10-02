@@ -32,7 +32,8 @@ EmbedderSurfaceVulkanImpeller::EmbedderSurfaceVulkanImpeller(
     std::shared_ptr<EmbedderExternalViewEmbedder> external_view_embedder,
     impeller::Flags impeller_flags,
     std::optional<EmbedderVulkanResourceLifecycleConfig>
-        resource_lifecycle_config)
+        resource_lifecycle_config,
+    std::optional<impeller::AvioAntialiasingConfig> avio_antialiasing_config)
     : vk_(fml::MakeRefCounted<vulkan::VulkanProcTable>(
           vulkan_dispatch_table.get_instance_proc_address)),
       vulkan_dispatch_table_(vulkan_dispatch_table),
@@ -58,6 +59,7 @@ EmbedderSurfaceVulkanImpeller::EmbedderSurfaceVulkanImpeller(
   settings.proc_address_callback =
       vulkan_dispatch_table.get_instance_proc_address;
   settings.flags = impeller_flags;
+  settings.avio_antialiasing_config = avio_antialiasing_config;
   if (resource_lifecycle_config.has_value()) {
     settings.swapchain_transients_limits =
         resource_lifecycle_config->transients_pool_limits;

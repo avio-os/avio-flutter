@@ -125,6 +125,20 @@ class MockVulkanContextBuilder {
     return *this;
   }
 
+  MockVulkanContextBuilder& SetImageFormatPropertiesCallback(
+      std::function<VkResult(VkPhysicalDevice,
+                             const VkPhysicalDeviceImageFormatInfo2*,
+                             VkImageFormatProperties2*)> callback) {
+    image_format_properties_callback_ = std::move(callback);
+    return *this;
+  }
+
+  MockVulkanContextBuilder& SetQueueSubmitCallback(
+      std::function<VkResult()> callback) {
+    queue_submit_callback_ = std::move(callback);
+    return *this;
+  }
+
   MockVulkanContextBuilder SetEmbedderData(
       const ContextVK::EmbedderData& embedder_data) {
     embedder_data_ = embedder_data;
@@ -178,6 +192,11 @@ class MockVulkanContextBuilder {
   std::function<void(VkPhysicalDevice device,
                      VkPhysicalDeviceProperties* physicalProperties)>
       physical_properties_callback_;
+  std::function<VkResult(VkPhysicalDevice,
+                         const VkPhysicalDeviceImageFormatInfo2*,
+                         VkImageFormatProperties2*)>
+      image_format_properties_callback_;
+  std::function<VkResult()> queue_submit_callback_;
   std::function<std::remove_pointer_t<PFN_vkAcquireNextImageKHR>>
       acquire_next_image_callback_;
   std::function<std::remove_pointer_t<PFN_vkWaitForFences>>
@@ -189,6 +208,15 @@ class MockVulkanContextBuilder {
 void SetSwapchainImageSize(ISize size);
 
 std::vector<VkImageMemoryBarrier>& GetImageMemoryBarriers(
+    VkCommandBuffer buffer);
+
+struct RecordedImageBarrier {
+  VkImageMemoryBarrier barrier;
+  VkPipelineStageFlags source_stage;
+  VkPipelineStageFlags destination_stage;
+};
+
+const std::vector<RecordedImageBarrier>& GetRecordedImageBarriers(
     VkCommandBuffer buffer);
 
 /// @brief Returns the viewports passed to `vkCmdSetViewport` calls on the

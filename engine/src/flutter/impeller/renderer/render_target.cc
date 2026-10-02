@@ -41,9 +41,22 @@ bool RenderTarget::SetRenderArea(IRect area) {
   return true;
 }
 
+bool RenderTarget::SetContentRect(IRect rect) {
+  if (rect.IsEmpty() ||
+      !IRect::MakeSize(GetRenderTargetSize()).Contains(rect)) {
+    return false;
+  }
+  content_rect_ = rect;
+  return true;
+}
+
 bool RenderTarget::IsValid() const {
   if (render_area_ &&
       !IRect::MakeSize(GetRenderTargetSize()).Contains(*render_area_)) {
+    return false;
+  }
+  if (content_rect_ &&
+      !IRect::MakeSize(GetRenderTargetSize()).Contains(*content_rect_)) {
     return false;
   }
   // Validate that there is a color attachment at zero index.

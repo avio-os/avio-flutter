@@ -70,6 +70,8 @@ class FillPathGeometry final : public FillPathSourceGeometry {
   explicit FillPathGeometry(const flutter::DlPath& path,
                             std::optional<Rect> inner_rect = std::nullopt);
 
+  const flutter::DlPath* GetFillPath() const override { return &path_; }
+
  protected:
   const PathSource& GetSource() const override;
 

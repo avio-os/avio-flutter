@@ -78,14 +78,21 @@ void TrackedObjectsVK::Track(
                    texture.get() == tracked_textures_.back().get())) {
     return;
   }
-  if (auto sem = texture->ConsumeAcquireSemaphore()) {
-    wait_semaphores_.push_back(std::move(*sem));
-  }
   tracked_textures_.emplace_back(texture);
 }
 
 std::vector<WaitSemaphore> TrackedObjectsVK::TakeWaitSemaphores() {
-  return std::move(wait_semaphores_);
+  std::vector<WaitSemaphore> waits;
+  for (const auto& texture : tracked_textures_) {
+    if (auto wait = texture->TakeAcquireSemaphoreForSubmit()) {
+      // One source may first be used as a transfer input, sampled seed, or
+      // colour attachment. Its producer wait covers every access in the batch.
+      wait->wait_stage = vk::PipelineStageFlagBits::eAllCommands;
+      wait->source = texture;
+      waits.push_back(std::move(*wait));
+    }
+  }
+  return waits;
 }
 
 std::vector<TrackedObjectsVK::PendingSignalSemaphoreVK>

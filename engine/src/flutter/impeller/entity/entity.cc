@@ -16,10 +16,13 @@
 namespace impeller {
 
 Entity Entity::FromSnapshot(const Snapshot& snapshot, BlendMode blend_mode) {
-  auto texture_rect = Rect::MakeSize(snapshot.texture->GetSize());
+  auto texture_rect = snapshot.GetTextureRect();
 
   auto contents = TextureContents::MakeRect(texture_rect);
   contents->SetTexture(snapshot.texture);
+  contents->SetResourceOwner(snapshot.resource_owner);
+  contents->SetStrictSourceRect(texture_rect !=
+                                Rect::MakeSize(snapshot.texture->GetSize()));
   contents->SetSamplerDescriptor(snapshot.sampler_descriptor);
   contents->SetSourceRect(texture_rect);
   contents->SetOpacity(snapshot.opacity);

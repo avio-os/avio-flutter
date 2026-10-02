@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "flutter/shell/platform/embedder/embedder.h"
+#include "impeller/core/antialiasing_policy.h"
 
 #include <cstddef>
 #include <set>
@@ -84,13 +85,62 @@ TEST(EmbedderProcTable, ReportsAvioSemanticCapabilities) {
       kFlutterAvioExtensionFeatureViewVisibility |
       kFlutterAvioExtensionFeatureAtomicCompositorMaterials |
       kFlutterAvioExtensionFeatureTypedRenderTargetAcquisition |
-      kFlutterAvioExtensionFeatureRenderDeadline;
-#if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && \
-    defined(IMPELLER_SUPPORTS_RENDERING)
-  expected_features |= kFlutterAvioExtensionFeatureResourceLifecycleConfig;
+      kFlutterAvioExtensionFeatureRenderDeadline |
+      kFlutterAvioExtensionFeatureAtomicWindowPreviews |
+      kFlutterAvioExtensionFeaturePreSubmitFailure;
+#if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
+  expected_features |= kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+                       kFlutterAvioExtensionFeatureRenderResourceReport;
+  if (impeller::kAvioCoveragePolicyImplemented) {
+    expected_features |= kFlutterAvioExtensionFeatureAntialiasingPolicy;
+  }
 #endif
   EXPECT_EQ(capabilities.supported_features, expected_features);
   EXPECT_NE(procs.SetAvioViewVisibility, nullptr);
+  EXPECT_NE(procs.RequestAvioRenderResourceReport, nullptr);
+  EXPECT_EQ(capabilities.continuous_supported_classes, 0u);
+}
+
+TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion8) {
+  FlutterEngineProcTable procs = {};
+  procs.struct_size = sizeof(procs);
+  ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
+  ASSERT_NE(procs.GetAvioExtensionCapabilities, nullptr);
+  FlutterAvioExtensionCapabilities capabilities = {};
+  capabilities.struct_size = sizeof(capabilities);
+  ASSERT_EQ(procs.GetAvioExtensionCapabilities(&capabilities), kSuccess);
+  EXPECT_EQ(capabilities.minimum_version, 8u);
+  EXPECT_EQ(capabilities.maximum_version, 8u);
+  EXPECT_EQ(capabilities.continuous_supported_classes, 0u);
+}
+
+TEST(EmbedderProcTable, AppendedCapabilityHonorsCallerStructSize) {
+  FlutterEngineProcTable procs = {};
+  procs.struct_size = sizeof(procs);
+  ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
+  ASSERT_NE(procs.GetAvioExtensionCapabilities, nullptr);
+  FlutterAvioExtensionCapabilities capabilities = {};
+  capabilities.struct_size =
+      offsetof(FlutterAvioExtensionCapabilities, continuous_supported_classes);
+  capabilities.continuous_supported_classes = 0xDEADBEEFu;
+  ASSERT_EQ(procs.GetAvioExtensionCapabilities(&capabilities), kSuccess);
+  EXPECT_EQ(capabilities.continuous_supported_classes, 0xDEADBEEFu);
+}
+
+TEST(EmbedderProcTable, ResourceReportRejectsMissingEngineWithoutCallback) {
+  FlutterEngineProcTable procs = {};
+  procs.struct_size = sizeof(procs);
+  ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
+  ASSERT_NE(procs.RequestAvioRenderResourceReport, nullptr);
+  bool called = false;
+  EXPECT_EQ(procs.RequestAvioRenderResourceReport(
+                nullptr, false,
+                [](const FlutterAvioRenderResourceReport*, void* opaque) {
+                  *static_cast<bool*>(opaque) = true;
+                },
+                &called),
+            kInvalidArguments);
+  EXPECT_FALSE(called);
 }
 
 TEST(EmbedderProcTable, RejectsTruncatedAvioCapabilities) {

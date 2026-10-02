@@ -73,7 +73,7 @@ extern "C" {
 // Flutter embedder ABI. The engine reports supported semantics through
 // FlutterEngineGetAvioExtensionCapabilities and validates the request again
 // during initialization, before creating a view or GPU resource.
-#define FLUTTER_AVIO_EXTENSION_VERSION 6u
+#define FLUTTER_AVIO_EXTENSION_VERSION 8u
 
 typedef uint64_t FlutterAvioExtensionFeatures;
 
@@ -95,6 +95,10 @@ typedef uint64_t FlutterAvioExtensionFeatures;
 #define kFlutterAvioExtensionFeatureRenderDeadline 0x0000000000000400ULL
 #define kFlutterAvioExtensionFeatureAtomicWindowPreviews 0x0000000000000800ULL
 #define kFlutterAvioExtensionFeaturePreSubmitFailure 0x0000000000001000ULL
+#define kFlutterAvioExtensionFeatureRenderResourceReport 0x0000000000002000ULL
+#define kFlutterAvioExtensionFeatureAntialiasingPolicy 0x0000000000004000ULL
+#define FLUTTER_AVIO_MAX_RENDER_RESOURCE_ENTRIES 64u
+#define FLUTTER_AVIO_MAX_COVERAGE_REASONS 32u
 #define FLUTTER_AVIO_MAX_WINDOW_PREVIEWS 64u
 
 /// Hard transaction bound shared by retained scene collection and embedders.
@@ -124,6 +128,9 @@ typedef struct {
 
   /// Semantic features implemented by this exact engine build.
   FlutterAvioExtensionFeatures supported_features;
+
+  /// Shape classes implementing continuous coverage. Zero until EG-8.
+  uint64_t continuous_supported_classes;
 } FlutterAvioExtensionCapabilities;
 
 typedef struct {
@@ -180,6 +187,103 @@ typedef struct {
   /// when the policy is disabled and positive otherwise.
   uint64_t pipeline_cache_max_bytes;
 } FlutterAvioResourceLifecycleConfig;
+
+typedef enum {
+  kFlutterAvioAntialiasingPolicyMsaa4 = 0,
+  kFlutterAvioAntialiasingPolicyCoverage = 1,
+} FlutterAvioAntialiasingPolicy;
+
+/// Exact, opt-in coverage contract. No implicit fallback to a different policy.
+/// Other shape classes use sample4 quantization. Continuous requests fail if
+/// the capability does not implement every requested class.
+typedef struct {
+  size_t struct_size;
+  FlutterAvioAntialiasingPolicy policy;
+  uint32_t layer_sample_count;
+  uint32_t coverage_sample_count;
+  uint64_t continuous_requested_classes;
+  uint64_t coverage_region_max_bytes;
+  uint64_t layer_region_max_bytes;
+} FlutterAvioAntialiasingConfig;
+
+typedef enum {
+  kFlutterAvioRenderResourceReportSuccess = 0,
+  kFlutterAvioRenderResourceReportRendererUnavailable = 1,
+  kFlutterAvioRenderResourceReportEngineUnavailable = 2,
+  kFlutterAvioRenderResourceReportTruncated = 3,
+} FlutterAvioRenderResourceReportStatus;
+
+#define kFlutterAvioRenderCounterRasterThreadAllocations 0x01ULL
+#define kFlutterAvioRenderCounterFirstUseCompiles 0x02ULL
+#define kFlutterAvioRenderCounterGlyphAtlasGrowths 0x04ULL
+#define kFlutterAvioRenderCounterImageUploads 0x08ULL
+#define kFlutterAvioRenderCounterSnapshotAllocations 0x10ULL
+#define kFlutterAvioRenderCounterCoverageFlushes 0x20ULL
+// Covers both overflow event count and allocated real bytes.
+#define kFlutterAvioRenderCounterLayerRegionOverflows 0x40ULL
+
+/// Stable known IDs. Unknown IDs remain valid transport values.
+#define kFlutterAvioRenderResourceTransientAttachments 1u
+#define kFlutterAvioRenderResourceOffscreens 2u
+#define kFlutterAvioRenderResourceFlipTargets 3u
+#define kFlutterAvioRenderResourceImageTextures 4u
+#define kFlutterAvioRenderResourceGlyphAtlases 5u
+#define kFlutterAvioRenderResourcePipelines 6u
+#define kFlutterAvioRenderResourceCoverageRegion 7u
+#define kFlutterAvioRenderResourceLayerRegion 8u
+
+typedef struct {
+  size_t struct_size;
+  uint32_t kind_id;
+  uint64_t entries;
+  uint64_t nominal_bytes;
+  uint64_t real_bytes;
+  uint64_t leased_entries;
+  uint64_t peak_leased_nominal_bytes;
+  uint64_t distinct_keys;
+  uint64_t duplicate_entries;
+  uint64_t orphans_released_entries;
+  uint64_t orphans_released_real_bytes;
+  uint64_t created_entries;
+  uint64_t created_real_bytes;
+} FlutterAvioRenderResourceEntry;
+
+typedef struct {
+  size_t struct_size;
+  uint32_t reason_id;
+  uint64_t draw_count;
+  uint64_t pixel_area;
+} FlutterAvioCoverageReasonUsage;
+
+/// Report-only borrowed data, valid only during the callback. Missing kinds
+/// and unsupported counters are unavailable, not zero. Interval counters
+/// reset only when the requesting call selected start_new_interval.
+typedef struct {
+  size_t struct_size;
+  FlutterAvioRenderResourceReportStatus status;
+  size_t entries_count;
+  const FlutterAvioRenderResourceEntry* entries;
+  uint64_t counters_supported;
+  uint64_t raster_thread_allocations;
+  uint64_t first_use_compiles;
+  uint64_t glyph_atlas_growths;
+  uint64_t image_uploads;
+  uint64_t snapshot_allocations;
+  size_t coverage_reasons_count;
+  const FlutterAvioCoverageReasonUsage* coverage_reasons;
+  /// Events, not draw counts or pixel areas. Supported only under the coverage
+  /// policy. The LayerRegionOverflows bit covers the last two fields together.
+  /// coverage_flushes counts successful encoded native color-island tile-to-
+  /// parent composites, excluding atlas resets and direct 1x passes. It does
+  /// not imply GPU completion.
+  uint64_t coverage_flushes;
+  uint64_t layer_region_overflows;
+  uint64_t layer_region_overflow_real_bytes;
+} FlutterAvioRenderResourceReport;
+
+typedef void (*FlutterAvioRenderResourceReportCallback)(
+    const FlutterAvioRenderResourceReport* report,
+    void* user_data);
 
 typedef enum {
   kSuccess = 0,
@@ -3418,6 +3522,10 @@ typedef struct {
   /// be present if and only if
   /// kFlutterAvioExtensionFeatureResourceLifecycleConfig was negotiated.
   const FlutterAvioResourceLifecycleConfig* avio_resource_lifecycle_config;
+
+  /// Present if and only if AntialiasingPolicy was negotiated. Copied during
+  /// initialization; the caller need not retain it after Initialize returns.
+  const FlutterAvioAntialiasingConfig* avio_antialiasing_config;
 } FlutterProjectArgs;
 
 typedef struct {
@@ -4158,9 +4266,24 @@ FlutterEngineResult FlutterEngineCancelFrameOpportunity(
 ///
 /// @return     The result of the call.
 ///
+
 FLUTTER_EXPORT
 FlutterEngineResult FlutterEngineGetAvioExtensionCapabilities(
     FlutterAvioExtensionCapabilities* capabilities);
+
+//------------------------------------------------------------------------------
+/// Posts a report-only task to the raster runner; never waits for raster/GPU
+/// work on the calling platform thread. Requires RenderResourceReport.
+/// kSuccess accepts exactly one raster callback, including EngineUnavailable
+/// cancellation during shutdown. Rejected calls never invoke the callback.
+/// Shutdown drains accepted callbacks before returning. Invoke from the
+/// platform thread and keep user_data valid until the callback returns.
+FLUTTER_EXPORT
+FlutterEngineResult FlutterEngineRequestAvioRenderResourceReport(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    bool start_new_interval,
+    FlutterAvioRenderResourceReportCallback callback,
+    void* user_data);
 
 //------------------------------------------------------------------------------
 /// @brief      Assign a view to a display for per-display vsync rendering.
@@ -4674,6 +4797,13 @@ typedef FlutterEngineResult (*FlutterEngineCancelFrameOpportunityFnPtr)(
     FlutterVsyncCancellationReason reason,
     FlutterFrameOpportunityCancellationCallback callback,
     void* user_data);
+typedef FlutterEngineResult (
+    *FlutterEngineRequestAvioRenderResourceReportFnPtr)(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    bool start_new_interval,
+    FlutterAvioRenderResourceReportCallback callback,
+    void* user_data);
+
 typedef FlutterEngineResult (*FlutterEngineGetAvioExtensionCapabilitiesFnPtr)(
     FlutterAvioExtensionCapabilities* capabilities);
 typedef FlutterEngineResult (*FlutterEngineSetViewDisplayFnPtr)(
@@ -4825,6 +4955,8 @@ typedef struct {
   FlutterEngineCancelVsyncForDisplayFnPtr CancelVsyncForDisplay;
   FlutterEngineCancelFrameOpportunityFnPtr CancelFrameOpportunity;
   FlutterEngineSetAvioViewVisibilityFnPtr SetAvioViewVisibility;
+  FlutterEngineRequestAvioRenderResourceReportFnPtr
+      RequestAvioRenderResourceReport;
 } FlutterEngineProcTable;
 
 //------------------------------------------------------------------------------

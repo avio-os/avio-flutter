@@ -18,6 +18,7 @@
 #include "impeller/renderer/backend/vulkan/device_holder_vk.h"
 #include "impeller/renderer/backend/vulkan/formats_vk.h"
 #include "impeller/renderer/backend/vulkan/texture_vk.h"
+#include "impeller/renderer/render_resource_scope.h"
 #include "vulkan/vulkan_enums.hpp"
 
 namespace impeller {
@@ -292,7 +293,8 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
                            const TextureDescriptor& desc,
                            VmaAllocator allocator,
                            vk::Device device,
-                           bool supports_memoryless_textures)
+                           bool supports_memoryless_textures,
+                           std::shared_ptr<AllocatedImageLedger> ledger)
       : TextureSourceVK(desc), resource_(context.GetResourceManager()) {
     FML_DCHECK(desc.format != PixelFormat::kUnknown);
     vk::StructureChain<vk::ImageCreateInfo, vk::ImageCompressionControlEXT>
@@ -405,6 +407,29 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
     }
 
     auto image = vk::Image{vk_image};
+    AllocatedImageLedger::Registration allocation_registration;
+    // Own the allocation immediately: view construction can fail below.
+    // The old raw-image interval leaked on those early returns.
+    auto image_memory = UniqueImageVMA{ImageVMA{allocator, allocation, image}};
+    AvioAllocatedImageKey key;
+    key.fields = {static_cast<uint64_t>(desc.size.width),
+                  static_cast<uint64_t>(desc.size.height),
+                  desc.mip_count,
+                  static_cast<uint64_t>(desc.type),
+                  static_cast<uint64_t>(desc.format),
+                  static_cast<uint64_t>(desc.storage_mode),
+                  static_cast<uint64_t>(
+                      static_cast<TextureUsageMask::MaskType>(desc.usage)),
+                  static_cast<uint64_t>(desc.sample_count),
+                  static_cast<uint64_t>(desc.compression_type),
+                  desc.array_layer_count,
+                  0u,
+                  0u};
+    allocation_registration = ledger->Register(
+        GetAvioResourceAllocationKind(), key,
+        desc.GetByteSizeOfAllMipLevels() *
+            static_cast<size_t>(desc.sample_count) * ToArrayLayerCount(desc),
+        static_cast<size_t>(allocation_info.size), IsAvioRasterFrameActive());
 
     vk::ImageViewCreateInfo view_info = {};
     view_info.image = image;
@@ -458,9 +483,9 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
     }
 
     resource_.Swap(ImageResource(
-        ImageVMA{allocator, allocation, image}, std::move(image_view),
-        std::move(rt_image_views), context.GetResourceAllocator(),
-        context.GetDeviceHolder()));
+        std::move(image_memory), std::move(allocation_registration),
+        std::move(image_view), std::move(rt_image_views),
+        context.GetResourceAllocator(), context.GetDeviceHolder()));
     allocated_byte_size_ = static_cast<size_t>(allocation_info.size);
     is_valid_ = true;
   }
@@ -471,6 +496,10 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
 
   // |TextureSourceVK|
   size_t GetAllocatedByteSize() const override { return allocated_byte_size_; }
+
+  void RecordAvioImageUpload(bool raster_frame) const override {
+    resource_->allocation_registration.RecordImageUpload(raster_frame);
+  }
 
   vk::Image GetImage() const override { return resource_->image.get().image; }
 
@@ -496,6 +525,9 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
   struct ImageResource {
     std::shared_ptr<DeviceHolderVK> device_holder;
     std::shared_ptr<Allocator> allocator;
+    // Reverse destruction frees image memory before retiring its census,
+    // including reclamation deferred to ResourceManagerVK's worker.
+    AllocatedImageLedger::Registration allocation_registration;
     UniqueImageVMA image;
     vk::UniqueImageView image_view;
     // One attachment view per (mip level, array layer), row-major by mip.
@@ -503,14 +535,16 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
 
     ImageResource() = default;
 
-    ImageResource(ImageVMA p_image,
+    ImageResource(UniqueImageVMA p_image,
+                  AllocatedImageLedger::Registration p_registration,
                   vk::UniqueImageView p_image_view,
                   std::vector<vk::UniqueImageView> p_rt_image_views,
                   std::shared_ptr<Allocator> allocator,
                   std::shared_ptr<DeviceHolderVK> device_holder)
         : device_holder(std::move(device_holder)),
           allocator(std::move(allocator)),
-          image(p_image),
+          allocation_registration(std::move(p_registration)),
+          image(std::move(p_image)),
           image_view(std::move(p_image_view)),
           rt_image_views(std::move(p_rt_image_views)) {}
 
@@ -547,16 +581,22 @@ std::shared_ptr<Texture> AllocatorVK::OnCreateTexture(
     return nullptr;
   }
   auto source = std::make_shared<AllocatedTextureSourceVK>(
-      ContextVK::Cast(*context),     //
-      desc,                          //
-      allocator_.get(),              //
-      device_holder->GetDevice(),    //
-      supports_memoryless_textures_  //
+      ContextVK::Cast(*context),      //
+      desc,                           //
+      allocator_.get(),               //
+      device_holder->GetDevice(),     //
+      supports_memoryless_textures_,  //
+      allocated_image_ledger_         //
   );
   if (!source->IsValid()) {
     return nullptr;
   }
   return std::make_shared<TextureVK>(context_, std::move(source));
+}
+
+AvioRenderResourceReport AllocatorVK::GetAllocatedImageReport(
+    bool start_new_interval) {
+  return allocated_image_ledger_->Report(start_new_interval);
 }
 
 // |Allocator|

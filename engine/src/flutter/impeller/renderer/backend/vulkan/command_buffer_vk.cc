@@ -4,6 +4,7 @@
 
 #include "impeller/renderer/backend/vulkan/command_buffer_vk.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -102,6 +103,11 @@ std::shared_ptr<ComputePass> CommandBufferVK::OnCreateComputePass() {
 }
 
 bool CommandBufferVK::EndCommandBuffer() const {
+  if (external_images_finalized_) {
+    return false;
+  }
+  ReleaseExternalImages();
+  external_images_finalized_ = true;
   InsertDebugMarker("QueueSubmit");
 
   auto command_buffer = GetCommandBuffer();
@@ -113,6 +119,120 @@ bool CommandBufferVK::EndCommandBuffer() const {
     return false;
   }
   return true;
+}
+
+bool CommandBufferVK::HasPreparedExternalImage(
+    const TextureSourceVK& texture) const {
+  return std::any_of(external_images_.begin(), external_images_.end(),
+                     [&texture](const ExternalImageUse& use) {
+                       return use.source.get() == &texture;
+                     });
+}
+
+bool CommandBufferVK::PrepareExternalImage(
+    const std::shared_ptr<const TextureSourceVK>& texture) {
+  if (!texture || external_images_finalized_ || !Track(texture)) {
+    return false;
+  }
+  const auto ownership = texture->GetExternalImageOwnership();
+  if (!ownership || HasPreparedExternalImage(*texture)) {
+    return true;
+  }
+  auto context = context_.lock();
+  if (!context) {
+    return false;
+  }
+  const uint32_t local_family = static_cast<uint32_t>(
+      ContextVK::Cast(*context).GetGraphicsQueue()->GetIndex().family);
+  vk::ImageMemoryBarrier barrier;
+  barrier.srcAccessMask = {};
+  barrier.dstAccessMask =
+      vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+  barrier.oldLayout = ownership->interchange_layout;
+  barrier.newLayout = ownership->interchange_layout;
+  barrier.srcQueueFamilyIndex = ownership->queue_family_index;
+  barrier.dstQueueFamilyIndex = local_family;
+  barrier.image = texture->GetImage();
+  barrier.subresourceRange.aspectMask =
+      ToImageAspectFlags(texture->GetTextureDescriptor().format);
+  barrier.subresourceRange.baseMipLevel = 0;
+  barrier.subresourceRange.levelCount =
+      texture->GetTextureDescriptor().mip_count;
+  barrier.subresourceRange.baseArrayLayer = 0;
+  barrier.subresourceRange.layerCount =
+      ToArrayLayerCount(texture->GetTextureDescriptor());
+
+  external_images_.push_back(
+      {texture, *ownership, local_family, ownership->interchange_layout});
+  GetCommandBuffer().pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
+                                     vk::PipelineStageFlagBits::eAllCommands,
+                                     {}, nullptr, nullptr, barrier);
+  texture->SetLayoutWithoutEncoding(ownership->interchange_layout);
+  return true;
+}
+
+void CommandBufferVK::RecordExternalImageLayout(
+    const TextureSourceVK& texture) {
+  for (auto& use : external_images_) {
+    if (use.source.get() == &texture) {
+      use.final_layout = texture.GetLayout();
+      return;
+    }
+  }
+}
+
+void CommandBufferVK::ReleaseExternalImages() const {
+  for (const auto& use : external_images_) {
+    // Restore the interchange layout locally before the ownership release.
+    // Both sides of the transfer can consequently use the original external
+    // GENERAL->GENERAL (or declared interchange) contract, even after tiles
+    // sampled the image or copied into it in transfer-optimal layouts.
+    if (use.final_layout != use.ownership.interchange_layout) {
+      vk::ImageMemoryBarrier layout;
+      layout.oldLayout = use.final_layout;
+      layout.newLayout = use.ownership.interchange_layout;
+      layout.srcAccessMask =
+          vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+      layout.dstAccessMask =
+          vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+      layout.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      layout.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      layout.image = use.source->GetImage();
+      layout.subresourceRange.aspectMask =
+          ToImageAspectFlags(use.source->GetTextureDescriptor().format);
+      layout.subresourceRange.baseMipLevel = 0;
+      layout.subresourceRange.levelCount =
+          use.source->GetTextureDescriptor().mip_count;
+      layout.subresourceRange.baseArrayLayer = 0;
+      layout.subresourceRange.layerCount =
+          ToArrayLayerCount(use.source->GetTextureDescriptor());
+      GetCommandBuffer().pipelineBarrier(
+          vk::PipelineStageFlagBits::eAllCommands,
+          vk::PipelineStageFlagBits::eAllCommands, {}, nullptr, nullptr,
+          layout);
+    }
+    use.source->SetLayoutWithoutEncoding(use.ownership.interchange_layout);
+    vk::ImageMemoryBarrier barrier;
+    barrier.srcAccessMask =
+        vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+    barrier.dstAccessMask = {};
+    barrier.oldLayout = use.ownership.interchange_layout;
+    barrier.newLayout = use.ownership.interchange_layout;
+    barrier.srcQueueFamilyIndex = use.local_queue_family;
+    barrier.dstQueueFamilyIndex = use.ownership.queue_family_index;
+    barrier.image = use.source->GetImage();
+    barrier.subresourceRange.aspectMask =
+        ToImageAspectFlags(use.source->GetTextureDescriptor().format);
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount =
+        use.source->GetTextureDescriptor().mip_count;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount =
+        ToArrayLayerCount(use.source->GetTextureDescriptor());
+    GetCommandBuffer().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                                       vk::PipelineStageFlagBits::eBottomOfPipe,
+                                       {}, nullptr, nullptr, barrier);
+  }
 }
 
 vk::CommandBuffer CommandBufferVK::GetCommandBuffer() const {

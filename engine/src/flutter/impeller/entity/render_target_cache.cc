@@ -4,6 +4,8 @@
 
 #include "impeller/entity/render_target_cache.h"
 
+#include "impeller/renderer/render_resource_scope.h"
+
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -308,6 +310,10 @@ RenderTarget RenderTargetCache::CreateOffscreen(
     const std::shared_ptr<Texture>& existing_color_texture,
     const std::shared_ptr<Texture>& existing_depth_stencil_texture,
     std::optional<PixelFormat> target_pixel_format) {
+  const AvioResourceAllocationScope allocation_scope(
+      GetAvioResourceAllocationKind() == AvioRenderResourceKind::kImageTextures
+          ? AvioRenderResourceKind::kOffscreens
+          : GetAvioResourceAllocationKind());
   if (size.IsEmpty()) {
     return {};
   }
@@ -371,6 +377,10 @@ RenderTarget RenderTargetCache::CreateOffscreenMSAA(
     const std::shared_ptr<Texture>& existing_color_resolve_texture,
     const std::shared_ptr<Texture>& existing_depth_stencil_texture,
     std::optional<PixelFormat> target_pixel_format) {
+  const AvioResourceAllocationScope allocation_scope(
+      GetAvioResourceAllocationKind() == AvioRenderResourceKind::kImageTextures
+          ? AvioRenderResourceKind::kOffscreens
+          : GetAvioResourceAllocationKind());
   if (size.IsEmpty()) {
     return {};
   }

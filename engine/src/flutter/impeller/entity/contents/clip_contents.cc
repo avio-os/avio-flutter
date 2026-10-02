@@ -38,6 +38,16 @@ void ClipContents::SetGeometry(GeometryResult clip_geometry) {
   clip_geometry_ = std::move(clip_geometry);
 }
 
+void ClipContents::SetCoverageMasks(std::vector<CoverageMaskTile> masks) {
+  coverage_quad_.reset();
+  coverage_masks_ = std::move(masks);
+}
+
+void ClipContents::SetCoverageQuad(CoverageConvexQuad4 quad) {
+  coverage_masks_.reset();
+  coverage_quad_ = std::move(quad);
+}
+
 void ClipContents::SetClipOperation(Entity::ClipOperation clip_op) {
   clip_op_ = clip_op;
 }
@@ -70,6 +80,17 @@ ClipCoverage ClipContents::GetClipCoverage(
 bool ClipContents::Render(const ContentContext& renderer,
                           RenderPass& pass,
                           uint32_t clip_depth) const {
+  if (coverage_quad_) {
+    return CoverageMaskContents::RenderQuadClip(renderer, pass, *coverage_quad_,
+                                                clip_depth, clip_op_);
+  }
+  if (coverage_masks_) {
+    // Stencil carries native sample identity and the existing clip-depth test
+    // intersects it with the parent. Never resolve alpha, AND tile rectangles,
+    // or fall back after a failed cached-mask draw has mutated stencil/depth.
+    return CoverageMaskContents::RenderClip(renderer, pass, *coverage_masks_,
+                                            clip_depth, clip_op_);
+  }
   if (!clip_geometry_.vertex_buffer) {
     return true;
   }

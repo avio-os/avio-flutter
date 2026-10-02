@@ -15,15 +15,13 @@ template <typename T>
 class raw_ptr {
  public:
   explicit raw_ptr(const std::shared_ptr<T>& ptr)
-      : ptr_(ptr.get())
-#if !NDEBUG
-        ,
-        weak_ptr_(ptr)
-#endif
-  {
-  }
+      : ptr_(ptr.get()), weak_ptr_(ptr) {}
 
   raw_ptr() : ptr_(nullptr) {}
+
+  // Deferred recorders can retain the exact object before an owning cache
+  // invalidates it. The reference itself remains weak and creates no cycle.
+  std::shared_ptr<T> Lock() const { return weak_ptr_.lock(); }
 
   T* operator->() {
 #if !NDEBUG
@@ -74,9 +72,7 @@ class raw_ptr {
 
  private:
   T* ptr_;
-#if !NDEBUG
   std::weak_ptr<T> weak_ptr_;
-#endif
 };
 
 }  // namespace impeller

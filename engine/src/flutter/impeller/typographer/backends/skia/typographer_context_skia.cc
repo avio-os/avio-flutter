@@ -4,6 +4,8 @@
 
 #include "impeller/typographer/backends/skia/typographer_context_skia.h"
 
+#include "impeller/renderer/render_resource_scope.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -682,8 +684,12 @@ std::shared_ptr<GlyphAtlas> TypographerContextSkia::CreateGlyphAtlas(
   descriptor.size = atlas_size;
   descriptor.storage_mode = StorageMode::kDevicePrivate;
   descriptor.usage = TextureUsage::kShaderRead;
-  std::shared_ptr<Texture> new_texture =
-      context.GetResourceAllocator()->CreateTexture(descriptor);
+  std::shared_ptr<Texture> new_texture;
+  {
+    const AvioResourceAllocationScope allocation_scope(
+        AvioRenderResourceKind::kGlyphAtlases);
+    new_texture = context.GetResourceAllocator()->CreateTexture(descriptor);
+  }
   if (!new_texture) {
     return nullptr;
   }

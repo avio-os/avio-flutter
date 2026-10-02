@@ -873,6 +873,34 @@ PixelFormat CapabilitiesVK::GetDefaultDepthStencilFormat() const {
   return default_depth_stencil_format_;
 }
 
+bool CapabilitiesVK::SupportsAvioCoverageResources() const {
+  const auto& limits = device_properties_.limits;
+  if (!physical_device_ || !limits.standardSampleLocations ||
+      !(limits.framebufferColorSampleCounts & vk::SampleCountFlagBits::e4) ||
+      !(limits.framebufferStencilSampleCounts & vk::SampleCountFlagBits::e4) ||
+      !(limits.sampledImageColorSampleCounts & vk::SampleCountFlagBits::e4)) {
+    return false;
+  }
+  const auto supports_four_samples = [&](vk::Format format,
+                                         vk::ImageUsageFlags usage) {
+    vk::PhysicalDeviceImageFormatInfo2 info;
+    info.format = format;
+    info.type = vk::ImageType::e2D;
+    info.tiling = vk::ImageTiling::eOptimal;
+    info.usage = usage;
+    const auto [result, properties] =
+        physical_device_.getImageFormatProperties2(info);
+    return result == vk::Result::eSuccess &&
+           !!(properties.imageFormatProperties.sampleCounts &
+              vk::SampleCountFlagBits::e4);
+  };
+  return supports_four_samples(vk::Format::eR8Unorm,
+                               vk::ImageUsageFlagBits::eColorAttachment |
+                                   vk::ImageUsageFlagBits::eSampled) &&
+         supports_four_samples(vk::Format::eS8Uint,
+                               vk::ImageUsageFlagBits::eDepthStencilAttachment);
+}
+
 const vk::PhysicalDeviceProperties&
 CapabilitiesVK::GetPhysicalDeviceProperties() const {
   return device_properties_;

@@ -60,4 +60,48 @@ bool Context::SubmitOnscreen(std::shared_ptr<CommandBuffer> cmd_buffer) {
   return EnqueueCommandBuffer(std::move(cmd_buffer));
 }
 
+std::shared_ptr<AvioCoverageRegion> Context::GetAvioCoverageRegion() const {
+  std::scoped_lock lock(avio_coverage_region_mutex_);
+  return avio_coverage_region_;
+}
+
+void Context::RecordAvioCoverageDraw(AvioCoverageReason reason,
+                                     uint64_t bounding_box_pixels) {
+  if (!GetAvioAntialiasingConfig().UsesCoverage()) {
+    return;
+  }
+  std::scoped_lock lock(avio_coverage_usage_mutex_);
+  const auto id = static_cast<uint32_t>(reason);
+  for (size_t i = 0; i < avio_coverage_usage_.coverage_reasons_count; ++i) {
+    auto& entry = avio_coverage_usage_.coverage_reasons[i];
+    if (entry.reason_id == id) {
+      ++entry.draw_count;
+      entry.pixel_area += bounding_box_pixels;
+      return;
+    }
+  }
+  avio_coverage_usage_.AddCoverageReason(
+      {.reason_id = id, .draw_count = 1u, .pixel_area = bounding_box_pixels});
+}
+
+AvioRenderResourceReport Context::GetAvioCoverageUsageReport(
+    bool start_new_interval) const {
+  std::scoped_lock lock(avio_coverage_usage_mutex_);
+  auto result = avio_coverage_usage_;
+  result.available = true;
+  if (start_new_interval) {
+    avio_coverage_usage_ = {};
+  }
+  return result;
+}
+
+std::shared_ptr<AvioCoverageRegion> Context::InitializeAvioCoverageRegion(
+    const std::function<std::shared_ptr<AvioCoverageRegion>()>& create) {
+  std::scoped_lock lock(avio_coverage_region_mutex_);
+  if (!avio_coverage_region_ && GetAvioAntialiasingConfig().UsesCoverage()) {
+    avio_coverage_region_ = create();
+  }
+  return avio_coverage_region_;
+}
+
 }  // namespace impeller

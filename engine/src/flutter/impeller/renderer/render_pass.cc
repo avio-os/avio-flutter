@@ -12,13 +12,17 @@
 namespace impeller {
 
 RenderPass::RenderPass(std::shared_ptr<const Context> context,
-                       const RenderTarget& target)
+                       const RenderTarget& target,
+                       std::optional<ISize> logical_size)
     : context_(std::move(context)),
       sample_count_(target.GetSampleCount()),
       pixel_format_(target.GetRenderTargetPixelFormat()),
       has_depth_attachment_(target.GetDepthAttachment().has_value()),
       has_stencil_attachment_(target.GetStencilAttachment().has_value()),
-      render_target_size_(target.GetRenderTargetSize()),
+      render_target_size_(logical_size.value_or(
+          target.GetContentRect()
+              .value_or(IRect::MakeSize(target.GetRenderTargetSize()))
+              .GetSize())),
       render_target_(target),
       orthographic_(Matrix::MakeOrthographic(render_target_size_)) {}
 
@@ -114,6 +118,12 @@ void RenderPass::SetViewport(Viewport viewport) {
 
 void RenderPass::SetScissor(IRect32 scissor) {
   pending_.scissor = scissor;
+}
+
+void RenderPass::RetainResource(std::shared_ptr<void> owner) {
+  if (owner) {
+    retained_resources_.push_back(std::move(owner));
+  }
 }
 
 void RenderPass::SetElementCount(size_t count) {

@@ -22,6 +22,7 @@
 #include "fml/make_copyable.h"
 #include "fml/synchronization/waitable_event.h"
 #include "impeller/renderer/context.h"
+#include "impeller/renderer/render_resource_scope.h"
 #include "third_party/skia/include/core/SkColorSpace.h"
 #include "third_party/skia/include/core/SkData.h"
 #include "third_party/skia/include/core/SkImage.h"
@@ -65,6 +66,28 @@ Rasterizer::Rasterizer(Delegate& delegate,
 
 Rasterizer::~Rasterizer() = default;
 
+impeller::AvioRenderResourceReport Rasterizer::GetAvioRenderResourceReport(
+    bool start_new_interval) {
+  FML_DCHECK(delegate_.GetTaskRunners()
+                 .GetRasterTaskRunner()
+                 ->RunsTasksOnCurrentThread());
+#if IMPELLER_SUPPORTS_RENDERING
+  const auto aiks = surface_ ? surface_->GetAiksContext() : nullptr;
+  if (aiks && aiks->IsValid()) {
+    auto report =
+        aiks->GetContext()->GetAvioRenderResourceReport(start_new_interval);
+    report.Merge(aiks->GetContentContext().GetAvioRenderResourceReport(
+        start_new_interval));
+    return report;
+  }
+  if (avio_report_context_) {
+    return avio_report_context_->GetAvioRenderResourceReport(
+        start_new_interval);
+  }
+#endif
+  return {};
+}
+
 fml::TaskRunnerAffineWeakPtr<Rasterizer> Rasterizer::GetWeakPtr() const {
   return weak_factory_.GetWeakPtr();
 }
@@ -81,6 +104,13 @@ void Rasterizer::SetImpellerContext(
 
 void Rasterizer::Setup(std::unique_ptr<Surface> surface) {
   surface_ = std::move(surface);
+#if IMPELLER_SUPPORTS_RENDERING
+  if (surface_) {
+    if (const auto aiks = surface_->GetAiksContext()) {
+      avio_report_context_ = aiks->GetContext();
+    }
+  }
+#endif
 
   if (max_cache_bytes_.has_value()) {
     SetResourceCacheMaxBytes(max_cache_bytes_.value(),
@@ -742,6 +772,7 @@ Rasterizer::DoDrawResult Rasterizer::DrawToSurfaces(
     std::vector<std::unique_ptr<LayerTreeTask>> tasks,
     bool tasks_are_retained) {
   TRACE_EVENT0("flutter", "Rasterizer::DrawToSurfaces");
+  const impeller::AvioRasterFrameScope avio_frame_scope;
   FML_DCHECK(surface_);
   frame_timings_recorder.AssertInState(FrameTimingsRecorder::State::kBuildEnd);
 

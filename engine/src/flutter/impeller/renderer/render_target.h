@@ -8,11 +8,14 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
+#include <utility>
 
 #include "flutter/fml/hash_combine.h"
 #include "impeller/core/allocator.h"
 #include "impeller/core/formats.h"
+#include "impeller/geometry/rect.h"
 #include "impeller/geometry/size.h"
 #include "impeller/renderer/render_resource_usage.h"
 
@@ -123,6 +126,18 @@ class RenderTarget final {
   bool SetRenderArea(IRect area);
   const std::optional<IRect>& GetRenderArea() const { return render_area_; }
 
+  // Logical color content inside the physical attachment. This metadata is
+  // copied into snapshots; attachment size and Vulkan viewport remain honest.
+  bool SetContentRect(IRect rect);
+  const std::optional<IRect>& GetContentRect() const { return content_rect_; }
+
+  void SetResourceOwner(std::shared_ptr<void> owner) {
+    resource_owner_ = std::move(owner);
+  }
+  const std::shared_ptr<void>& GetResourceOwner() const {
+    return resource_owner_;
+  }
+
   SampleCount GetSampleCount() const;
 
   bool HasColorAttachment(size_t index) const;
@@ -172,6 +187,8 @@ class RenderTarget final {
 
  private:
   std::optional<IRect> render_area_;
+  std::optional<IRect> content_rect_;
+  std::shared_ptr<void> resource_owner_;
   std::optional<ColorAttachment> color0_;
   std::optional<DepthAttachment> depth_;
   std::optional<StencilAttachment> stencil_;

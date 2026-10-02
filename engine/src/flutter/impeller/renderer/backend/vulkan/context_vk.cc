@@ -156,6 +156,8 @@ static constexpr uint32_t kImpellerEngineVersion =
     VK_MAKE_API_VERSION(0, 2, 0, 0);
 
 void ContextVK::Setup(Settings settings) {
+  avio_antialiasing_config_ =
+      settings.avio_antialiasing_config.value_or(AvioAntialiasingConfig{});
   TRACE_EVENT0("impeller", "ContextVK::Setup");
 
   if (!settings.proc_address_callback) {
@@ -370,6 +372,12 @@ void ContextVK::Setup(Settings settings) {
   if (!caps->SetPhysicalDevice(device_holder->physical_device,
                                *enabled_features)) {
     VALIDATION_LOG << "Capabilities could not be updated.";
+    return;
+  }
+  if (avio_antialiasing_config_.UsesCoverage() &&
+      !caps->SupportsAvioCoverageResources()) {
+    VALIDATION_LOG
+        << "Device does not support negotiated native coverage resources.";
     return;
   }
 
@@ -830,6 +838,28 @@ bool ContextVK::SubmitOnscreen(std::shared_ptr<CommandBuffer> cmd_buffer) {
 
 const WorkaroundsVK& ContextVK::GetWorkarounds() const {
   return workarounds_;
+}
+
+const AvioAntialiasingConfig& ContextVK::GetAvioAntialiasingConfig() const {
+  return avio_antialiasing_config_;
+}
+
+AvioRenderResourceReport ContextVK::GetAvioRenderResourceReport(
+    bool start_new_interval) const {
+  AvioRenderResourceReport report;
+  report.available = IsValid();
+  if (report.available) {
+    report.Merge(GetAvioCoverageUsageReport(start_new_interval));
+    if (allocator_) {
+      report.Merge(static_cast<AllocatorVK&>(*allocator_)
+                       .GetAllocatedImageReport(start_new_interval));
+    }
+    if (pipeline_library_) {
+      report.Merge(
+          pipeline_library_->GetAvioRenderResourceReport(start_new_interval));
+    }
+  }
+  return report;
 }
 
 }  // namespace impeller

@@ -62,12 +62,14 @@ std::optional<Entity> ColorMatrixFilterContents::RenderFilter(
     pass.SetPipeline(renderer.GetColorMatrixColorFilterPipeline(options));
 
     auto size = input_snapshot->texture->GetSize();
+    auto uv_rect =
+        Rect::MakeSize(size).Project(input_snapshot->GetTextureRect());
 
     std::array<VS::PerVertexData, 4> vertices = {
-        VS::PerVertexData{Point(0, 0), Point(0, 0)},
-        VS::PerVertexData{Point(1, 0), Point(1, 0)},
-        VS::PerVertexData{Point(0, 1), Point(0, 1)},
-        VS::PerVertexData{Point(1, 1), Point(1, 1)},
+        VS::PerVertexData{uv_rect.GetLeftTop(), uv_rect.GetLeftTop()},
+        VS::PerVertexData{uv_rect.GetRightTop(), uv_rect.GetRightTop()},
+        VS::PerVertexData{uv_rect.GetLeftBottom(), uv_rect.GetLeftBottom()},
+        VS::PerVertexData{uv_rect.GetRightBottom(), uv_rect.GetRightBottom()},
     };
     auto& data_host_buffer = renderer.GetTransientsDataBuffer();
     pass.SetVertexBuffer(CreateVertexBuffer(vertices, data_host_buffer));
@@ -98,6 +100,7 @@ std::optional<Entity> ColorMatrixFilterContents::RenderFilter(
     FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
     VS::BindFrameInfo(pass, data_host_buffer.EmplaceUniform(frame_info));
 
+    pass.RetainResource(input_snapshot->resource_owner);
     return pass.Draw().ok();
   };
 

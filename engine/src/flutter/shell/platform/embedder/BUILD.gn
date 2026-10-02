@@ -57,6 +57,8 @@ template("embedder_source_set") {
 
   source_set(target_name) {
     sources = [
+      "avio_antialiasing_config.h",
+      "avio_render_resource_report.h",
       "embedder.cc",
       "embedder_engine.cc",
       "embedder_engine.h",
@@ -133,6 +135,7 @@ template("embedder_source_set") {
 
     if (impeller_supports_rendering) {
       sources += [
+        "avio_coverage_root_target.h",
         "embedder_render_target_impeller.cc",
         "embedder_render_target_impeller.h",
       ]
@@ -287,6 +290,7 @@ if (enable_unittests) {
     include_dirs = [ "." ]
 
     sources = [
+      "avio_coverage_root_target_unittests.cc",
       "embedder_external_view_embedder_unittests.cc",
       "embedder_render_target_impeller_unittests.cc",
       "platform_view_embedder_unittests.cc",
@@ -655,5 +659,24 @@ if (host_os == "linux" || host_os == "win" || is_android) {
         },
       ]
     }
+  }
+}
+
+# Pure production policy/report contracts; no GPU, Dart VM or generated shaders.
+executable("avio_coverage_contract_tests") {
+  testonly = true
+  sources = [
+    "avio_antialiasing_config.h",
+    "avio_render_resource_report.h",
+    "tests/avio_coverage_contract_tests.cc",
+  ]
+  include_dirs = [ "//", "//flutter" ]
+  deps = [
+    ":embedder_headers",
+    "//flutter/impeller/core:antialiasing_policy",
+    "//flutter/impeller/renderer:render_resource_contracts",
+  ]
+  if (is_linux) {
+    libs = [ "pthread" ]
   }
 }

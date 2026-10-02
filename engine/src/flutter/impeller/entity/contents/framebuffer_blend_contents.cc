@@ -56,13 +56,14 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
     return true;
   }
 
-  auto size = src_snapshot->texture->GetSize();
+  auto rect = src_snapshot->GetTextureRect();
+  auto uv_rect = Rect::MakeSize(src_snapshot->texture->GetSize()).Project(rect);
 
   std::array<VS::PerVertexData, 4> vertices = {
-      VS::PerVertexData{Point(0, 0), Point(0, 0)},
-      VS::PerVertexData{Point(size.width, 0), Point(1, 0)},
-      VS::PerVertexData{Point(0, size.height), Point(0, 1)},
-      VS::PerVertexData{Point(size.width, size.height), Point(1, 1)},
+      VS::PerVertexData{rect.GetLeftTop(), uv_rect.GetLeftTop()},
+      VS::PerVertexData{rect.GetRightTop(), uv_rect.GetRightTop()},
+      VS::PerVertexData{rect.GetLeftBottom(), uv_rect.GetLeftBottom()},
+      VS::PerVertexData{rect.GetRightBottom(), uv_rect.GetRightBottom()},
   };
 
   auto options = OptionsFromPass(pass);
@@ -144,6 +145,7 @@ bool FramebufferBlendContents::Render(const ContentContext& renderer,
   frag_info.dst_input_alpha = 1.0;
   FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
 
+  pass.RetainResource(src_snapshot->resource_owner);
   return pass.Draw().ok();
 }
 

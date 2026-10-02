@@ -65,66 +65,6 @@ static vk::Viewport ToVkViewport(const Viewport& viewport) {
       .setMaxDepth(viewport.depth_range.z_far);
 }
 
-static void EncodeExternalImageAcquire(
-    const TextureSourceVK& source,
-    const ExternalImageOwnershipVK& ownership,
-    vk::CommandBuffer command_buffer,
-    uint32_t local_queue_family,
-    bool loads_existing_contents) {
-  vk::ImageMemoryBarrier barrier;
-  barrier.srcAccessMask = {};
-  barrier.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
-  if (loads_existing_contents) {
-    barrier.dstAccessMask |= vk::AccessFlagBits::eColorAttachmentRead;
-  }
-  barrier.oldLayout = ownership.interchange_layout;
-  barrier.newLayout = ownership.interchange_layout;
-  barrier.srcQueueFamilyIndex = ownership.queue_family_index;
-  barrier.dstQueueFamilyIndex = local_queue_family;
-  barrier.image = source.GetImage();
-  barrier.subresourceRange.aspectMask =
-      ToImageAspectFlags(source.GetTextureDescriptor().format);
-  barrier.subresourceRange.baseMipLevel = 0;
-  barrier.subresourceRange.levelCount = source.GetTextureDescriptor().mip_count;
-  barrier.subresourceRange.baseArrayLayer = 0;
-  barrier.subresourceRange.layerCount =
-      ToArrayLayerCount(source.GetTextureDescriptor());
-
-  command_buffer.pipelineBarrier(
-      vk::PipelineStageFlagBits::eTopOfPipe,
-      vk::PipelineStageFlagBits::eColorAttachmentOutput, {}, nullptr, nullptr,
-      barrier);
-}
-
-static void EncodeExternalImageRelease(
-    const TextureSourceVK& source,
-    const ExternalImageOwnershipVK& ownership,
-    vk::CommandBuffer command_buffer,
-    uint32_t local_queue_family) {
-  vk::ImageMemoryBarrier barrier;
-  barrier.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
-  // The destination synchronization scope does not participate in a queue
-  // family release operation. Keep it empty and terminate at bottom-of-pipe;
-  // the importing queue establishes visibility in its matching acquire.
-  barrier.dstAccessMask = {};
-  barrier.oldLayout = ownership.interchange_layout;
-  barrier.newLayout = ownership.interchange_layout;
-  barrier.srcQueueFamilyIndex = local_queue_family;
-  barrier.dstQueueFamilyIndex = ownership.queue_family_index;
-  barrier.image = source.GetImage();
-  barrier.subresourceRange.aspectMask =
-      ToImageAspectFlags(source.GetTextureDescriptor().format);
-  barrier.subresourceRange.baseMipLevel = 0;
-  barrier.subresourceRange.levelCount = source.GetTextureDescriptor().mip_count;
-  barrier.subresourceRange.baseArrayLayer = 0;
-  barrier.subresourceRange.layerCount =
-      ToArrayLayerCount(source.GetTextureDescriptor());
-
-  command_buffer.pipelineBarrier(
-      vk::PipelineStageFlagBits::eColorAttachmentOutput,
-      vk::PipelineStageFlagBits::eBottomOfPipe, {}, nullptr, nullptr, barrier);
-}
-
 static size_t GetVKClearValues(
     const RenderTarget& target,
     std::array<vk::ClearValue, kMaxAttachments>& values) {
@@ -176,6 +116,10 @@ SharedHandleVK<vk::RenderPass> RenderPassVK::CreateVKRenderPass(
         render_target_.GetRenderArea() && attachment.resolve_texture
             ? std::make_optional(
                   TextureVK::Cast(*attachment.resolve_texture).GetLayout())
+            : std::nullopt,
+        render_target_.GetRenderArea()
+            ? std::make_optional(
+                  TextureVK::Cast(*attachment.texture).GetLayout())
             : std::nullopt);
     return true;
   });
@@ -239,13 +183,9 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
       resolve_image_vk_ ? *resolve_image_vk_ : *color_image_vk_);
   is_swapchain = frame_data_texture.IsSwapchainImage();
   const auto frame_data_source = frame_data_texture.GetTextureSource();
-  if (const auto ownership = frame_data_source->GetExternalImageOwnership()) {
-    EncodeExternalImageAcquire(
-        *frame_data_source, *ownership, command_buffer_vk_,
-        static_cast<uint32_t>(vk_context.GetGraphicsQueue()->GetIndex().family),
-        render_target_.GetRenderArea().has_value() ||
-            (!resolve_image_vk_ && color0.load_action == LoadAction::kLoad));
-    frame_data_texture.SetLayoutWithoutEncoding(ownership->interchange_layout);
+  if (!command_buffer_->PrepareExternalImage(frame_data_source)) {
+    is_valid_ = false;
+    return;
   }
   // The existing cache key does not encode resolve preservation/load policy.
   // Bounded passes must neither consume nor overwrite a full-pass cache entry.
@@ -253,15 +193,17 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
     frame_data = frame_data_texture.GetCachedFrameData(
         sample_count, cache_mip_level, cache_slice);
   }
-  if (render_target_.GetRenderArea() &&
+  const auto& target_size = render_target_.GetRenderTargetSize();
+  const bool partial_render_area =
+      render_target_.GetRenderArea() &&
+      *render_target_.GetRenderArea() != IRect::MakeSize(target_size);
+  if (partial_render_area &&
       frame_data_texture.GetLayout() == vk::ImageLayout::eUndefined) {
     // Unknown contents require a full repaint, decided before preroll culling.
     // Never silently widen the pass after that decision.
     is_valid_ = false;
     return;
   }
-
-  const auto& target_size = render_target_.GetRenderTargetSize();
 
   render_pass_ = CreateVKRenderPass(vk_context, frame_data.render_pass,
                                     command_buffer_, is_swapchain);
@@ -349,12 +291,12 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
   }
 
   // Set the initial viewport.
-  const auto vp = Viewport{.rect = Rect::MakeSize(target_size)};
+  const auto vp = Viewport{.rect = Rect::MakeSize(GetRenderTargetSize())};
   vk::Viewport viewport = ToVkViewport(vp);
   command_buffer_vk_.setViewport(0, 1, &viewport);
 
   // Set the initial scissor.
-  SetScissor(IRect32::MakeSize(target_size));
+  SetScissor(IRect32::MakeSize(GetRenderTargetSize()));
 
   // Set the initial stencil reference.
   command_buffer_vk_.setStencilReference(vk::StencilFaceFlagBits::eFrontAndBack,
@@ -767,6 +709,14 @@ bool RenderPassVK::BindResource(ShaderStage stage,
   }
   const TextureVK& texture_vk = TextureVK::Cast(*texture);
   const SamplerVK& sampler_vk = SamplerVK::Cast(*sampler);
+  const auto source = texture_vk.GetTextureSource();
+  if (source->GetExternalImageOwnership() &&
+      (!command_buffer_->HasPreparedExternalImage(*source) ||
+       texture_vk.GetLayout() != vk::ImageLayout::eShaderReadOnlyOptimal)) {
+    VALIDATION_LOG
+        << "External sampled image must be prepared before the pass.";
+    return false;
+  }
 
   if (!command_buffer_->Track(texture)) {
     return false;
@@ -794,16 +744,12 @@ bool RenderPassVK::BindResource(ShaderStage stage,
 
 bool RenderPassVK::OnEncodeCommands(const Context& context) const {
   command_buffer_->GetCommandBuffer().endRenderPass();
-  const auto& output_texture =
-      resolve_image_vk_ ? resolve_image_vk_ : color_image_vk_;
-  const auto source = TextureVK::Cast(*output_texture).GetTextureSource();
-  if (const auto ownership = source->GetExternalImageOwnership()) {
-    const auto& vk_context = ContextVK::Cast(context);
-    EncodeExternalImageRelease(
-        *source, *ownership, command_buffer_->GetCommandBuffer(),
-        static_cast<uint32_t>(
-            vk_context.GetGraphicsQueue()->GetIndex().family));
-  }
+  const auto& output = resolve_image_vk_ ? resolve_image_vk_ : color_image_vk_;
+  command_buffer_->RecordExternalImageLayout(
+      *TextureVK::Cast(*output).GetTextureSource());
+  // The imported parent may be sampled and blitted by later coverage tiles.
+  // CommandBufferVK releases declared external images after its final access,
+  // before ending the command buffer and signaling its completion semaphore.
   return true;
 }
 

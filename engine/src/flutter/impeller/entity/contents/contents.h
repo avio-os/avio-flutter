@@ -94,13 +94,16 @@ class Contents {
     // Attach depth/stencil to the snapshot target. Contents that draw a
     // single cover without clips or stencil fills do not need it.
     bool depth_stencil_enabled = true;
+    // Runtime shader samplers require logical 0..1 to span the physical image.
+    // This is an explicitly counted 1x layer overflow when no bank image fits.
+    bool exact_texture_extent = false;
   };
 
   //----------------------------------------------------------------------------
   /// @brief Render this contents to a snapshot, respecting the entity's
   ///        transform, path, clip depth, and blend mode.
-  ///        The result texture size is always the size of
-  ///        `GetCoverage(entity)`.
+  ///        Logical coverage is recorded separately from the physical texture
+  ///        extent, which may be a larger fixed region-bank image.
   ///
   virtual std::optional<Snapshot> RenderToSnapshot(
       const ContentContext& renderer,

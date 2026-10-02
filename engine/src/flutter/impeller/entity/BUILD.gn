@@ -72,6 +72,23 @@ impeller_shaders("entity_shaders") {
     "shaders/texture_downsample_bounded.frag",
     "shaders/texture_downsample_gles.frag",
   ]
+  if (impeller_enable_vulkan) {
+    # Keep the native mask entrypoints in the existing entity library loaded
+    # by Vulkan contexts. GLES3 cannot express sampler2DMS; never substitute a
+    # resolved scalar mask for that backend.
+    shaders += [
+      "shaders/coverage_mask.frag",
+      "shaders/coverage_mask.vert",
+      "shaders/coverage_quad.frag",
+      "shaders/coverage_quad.vert",
+    ]
+    gles_exclusions = [
+      "shaders/coverage_mask.frag",
+      "shaders/coverage_mask.vert",
+      "shaders/coverage_quad.frag",
+      "shaders/coverage_quad.vert",
+    ]
+  }
 }
 
 impeller_shaders("modern_entity_shaders") {
@@ -116,6 +133,11 @@ impeller_shaders("framebuffer_blend_entity_shaders") {
 
 impeller_component("entity") {
   sources = [
+    "avio_coverage_region.cc",
+    "avio_coverage_region.h",
+    "avio_region_packing.cc",
+    "avio_region_packing.h",
+    "clip_operation.h",
     "contents/anonymous_contents.cc",
     "contents/anonymous_contents.h",
     "contents/atlas_contents.cc",
@@ -124,6 +146,8 @@ impeller_component("entity") {
     "contents/circle_contents.h",
     "contents/clip_contents.cc",
     "contents/clip_contents.h",
+    "contents/clip_coverage.cc",
+    "contents/clip_coverage.h",
     "contents/color_source_contents.cc",
     "contents/color_source_contents.h",
     "contents/complex_rse_contents.cc",
@@ -132,6 +156,13 @@ impeller_component("entity") {
     "contents/conical_gradient_contents.h",
     "contents/content_context.cc",
     "contents/content_context.h",
+    "contents/coverage_atlas.cc",
+    "contents/coverage_atlas.h",
+    "contents/coverage_mask_cache.h",
+    "contents/coverage_mask_contents.cc",
+    "contents/coverage_mask_contents.h",
+    "contents/coverage_path_atlas.cc",
+    "contents/coverage_path_atlas.h",
     "contents/contents.cc",
     "contents/contents.h",
     "contents/external_coverage_contents.cc",
@@ -210,6 +241,8 @@ impeller_component("entity") {
     "contents/uber_sdf_parameters.h",
     "contents/vertices_contents.cc",
     "contents/vertices_contents.h",
+    "coverage_tiled_render_pass.cc",
+    "coverage_tiled_render_pass.h",
     "draw_order_resolver.cc",
     "draw_order_resolver.h",
     "entity.cc",
@@ -224,6 +257,8 @@ impeller_component("entity") {
     "geometry/circle_geometry.h",
     "geometry/cover_geometry.cc",
     "geometry/cover_geometry.h",
+    "geometry/coverage_geometry.cc",
+    "geometry/coverage_geometry.h",
     "geometry/ellipse_geometry.cc",
     "geometry/ellipse_geometry.h",
     "geometry/fill_path_geometry.cc",
@@ -287,7 +322,11 @@ impeller_component("entity_unittests") {
   testonly = true
 
   sources = [
+    "avio_coverage_region_unittests.cc",
     "clip_stack_unittests.cc",
+    "contents/clip_coverage_unittests.cc",
+    "contents/coverage_atlas_unittests.cc",
+    "contents/coverage_mask_cache_unittests.cc",
     "contents/filters/blend_filter_contents_unittests.cc",
     "contents/filters/gaussian_blur_filter_contents_unittests.cc",
     "contents/filters/inputs/filter_input_unittests.cc",
@@ -298,12 +337,14 @@ impeller_component("entity_unittests") {
     "contents/tiled_texture_contents_unittests.cc",
     "contents/uber_sdf_contents_unittests.cc",
     "contents/uber_sdf_parameters_unittests.cc",
+    "coverage_tiled_render_pass_unittests.cc",
     "draw_order_resolver_unittests.cc",
     "entity_pass_target_unittests.cc",
     "entity_playground.cc",
     "entity_playground.h",
     "entity_unittests.cc",
     "geometry/geometry_unittests.cc",
+    "geometry/coverage_geometry_unittests.cc",
     "geometry/shadow_path_geometry_unittests.cc",
     "inline_pass_context_unittests.cc",
     "render_target_cache_unittests.cc",

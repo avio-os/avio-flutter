@@ -7,6 +7,7 @@
 
 #include <cstdint>
 
+#include "impeller/entity/clip_operation.h"
 #include "impeller/entity/contents/contents.h"
 #include "impeller/geometry/color.h"
 #include "impeller/geometry/matrix.h"
@@ -64,10 +65,7 @@ class Entity {
     kDecal,
   };
 
-  enum class ClipOperation {
-    kDifference,
-    kIntersect,
-  };
+  using ClipOperation = impeller::ClipOperation;
 
   /// @brief  Create an entity that can be used to render a given snapshot.
   static Entity FromSnapshot(const Snapshot& snapshot,

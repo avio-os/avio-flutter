@@ -30,12 +30,15 @@ struct FramebufferAndRenderPass {
 
 class Context;
 class ExternalSemaphoreVK;
+class TextureSourceVK;
 
 /// @brief      Describes a VkSemaphore that a queue submission must wait on
 ///             before executing commands that reference the associated texture.
 struct WaitSemaphore {
   vk::UniqueSemaphore semaphore;
   vk::PipelineStageFlags wait_stage;
+  // Exact source custody until queue.submit accepts the wait or returns it.
+  std::shared_ptr<const TextureSourceVK> source;
 };
 
 /// Describes an image whose exclusive queue-family ownership crosses the
@@ -165,10 +168,22 @@ class TextureSourceVK {
   ///
   virtual size_t GetAllocatedByteSize() const;
 
+  // Only allocator-owned Image/Glyph sources implement this census hook;
+  // imported producer images and scratch targets never become image uploads.
+  // The caller supplies frame origin after a successful upload command encode.
+  virtual void RecordAvioImageUpload(bool raster_frame) const;
+
   virtual std::optional<ExternalImageOwnershipVK> GetExternalImageOwnership()
       const;
 
   virtual std::optional<WaitSemaphore> ConsumeAcquireSemaphore() const;
+
+  /// Called only inside the owning graphics queue's SubmitLocked callback.
+  /// Recording an image reference does not consume its producer dependency.
+  /// Failed queue submissions return the exact semaphore before unlocking;
+  /// a later submitted reader must still wait on the original producer.
+  std::optional<WaitSemaphore> TakeAcquireSemaphoreForSubmit() const;
+  void ReturnAcquireSemaphoreFromFailedSubmit(WaitSemaphore wait) const;
 
   virtual std::shared_ptr<ExternalSemaphoreVK>
   CreateRenderCompleteSignalSemaphore(
@@ -220,6 +235,10 @@ class TextureSourceVK {
   // mip chain).
   std::vector<CachedFrameDataEntry> frame_data_;
   mutable vk::ImageLayout layout_ = vk::ImageLayout::eUndefined;
+  // No self-reference: the temporary WaitSemaphore owns the source, while the
+  // source retains only a returned Vulkan handle and its original wait stage.
+  mutable vk::UniqueSemaphore returned_acquire_semaphore_;
+  mutable vk::PipelineStageFlags returned_acquire_stage_;
 };
 
 }  // namespace impeller

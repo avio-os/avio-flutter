@@ -26,6 +26,7 @@
 #include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/fml/time/time_delta.h"
 #include "flutter/fml/time/time_point.h"
+#include "impeller/renderer/render_resource_report.h"
 #if IMPELLER_SUPPORTS_RENDERING
 #include "impeller/core/formats.h"               // nogncheck
 #include "impeller/display_list/aiks_context.h"  // nogncheck
@@ -295,6 +296,11 @@ class Rasterizer final : public SnapshotDelegate,
   /// @return     The weak pointer to the rasterizer.
   ///
   fml::TaskRunnerAffineWeakPtr<Rasterizer> GetWeakPtr() const;
+
+  // Raster-thread only, report-only: never creates a renderer, ages or leases
+  // a cache, nor waits for GPU work. Only interval counters may reset.
+  impeller::AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool start_new_interval);
 
   fml::TaskRunnerAffineWeakPtr<SnapshotDelegate> GetSnapshotDelegate() const;
 
@@ -852,6 +858,9 @@ class Rasterizer final : public SnapshotDelegate,
   Delegate& delegate_;
   [[maybe_unused]] MakeGpuImageBehavior gpu_image_behavior_;
   std::shared_ptr<impeller::ImpellerContextFuture> impeller_context_;
+  // Same context retained by impeller_context_, observed without waiting for
+  // its future when the surface is absent. Never creates a renderer.
+  std::shared_ptr<impeller::Context> avio_report_context_;
   std::unique_ptr<Surface> surface_;
   std::unique_ptr<SnapshotSurfaceProducer> snapshot_surface_producer_;
   std::unique_ptr<flutter::CompositorContext> compositor_context_;

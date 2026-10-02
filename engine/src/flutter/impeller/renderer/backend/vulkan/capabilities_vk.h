@@ -397,6 +397,10 @@ class CapabilitiesVK final : public Capabilities,
   /// available.
   bool SupportsDmabufImport() const;
 
+  /// Exact resources required by the sample-identity coverage cache. Global
+  /// framebuffer sample limits alone do not establish sampled R8 4x support.
+  bool SupportsAvioCoverageResources() const;
+
   //----------------------------------------------------------------------------
   /// @brief      Get the fixed compression rate supported by the context for
   ///             the given format and usage.

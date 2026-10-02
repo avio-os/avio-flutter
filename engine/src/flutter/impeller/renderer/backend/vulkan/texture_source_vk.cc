@@ -24,6 +24,24 @@ std::optional<WaitSemaphore> TextureSourceVK::ConsumeAcquireSemaphore() const {
   return std::nullopt;
 }
 
+std::optional<WaitSemaphore> TextureSourceVK::TakeAcquireSemaphoreForSubmit()
+    const {
+  if (returned_acquire_semaphore_) {
+    WaitSemaphore wait;
+    wait.semaphore = std::move(returned_acquire_semaphore_);
+    wait.wait_stage = returned_acquire_stage_;
+    return wait;
+  }
+  return ConsumeAcquireSemaphore();
+}
+
+void TextureSourceVK::ReturnAcquireSemaphoreFromFailedSubmit(
+    WaitSemaphore wait) const {
+  FML_DCHECK(!returned_acquire_semaphore_);
+  returned_acquire_semaphore_ = std::move(wait.semaphore);
+  returned_acquire_stage_ = wait.wait_stage;
+}
+
 std::shared_ptr<ExternalSemaphoreVK>
 TextureSourceVK::CreateRenderCompleteSignalSemaphore(
     const std::shared_ptr<Context>& context) const {
@@ -44,6 +62,8 @@ TextureSourceVK::GetExternalImageOwnership() const {
 size_t TextureSourceVK::GetAllocatedByteSize() const {
   return 0u;
 }
+
+void TextureSourceVK::RecordAvioImageUpload(bool raster_frame) const {}
 
 vk::ImageLayout TextureSourceVK::GetLayout() const {
   return layout_;

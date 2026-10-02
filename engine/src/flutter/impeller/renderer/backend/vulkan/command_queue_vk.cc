@@ -70,14 +70,6 @@ fml::Status CommandQueueVK::Submit(
   std::vector<vk::Semaphore> wait_semaphore_handles;
   std::vector<vk::PipelineStageFlags> wait_stage_masks;
   std::vector<WaitSemaphore> wait_semaphores_storage;
-  for (auto& objs : tracked_objects) {
-    for (auto& sem : objs->TakeWaitSemaphores()) {
-      wait_semaphore_handles.push_back(*sem.semaphore);
-      wait_stage_masks.push_back(sem.wait_stage);
-      wait_semaphores_storage.push_back(std::move(sem));
-    }
-  }
-
   std::vector<TrackedObjectsVK::PendingSignalSemaphoreVK>
       signal_semaphores_storage;
   std::vector<vk::Semaphore> signal_semaphore_handles;
@@ -107,10 +99,6 @@ fml::Status CommandQueueVK::Submit(
 
   vk::SubmitInfo render_submit_info;
   render_submit_info.setCommandBuffers(vk_buffers);
-  if (!wait_semaphore_handles.empty()) {
-    render_submit_info.setWaitSemaphores(wait_semaphore_handles);
-    render_submit_info.setWaitDstStageMask(wait_stage_masks);
-  }
   signal_semaphore_handles.push_back(internal_dependency_semaphore.get());
   render_submit_info.setSignalSemaphores(signal_semaphore_handles);
 
@@ -142,6 +130,20 @@ fml::Status CommandQueueVK::Submit(
   uint64_t completion_value = 0u;
   auto status = context->GetGraphicsQueue()->SubmitLocked(
       [&](const vk::Queue& queue) -> vk::Result {
+        // Take producer dependencies at actual submission, rather than while
+        // recording. The queue lock orders two readers of one source and also
+        // keeps a failed first submit's returned wait ahead of the next reader.
+        for (auto& objs : tracked_objects) {
+          for (auto& wait : objs->TakeWaitSemaphores()) {
+            wait_semaphore_handles.push_back(*wait.semaphore);
+            wait_stage_masks.push_back(wait.wait_stage);
+            wait_semaphores_storage.push_back(std::move(wait));
+          }
+        }
+        if (!wait_semaphore_handles.empty()) {
+          submit_infos[0].setWaitSemaphores(wait_semaphore_handles);
+          submit_infos[0].setWaitDstStageMask(wait_stage_masks);
+        }
         // Timeline values must reflect actual queue submission order. The
         // marker batch waits on a queue-local binary semaphore signaled by the
         // render batch, so CPU completion cannot run before render execution
@@ -149,7 +151,15 @@ fml::Status CommandQueueVK::Submit(
         completion_value = completion->ReserveSubmitValue();
         submission_id = tracker->RecordSubmission();
         completion_signal_values[0] = completion_value;
-        return queue.submit(submit_infos, vk::Fence{});
+        const auto result = queue.submit(submit_infos, vk::Fence{});
+        if (result != vk::Result::eSuccess) {
+          for (auto& wait : wait_semaphores_storage) {
+            auto source = wait.source;
+            source->ReturnAcquireSemaphoreFromFailedSubmit(std::move(wait));
+          }
+          wait_semaphores_storage.clear();
+        }
+        return result;
       });
   if (status != vk::Result::eSuccess) {
     if (submission_id != 0u) {

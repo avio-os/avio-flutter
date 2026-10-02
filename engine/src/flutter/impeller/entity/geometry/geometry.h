@@ -99,6 +99,10 @@ class Geometry {
 
   virtual GeometryResult::Mode GetResultMode() const;
 
+  // Only immutable fill paths participate in the native binary mask cache.
+  // Stroke expansion/alpha compensation is deliberately kept in its renderer.
+  virtual const flutter::DlPath* GetFillPath() const { return nullptr; }
+
   /// @brief The coverage rectangle of this geometry, transformed by the
   ///        `transform` argument.
   virtual std::optional<Rect> GetCoverage(const Matrix& transform) const = 0;

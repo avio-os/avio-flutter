@@ -35,6 +35,10 @@ FilterInput::Ref FilterInput::Make(Variant input,
     return Make(*texture, Matrix());
   }
 
+  if (auto snapshot = std::get_if<Snapshot>(&input)) {
+    return Make(*snapshot);
+  }
+
   if (auto rect = std::get_if<Rect>(&input)) {
     return std::shared_ptr<PlaceholderFilterInput>(
         new PlaceholderFilterInput(*rect));
@@ -45,8 +49,13 @@ FilterInput::Ref FilterInput::Make(Variant input,
 
 FilterInput::Ref FilterInput::Make(std::shared_ptr<Texture> texture,
                                    Matrix local_transform) {
+  return std::shared_ptr<TextureFilterInput>(new TextureFilterInput(
+      Snapshot{.texture = std::move(texture), .transform = local_transform}));
+}
+
+FilterInput::Ref FilterInput::Make(Snapshot snapshot) {
   return std::shared_ptr<TextureFilterInput>(
-      new TextureFilterInput(std::move(texture), local_transform));
+      new TextureFilterInput(std::move(snapshot)));
 }
 
 FilterInput::Vector FilterInput::Make(std::initializer_list<Variant> inputs) {
@@ -56,6 +65,27 @@ FilterInput::Vector FilterInput::Make(std::initializer_list<Variant> inputs) {
     result.push_back(Make(input));
   }
   return result;
+}
+
+std::optional<Snapshot> FilterInput::GetSnapshotWithExactTextureExtent(
+    std::string_view label,
+    const ContentContext& renderer,
+    const Entity& entity,
+    std::optional<Rect> coverage_limit) const {
+  auto snapshot = GetSnapshot(label, renderer, entity, coverage_limit);
+  if (!snapshot || !snapshot->texture ||
+      snapshot->GetTextureRect() ==
+          Rect::MakeSize(snapshot->texture->GetSize())) {
+    return snapshot;
+  }
+  auto source = Entity::FromSnapshot(*snapshot, BlendMode::kSrc);
+  return source.GetContents()->Contents::RenderToSnapshot(
+      renderer, source,
+      {.msaa_enabled = false,
+       .label = label,
+       .coverage_expansion = 0,
+       .depth_stencil_enabled = false,
+       .exact_texture_extent = true});
 }
 
 Matrix FilterInput::GetLocalTransform(const Entity& entity) const {

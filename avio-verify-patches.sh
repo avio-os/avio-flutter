@@ -75,9 +75,9 @@ echo "--- Exact frame opportunities ---"
 need "exact opportunity feature negotiation" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureFrameOpportunityOutcomes'
-need "Avio ABI extension version (v6; patch 46u adds no ABI)" \
+need "Avio ABI extension version (v8 coverage policy/report)" \
   $F/shell/platform/embedder/embedder.h \
-  'FLUTTER_AVIO_EXTENSION_VERSION 6u'
+  'FLUTTER_AVIO_EXTENSION_VERSION 8u'
 need "render-deadline semantic feature" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureRenderDeadline'
@@ -191,8 +191,8 @@ need "only the caller-owned root target opts out of the first-pass clear" \
   $F/impeller/display_list/canvas.cc \
   'honor_declared_load_action=\*/false'
 need "preserved foreign target acquire declares attachment reads" \
-  $F/impeller/renderer/backend/vulkan/render_pass_vk.cc \
-  'dstAccessMask \|= vk::AccessFlagBits::eColorAttachmentRead'
+  $F/impeller/renderer/backend/vulkan/command_buffer_vk.cc \
+  'vk::AccessFlagBits::eMemoryRead \| vk::AccessFlagBits::eMemoryWrite'
 need "preserved render-pass dependency declares attachment reads" \
   $F/impeller/renderer/backend/vulkan/render_pass_builder_vk.cc \
   'dstAccessMask \|= vk::AccessFlagBits::eColorAttachmentRead'
@@ -531,7 +531,7 @@ need "per-display mode requires that opt-in" \
   'per_display_opt_in_ && !display_states_\.empty\(\)'
 need "unscoped requests fall through to the global frame clock" \
   $F/shell/common/animator.cc \
-  'display_owns_a_view && default_state_\.view_ids\.empty\(\)'
+  'display_owns_a_view && default_state_\.renderable_view_ids\.empty\(\)'
 need "display-registration starvation regression" \
   $F/shell/common/animator_unittests.cc \
   'DisplayRegistrationAloneDoesNotEnterPerDisplayMode'
@@ -557,15 +557,15 @@ echo "--- External Vulkan image ownership ---"
 need "typed external queue-family ownership" \
   $F/impeller/renderer/backend/vulkan/texture_source_vk.h \
   'struct ExternalImageOwnershipVK'
-need "render-pass external image acquire" \
-  $F/impeller/renderer/backend/vulkan/render_pass_vk.cc \
-  'EncodeExternalImageAcquire'
-need "render-pass external image release" \
-  $F/impeller/renderer/backend/vulkan/render_pass_vk.cc \
-  'EncodeExternalImageRelease'
+need "command-buffer external image acquire covers every pass" \
+  $F/impeller/renderer/backend/vulkan/command_buffer_vk.cc \
+  'PrepareExternalImage'
+need "command-buffer external image release follows every pass" \
+  $F/impeller/renderer/backend/vulkan/command_buffer_vk.cc \
+  'ReleaseExternalImages'
 need "external ownership covers the full texture descriptor" \
-  $F/impeller/renderer/backend/vulkan/render_pass_vk.cc \
-  'ToArrayLayerCount\(source\.GetTextureDescriptor\(\)\)'
+  $F/impeller/renderer/backend/vulkan/command_buffer_vk.cc \
+  'ToArrayLayerCount\(texture->GetTextureDescriptor\(\)\)'
 need "embedder ownership ABI field" \
   $F/shell/platform/embedder/embedder.h \
   'has_external_queue_family_ownership'
@@ -631,6 +631,70 @@ need "Screen old-fetch versus pipeline edge comparison" \
   "$F/impeller/display_list/aiks_dl_backdrop_flip_unittests.cc" 'ScreenPreviousFetchAndPipelineClippedEdgesGolden'
 need "Screen design and open look gates" \
   docs/engine/impeller/docs/avio-screen-coefficient-design.md 'Pixel operator and acceptance'
+
+echo "--- Explicit coverage policy and typed resource census ---"
+need "appended antialiasing ABI configuration" \
+  "$F/shell/platform/embedder/embedder.h" 'avio_antialiasing_config'
+need "coverage and report negotiate distinct capabilities" \
+  "$F/shell/platform/embedder/embedder.h" 'kFlutterAvioExtensionFeatureAntialiasingPolicy'
+need "coverage implementation fact gates advertisement" \
+  "$F/shell/platform/embedder/embedder.cc" 'kAvioCoveragePolicyImplemented'
+need "integrated source coverage capability is enabled" \
+  "$F/impeller/core/antialiasing_policy.h" 'kAvioCoveragePolicyImplemented = true'
+need "unknown or truncated coverage config fails closed" \
+  "$F/shell/platform/embedder/avio_antialiasing_config.h" 'Antialiasing config was truncated'
+need "native coverage resources are checked before allocation" \
+  "$F/impeller/renderer/backend/vulkan/context_vk.cc" 'SupportsAvioCoverageResources'
+need "context refusal reaches the engine initialization boundary" \
+  "$F/shell/platform/embedder/embedder.cc" 'Could not initialize Vulkan Impeller surface'
+need "root coverage wraps imported color without auxiliary attachments" \
+  "$F/shell/platform/embedder/embedder.cc" 'MakeAvioCoverageRootTarget'
+need "root target imported-source lifetime regression" \
+  "$F/shell/platform/embedder/avio_coverage_root_target_unittests.cc" 'CoverageRootRetainsImportedColorWithoutAuxiliaryAttachments'
+need "bounded coverage and layer region implementation" \
+  "$F/impeller/entity/avio_coverage_region.cc" 'AvioCoverageRegion::'
+need "physical sample4 path atlas" \
+  "$F/impeller/entity/contents/coverage_path_atlas.cc" 'AcquirePathMask'
+need "coverage clip/path cache" \
+  "$F/impeller/entity/contents/coverage_mask_cache.h" 'CoverageMaskCache'
+need "deferred tiled coverage render pass" \
+  "$F/impeller/entity/coverage_tiled_render_pass.cc" 'CoverageTiledRenderPass::'
+need "tiled coverage executor implementation is in GN" \
+  "$F/impeller/entity/BUILD.gn" '"coverage_tiled_render_pass.cc"'
+need "tiled coverage executor header is in GN" \
+  "$F/impeller/entity/BUILD.gn" '"coverage_tiled_render_pass.h"'
+need "tiled coverage executor regressions are in GN" \
+  "$F/impeller/entity/BUILD.gn" '"coverage_tiled_render_pass_unittests.cc"'
+need "non-AA and filter subpasses have an explicit 1x route" \
+  "$F/impeller/entity/contents/content_context.cc" 'CoverageTiledRenderPass::MakeDirect1x'
+need "common coverage pipelines are initialized before raster frames" \
+  "$F/impeller/entity/contents/content_context.cc" 'PrewarmAvioCoveragePipelines'
+need "runtime Canvas selects coverage explicitly" \
+  "$F/impeller/display_list/canvas.cc" 'UsesAvioCoverage'
+need "shared backdrop readers retain a frozen prefix" \
+  "$F/impeller/display_list/canvas.cc" 'backdrop_data->frozen_prefix'
+need "logical snapshots retain resource custody" \
+  "$F/impeller/renderer/snapshot.h" 'resource_owner'
+need "resource report uses bounded storage" \
+  "$F/impeller/renderer/render_resource_report.h" 'kMaxEntries = 64u'
+need "typed report entry point" \
+  "$F/shell/platform/embedder/embedder.h" 'FlutterEngineRequestAvioRenderResourceReport'
+need "asynchronous report custody closes before shell teardown" \
+  "$F/shell/platform/embedder/embedder_engine.cc" 'requests->Close'
+need "reports keep event units distinct from draw reasons" \
+  "$F/shell/platform/embedder/embedder.h" 'layer_region_overflow_real_bytes'
+need "physical image source lifetime census" \
+  "$F/impeller/renderer/backend/vulkan/allocator_vk.cc" 'AllocatedImageLedger'
+need "native pipeline lifetime census" \
+  "$F/impeller/renderer/backend/vulkan/pipeline_vk.h" 'resource_registration_'
+need "frame origin survives asynchronous pipeline compilation" \
+  "$F/impeller/renderer/backend/vulkan/pipeline_library_vk.cc" 'IsAvioRasterFrameActive'
+need "renderer ledger/report contracts are in GN" \
+  "$F/impeller/renderer/BUILD.gn" 'render_resource_contracts'
+need "standalone production coverage contracts are in GN" \
+  "$F/shell/platform/embedder/BUILD.gn" 'avio_coverage_contract_tests'
+need "coverage design and honest packaging gates" \
+  AVIO_PATCHES.md 'Patch 55: explicit coverage policy and resource census'
 
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"

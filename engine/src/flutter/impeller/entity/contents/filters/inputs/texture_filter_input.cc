@@ -10,9 +10,8 @@
 
 namespace impeller {
 
-TextureFilterInput::TextureFilterInput(std::shared_ptr<Texture> texture,
-                                       Matrix local_transform)
-    : texture_(std::move(texture)), local_transform_(local_transform) {}
+TextureFilterInput::TextureFilterInput(Snapshot snapshot)
+    : snapshot_(std::move(snapshot)) {}
 
 TextureFilterInput::~TextureFilterInput() = default;
 
@@ -22,9 +21,9 @@ std::optional<Snapshot> TextureFilterInput::GetSnapshot(
     const Entity& entity,
     std::optional<Rect> coverage_limit,
     int32_t mip_count) const {
-  auto snapshot =
-      Snapshot{.texture = texture_, .transform = GetTransform(entity)};
-  if (texture_->GetMipCount() > 1) {
+  auto snapshot = snapshot_;
+  snapshot.transform = GetTransform(entity);
+  if (snapshot.texture && snapshot.texture->GetMipCount() > 1) {
     snapshot.sampler_descriptor.label = "TextureFilterInput Trilinear Sampler";
     snapshot.sampler_descriptor.mip_filter = MipFilter::kLinear;
   }
@@ -33,12 +32,13 @@ std::optional<Snapshot> TextureFilterInput::GetSnapshot(
 
 std::optional<Rect> TextureFilterInput::GetCoverage(
     const Entity& entity) const {
-  return Rect::MakeSize(texture_->GetSize())
-      .TransformBounds(GetTransform(entity));
+  auto snapshot = snapshot_;
+  snapshot.transform = GetTransform(entity);
+  return snapshot.GetCoverage();
 }
 
 Matrix TextureFilterInput::GetLocalTransform(const Entity& entity) const {
-  return local_transform_;
+  return snapshot_.transform;
 }
 
 }  // namespace impeller

@@ -82,6 +82,14 @@ class RenderPass : public ResourceBinder {
   ///
   virtual void SetScissor(IRect32 scissor);
 
+  // Conservative logical bounds for subsequent draws. Unknown bounds retain
+  // full-pass coverage; immediate backends do not need this recording hint.
+  virtual void SetDrawCoverage(std::optional<Rect>) {}
+
+  // Keep suballocation/atlas custody alive through deferred command encoding.
+  // Texture ownership alone does not prevent reuse of a shared texture region.
+  virtual void RetainResource(std::shared_ptr<void> owner);
+
   //----------------------------------------------------------------------------
   /// The number of elements to draw. When only a vertex buffer is set, this is
   /// the vertex count. When an index buffer is set, this is the index count.
@@ -262,8 +270,11 @@ class RenderPass : public ResourceBinder {
   ///
   bool AddCommand(Command&& command);
 
+  // A recording pass may have a logical coordinate extent different from
+  // its bounded physical scratch attachments. Texture metadata stays physical.
   RenderPass(std::shared_ptr<const Context> context,
-             const RenderTarget& target);
+             const RenderTarget& target,
+             std::optional<ISize> logical_size = std::nullopt);
 
   static bool ValidateVertexBuffers(const BufferView vertex_buffers[],
                                     size_t vertex_buffer_count);
@@ -290,6 +301,7 @@ class RenderPass : public ResourceBinder {
                    raw_ptr<const Sampler>);
 
   Command pending_;
+  std::vector<std::shared_ptr<void>> retained_resources_;
   std::optional<size_t> bound_buffers_start_ = std::nullopt;
   std::optional<size_t> bound_textures_start_ = std::nullopt;
   std::optional<size_t> vertex_buffers_start_ = std::nullopt;

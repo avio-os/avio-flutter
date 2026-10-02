@@ -66,6 +66,16 @@ std::optional<Entity> YUVToRGBFilterContents::RenderFilter(
     return std::nullopt;
   }
 
+  // Both plane samplers share normalized coordinates. A mismatched crop must
+  // not silently sample another region of the chroma plane.
+  auto y_uv_rect = Rect::MakeSize(y_input_snapshot->texture->GetSize())
+                       .Project(y_input_snapshot->GetTextureRect());
+  auto uv_uv_rect = Rect::MakeSize(uv_input_snapshot->texture->GetSize())
+                        .Project(uv_input_snapshot->GetTextureRect());
+  if (y_uv_rect != uv_uv_rect) {
+    return std::nullopt;
+  }
+
   //----------------------------------------------------------------------------
   /// Create AnonymousContents for rendering.
   ///
@@ -80,12 +90,14 @@ std::optional<Entity> YUVToRGBFilterContents::RenderFilter(
     pass.SetPipeline(renderer.GetYUVToRGBFilterPipeline(options));
 
     auto size = y_input_snapshot->texture->GetSize();
+    auto uv_rect =
+        Rect::MakeSize(size).Project(y_input_snapshot->GetTextureRect());
 
     std::array<VS::PerVertexData, 4> vertices = {
-        VS::PerVertexData{Point(0, 0)},
-        VS::PerVertexData{Point(1, 0)},
-        VS::PerVertexData{Point(0, 1)},
-        VS::PerVertexData{Point(1, 1)},
+        VS::PerVertexData{uv_rect.GetLeftTop()},
+        VS::PerVertexData{uv_rect.GetRightTop()},
+        VS::PerVertexData{uv_rect.GetLeftBottom()},
+        VS::PerVertexData{uv_rect.GetRightBottom()},
     };
 
     auto& data_host_buffer = renderer.GetTransientsDataBuffer();
@@ -116,6 +128,8 @@ std::optional<Entity> YUVToRGBFilterContents::RenderFilter(
     FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
     VS::BindFrameInfo(pass, data_host_buffer.EmplaceUniform(frame_info));
 
+    pass.RetainResource(y_input_snapshot->resource_owner);
+    pass.RetainResource(uv_input_snapshot->resource_owner);
     return pass.Draw().ok();
   };
 

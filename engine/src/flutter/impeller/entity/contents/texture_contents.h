@@ -62,6 +62,8 @@ class TextureContents final : public Contents {
 
   std::shared_ptr<Texture> GetTexture() const;
 
+  void SetResourceOwner(std::shared_ptr<void> owner);
+
   void SetSamplerDescriptor(const SamplerDescriptor& desc);
 
   const SamplerDescriptor& GetSamplerDescriptor() const;
@@ -138,6 +140,7 @@ class TextureContents final : public Contents {
   bool stencil_enabled_ = true;
 
   std::shared_ptr<Texture> texture_;
+  std::shared_ptr<void> resource_owner_;
   SamplerDescriptor sampler_descriptor_ = {};
   Rect source_rect_;
   bool strict_source_rect_enabled_ = false;

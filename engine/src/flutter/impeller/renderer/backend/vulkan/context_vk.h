@@ -91,6 +91,7 @@ class ContextVK final : public Context,
         PipelineCacheAccessVK::kReadWrite;
     size_t pipeline_cache_max_data_bytes = kDefaultPipelineCacheMaxDataBytes;
     std::optional<TransientsPoolLimitsVK> swapchain_transients_limits;
+    std::optional<AvioAntialiasingConfig> avio_antialiasing_config;
     bool enable_validation = false;
     bool enable_gpu_tracing = false;
     bool enable_surface_control = false;
@@ -125,6 +126,10 @@ class ContextVK final : public Context,
 
   // |Context|
   bool IsValid() const override;
+
+  const AvioAntialiasingConfig& GetAvioAntialiasingConfig() const override;
+  AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool start_new_interval) const override;
 
   // |Context|
   std::shared_ptr<Allocator> GetResourceAllocator() const override;
@@ -340,6 +345,7 @@ class ContextVK final : public Context,
 
   const uint64_t hash_;
 
+  AvioAntialiasingConfig avio_antialiasing_config_;
   bool is_valid_ = false;
 
   explicit ContextVK(const Flags& flags);

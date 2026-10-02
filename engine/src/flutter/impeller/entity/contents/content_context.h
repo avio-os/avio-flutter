@@ -82,6 +82,7 @@ struct ContentContextOptions {
   PrimitiveType primitive_type = PrimitiveType::kTriangle;
   PixelFormat color_attachment_pixel_format = PixelFormat::kUnknown;
   bool has_depth_stencil_attachments = true;
+  bool is_stencil_only = false;
   bool depth_write_enabled = false;
   bool is_for_rrect_blur_clear = false;
 
@@ -95,7 +96,7 @@ struct ContentContextOptions {
     static_assert(sizeof(color_attachment_pixel_format) == 1);
 
     return (is_for_rrect_blur_clear ? 1llu : 0llu) << 0 |
-           (0) << 1 |  // // Unused, previously wireframe.
+           (is_stencil_only ? 1llu : 0llu) << 1 |
            (has_depth_stencil_attachments ? 1llu : 0llu) << 2 |
            (depth_write_enabled ? 1llu : 0llu) << 3 |
            // enums
@@ -119,6 +120,8 @@ enum ConicalKind {
 
 class Tessellator;
 class RenderTargetCache;
+class AvioCoverageRegion;
+class CoveragePathAtlas;
 
 class ContentContext {
  public:
@@ -130,6 +133,16 @@ class ContentContext {
   ~ContentContext();
 
   bool IsValid() const;
+  bool UsesAvioCoverage() const;
+  std::shared_ptr<AvioCoverageRegion> GetAvioCoverageRegion() const;
+  CoveragePathAtlas* GetCoveragePathAtlas() const;
+  AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool start_new_interval) const;
+
+  // Nested snapshots share the enclosing raster frame's fixed regions. The
+  // final scope closes only after all recorded readers have been encoded.
+  bool BeginAvioRasterFrame() const;
+  void EndAvioRasterFrame() const;
 
   Tessellator& GetTessellator() const;
 
@@ -153,6 +166,8 @@ class ContentContext {
   PipelineRef GetCirclePipeline(ContentContextOptions opts) const;
   PipelineRef GetClearBlendPipeline(ContentContextOptions opts) const;
   PipelineRef GetClipPipeline(ContentContextOptions opts) const;
+  PipelineRef GetCoverageMaskPipeline(ContentContextOptions opts) const;
+  PipelineRef GetCoverageQuadPipeline(ContentContextOptions opts) const;
   PipelineRef GetColorMatrixColorFilterPipeline(ContentContextOptions opts) const;
   PipelineRef GetConicalGradientFillPipeline(ContentContextOptions opts, ConicalKind kind) const;
   PipelineRef GetConicalGradientSSBOFillPipeline(ContentContextOptions opts, ConicalKind kind) const;
@@ -245,14 +260,16 @@ class ContentContext {
       const SubpassCallback& subpass_callback,
       bool msaa_enabled = true,
       bool depth_stencil_enabled = false,
-      int32_t mip_count = 1) const;
+      int32_t mip_count = 1,
+      bool exact_texture_extent = false) const;
 
   /// Makes a subpass that will render to `subpass_target`.
   fml::StatusOr<RenderTarget> MakeSubpass(
       std::string_view label,
       const RenderTarget& subpass_target,
       const std::shared_ptr<CommandBuffer>& command_buffer,
-      const SubpassCallback& subpass_callback) const;
+      const SubpassCallback& subpass_callback,
+      bool coverage_antialiasing = false) const;
 
   const std::shared_ptr<LazyGlyphAtlas>& GetLazyGlyphAtlas() const {
     return lazy_glyph_atlas_;
@@ -345,6 +362,7 @@ class ContentContext {
   /// The workload includes initializing commonly used but not default
   /// shader variants, as well as forcing driver initialization.
   void InitializeCommonlyUsedShadersIfNeeded() const;
+  bool PrewarmAvioCoveragePipelines() const;
 
   struct RuntimeEffectPipelineKey {
     std::string unique_entrypoint_name;
@@ -376,12 +394,14 @@ class ContentContext {
   std::unique_ptr<Pipelines> pipelines_;
 
   bool is_valid_ = false;
+  mutable size_t avio_raster_frame_depth_ = 0u;
   std::shared_ptr<Tessellator> tessellator_;
   std::shared_ptr<RenderTargetAllocator> render_target_cache_;
   std::shared_ptr<HostBuffer> data_host_buffer_;
   std::shared_ptr<HostBuffer> indexes_host_buffer_;
   std::shared_ptr<Texture> empty_texture_;
   std::unique_ptr<TextShadowCache> text_shadow_cache_;
+  std::unique_ptr<CoveragePathAtlas> coverage_path_atlas_;
 
   bool is_texture_caching_enabled_ = false;
   mutable std::unordered_map<const flutter::DlImage*, std::shared_ptr<Texture>>

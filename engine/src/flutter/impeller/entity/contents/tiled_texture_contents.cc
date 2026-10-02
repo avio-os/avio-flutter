@@ -65,10 +65,10 @@ void TiledTextureContents::SetColorFilter(ColorFilterProc color_filter) {
   color_filter_ = std::move(color_filter);
 }
 
-std::shared_ptr<Texture> TiledTextureContents::CreateFilterTexture(
+std::optional<Snapshot> TiledTextureContents::CreateFilterSnapshot(
     const ContentContext& renderer) const {
   if (!color_filter_) {
-    return nullptr;
+    return std::nullopt;
   }
   auto color_filter_contents = color_filter_(FilterInput::Make(texture_));
   auto snapshot = color_filter_contents->RenderToSnapshot(
@@ -79,11 +79,11 @@ std::shared_ptr<Texture> TiledTextureContents::CreateFilterTexture(
        .sampler_descriptor = std::nullopt,
        .msaa_enabled = true,
        .mip_count = 1,
-       .label = "TiledTextureContents Snapshot"});
-  if (snapshot.has_value()) {
-    return snapshot.value().texture;
-  }
-  return nullptr;
+       .label = "TiledTextureContents exact tile mode snapshot",
+       .coverage_expansion = 0,
+       .depth_stencil_enabled = false,
+       .exact_texture_extent = true});
+  return snapshot;
 }
 
 SamplerDescriptor TiledTextureContents::CreateSamplerDescriptor(
@@ -215,12 +215,13 @@ bool TiledTextureContents::Render(const ContentContext& renderer,
         FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
 
         if (color_filter_) {
-          auto filtered_texture = CreateFilterTexture(renderer);
-          if (!filtered_texture) {
+          auto filtered_snapshot = CreateFilterSnapshot(renderer);
+          if (!filtered_snapshot) {
             return false;
           }
+          pass.RetainResource(filtered_snapshot->resource_owner);
           FS::BindTextureSampler(
-              pass, filtered_texture,
+              pass, filtered_snapshot->texture,
               renderer.GetContext()->GetSamplerLibrary()->GetSampler(
                   CreateSamplerDescriptor(renderer.GetDeviceCapabilities())));
         } else {
@@ -242,7 +243,8 @@ std::optional<Snapshot> TiledTextureContents::RenderToSnapshot(
     return std::nullopt;
   }
   std::optional<Rect> geometry_coverage = GetGeometry()->GetCoverage({});
-  if (coverage_mode_ == flutter::DlCoverageMode::kPlatformDefault &&
+  if (!options.exact_texture_extent && !color_filter_ &&
+      coverage_mode_ == flutter::DlCoverageMode::kPlatformDefault &&
       GetInverseEffectTransform().IsIdentity() &&
       GetGeometry()->IsAxisAlignedRect() &&
       (!geometry_coverage.has_value() ||
@@ -271,7 +273,11 @@ std::optional<Snapshot> TiledTextureContents::RenderToSnapshot(
            options.sampler_descriptor.value_or(sampler_descriptor_),
        .msaa_enabled = true,
        .mip_count = 1,
-       .label = options.label});
+       .label = options.label,
+       .coverage_expansion = options.coverage_expansion,
+       .pixel_aligned = options.pixel_aligned,
+       .depth_stencil_enabled = options.depth_stencil_enabled,
+       .exact_texture_extent = options.exact_texture_extent});
 }
 
 }  // namespace impeller

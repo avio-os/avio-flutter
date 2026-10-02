@@ -34,6 +34,7 @@ class FilterInput {
   using Variant = std::variant<std::shared_ptr<FilterContents>,
                                std::shared_ptr<Contents>,
                                std::shared_ptr<Texture>,
+                               Snapshot,
                                Rect>;
 
   virtual ~FilterInput();
@@ -46,6 +47,10 @@ class FilterInput {
 
   static FilterInput::Ref Make(std::shared_ptr<Texture> input,
                                Matrix local_transform);
+
+  // Preserve logical bounds, sampler, opacity and lease instead of stripping
+  // a pooled snapshot down to its physical texture.
+  static FilterInput::Ref Make(Snapshot input);
 
   static FilterInput::Vector Make(std::initializer_list<Variant> inputs);
 
@@ -78,6 +83,14 @@ class FilterInput {
       const Entity& entity,
       std::optional<Rect> coverage_limit = std::nullopt,
       int32_t mip_count = 1) const = 0;
+
+  // Normalize a logical region only for a shader ABI that requires 0..1 to
+  // span the full physical image (mask-border math or non-decal tile modes).
+  std::optional<Snapshot> GetSnapshotWithExactTextureExtent(
+      std::string_view label,
+      const ContentContext& renderer,
+      const Entity& entity,
+      std::optional<Rect> coverage_limit = std::nullopt) const;
 
   std::optional<Rect> GetLocalCoverage(const Entity& entity) const;
 

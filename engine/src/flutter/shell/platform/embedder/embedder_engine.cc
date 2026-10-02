@@ -7,6 +7,7 @@
 #include <set>
 
 #include "flutter/fml/make_copyable.h"
+#include "flutter/shell/platform/embedder/avio_render_resource_report.h"
 #include "flutter/shell/platform/embedder/vsync_waiter_embedder.h"
 
 #ifdef __linux__
@@ -104,7 +105,9 @@ EmbedderEngine::EmbedderEngine(
                                               on_create_rasterizer)),
       external_texture_resolver_(std::move(external_texture_resolver)),
       avio_extension_features_(settings.avio_extension_features),
-      frame_opportunity_registry_(settings.frame_opportunity_registry)
+      frame_opportunity_registry_(settings.frame_opportunity_registry),
+      avio_report_requests_(
+          std::make_shared<AvioRenderResourceReportRequests>())
 #ifdef __linux__
       ,
       dmabuf_mailbox_(std::make_unique<DmabufTextureMailbox>())
@@ -117,7 +120,9 @@ EmbedderEngine::EmbedderEngine(
 #endif
 }
 
-EmbedderEngine::~EmbedderEngine() = default;
+EmbedderEngine::~EmbedderEngine() {
+  CollectShell();
+}
 
 bool EmbedderEngine::LaunchShell() {
   if (!shell_args_) {
@@ -141,6 +146,18 @@ bool EmbedderEngine::LaunchShell() {
 }
 
 bool EmbedderEngine::CollectShell() {
+  if (shell_) {
+    // Drain report custody before task-host teardown. On a merged runner this
+    // executes immediately and cancels reports still queued behind this call.
+    fml::AutoResetWaitableEvent drained;
+    fml::TaskRunner::RunNowOrPostTask(
+        task_runners_.GetRasterTaskRunner(),
+        [requests = avio_report_requests_, &drained]() {
+          requests->Close();
+          drained.Signal();
+        });
+    drained.Wait();
+  }
   shell_.reset();
   return IsValid();
 }
@@ -502,6 +519,36 @@ bool EmbedderEngine::PostRenderThreadTask(const fml::closure& task) {
   }
 
   shell_->GetTaskRunners().GetRasterTaskRunner()->PostTask(task);
+  return true;
+}
+
+bool EmbedderEngine::RequestAvioRenderResourceReport(
+    bool start_new_interval,
+    FlutterAvioRenderResourceReportCallback callback,
+    void* user_data) {
+  if (!IsValid() || !callback ||
+      !task_runners_.GetPlatformTaskRunner()->RunsTasksOnCurrentThread() ||
+      (avio_extension_features_ &
+       kFlutterAvioExtensionFeatureRenderResourceReport) == 0) {
+    return false;
+  }
+  const uint64_t ticket = avio_report_requests_->Reserve(callback, user_data);
+  if (ticket == 0) {
+    return false;
+  }
+  task_runners_.GetRasterTaskRunner()->PostTask(
+      [rasterizer = shell_->GetRasterizer(), requests = avio_report_requests_,
+       ticket, start_new_interval]() {
+        impeller::AvioRenderResourceReport report;
+        auto status = kFlutterAvioRenderResourceReportEngineUnavailable;
+        if (rasterizer) {
+          report = rasterizer->GetAvioRenderResourceReport(start_new_interval);
+          status = report.available
+                       ? kFlutterAvioRenderResourceReportSuccess
+                       : kFlutterAvioRenderResourceReportRendererUnavailable;
+        }
+        requests->Complete(ticket, report, status);
+      });
   return true;
 }
 

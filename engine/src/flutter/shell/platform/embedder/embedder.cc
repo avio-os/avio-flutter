@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "flutter/shell/platform/embedder/avio_antialiasing_config.h"
 #include "impeller/base/flags.h"
 
 #include "flutter/fml/build_config.h"
@@ -116,6 +117,7 @@ extern const intptr_t kPlatformStrongDillSize;
 #include "third_party/skia/include/gpu/ganesh/vk/GrVkBackendSurface.h"
 #include "third_party/skia/include/gpu/ganesh/vk/GrVkTypes.h"
 #ifdef IMPELLER_SUPPORTS_RENDERING
+#include "flutter/shell/platform/embedder/avio_coverage_root_target.h"  // nogncheck
 #include "flutter/shell/platform/embedder/embedder_render_target_impeller.h"  // nogncheck
 #include "impeller/core/texture.h"                        // nogncheck
 #include "impeller/renderer/backend/vulkan/context_vk.h"  // nogncheck
@@ -194,9 +196,12 @@ static constexpr FlutterAvioExtensionFeatures kAvioSupportedFeatures =
     kFlutterAvioExtensionFeatureRenderDeadline |
     kFlutterAvioExtensionFeatureAtomicWindowPreviews |
     kFlutterAvioExtensionFeaturePreSubmitFailure
-#if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && \
-    defined(IMPELLER_SUPPORTS_RENDERING)
-    | kFlutterAvioExtensionFeatureResourceLifecycleConfig
+#if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
+    | kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+    kFlutterAvioExtensionFeatureRenderResourceReport |
+    (impeller::kAvioCoveragePolicyImplemented
+         ? kFlutterAvioExtensionFeatureAntialiasingPolicy
+         : 0u)
 #endif
     ;
 
@@ -271,6 +276,7 @@ static const char* BuildAvioResourceLifecycleConfig(
     const FlutterAvioResourceLifecycleConfig* config,
     const FlutterRendererConfig* renderer_config,
     bool enable_impeller,
+    bool coverage_policy,
     std::optional<flutter::EmbedderVulkanResourceLifecycleConfig>* result) {
   const bool negotiated =
       (negotiated_features &
@@ -289,17 +295,25 @@ static const char* BuildAvioResourceLifecycleConfig(
   }
   constexpr uint64_t kMaxSizeT =
       static_cast<uint64_t>(std::numeric_limits<size_t>::max());
-  if (config->transient_max_entries == 0u ||
-      config->transient_max_entries > kMaxSizeT ||
-      config->transient_max_bytes == 0u ||
-      config->transient_max_bytes > kMaxSizeT) {
+  if (coverage_policy ? (config->transient_max_entries != 0u ||
+                         config->transient_max_bytes != 0u)
+                      : (config->transient_max_entries == 0u ||
+                         config->transient_max_entries > kMaxSizeT ||
+                         config->transient_max_bytes == 0u ||
+                         config->transient_max_bytes > kMaxSizeT)) {
     return "The Avio transient resource limits were invalid.";
   }
 
   impeller::PipelineCacheAccessVK cache_access;
   fml::UniqueFD cache_directory;
   size_t cache_max_bytes = 0u;
-  switch (config->pipeline_cache_policy) {
+  // External C enum values must be rejected without first loading an invalid
+  // C++ enum. The complete configuration tail was bounded above.
+  static_assert(sizeof(config->pipeline_cache_policy) == sizeof(uint32_t));
+  uint32_t pipeline_cache_policy;
+  std::memcpy(&pipeline_cache_policy, &config->pipeline_cache_policy,
+              sizeof(pipeline_cache_policy));
+  switch (pipeline_cache_policy) {
     case kFlutterAvioPipelineCacheDisabled:
       if (config->pipeline_cache_directory_fd != -1 ||
           config->pipeline_cache_max_bytes != 0u) {
@@ -320,10 +334,9 @@ static const char* BuildAvioResourceLifecycleConfig(
         return "The Avio pipeline cache descriptor was not an open directory.";
       }
       cache_max_bytes = static_cast<size_t>(config->pipeline_cache_max_bytes);
-      cache_access =
-          config->pipeline_cache_policy == kFlutterAvioPipelineCacheReadOnly
-              ? impeller::PipelineCacheAccessVK::kReadOnly
-              : impeller::PipelineCacheAccessVK::kReadWrite;
+      cache_access = pipeline_cache_policy == kFlutterAvioPipelineCacheReadOnly
+                         ? impeller::PipelineCacheAccessVK::kReadOnly
+                         : impeller::PipelineCacheAccessVK::kReadWrite;
       break;
     default:
       return "The Avio pipeline cache policy was unknown.";
@@ -857,7 +870,8 @@ InferVulkanPlatformViewCreationCallback(
     bool enable_impeller,
     impeller::Flags impeller_flags,
     std::optional<flutter::EmbedderVulkanResourceLifecycleConfig>
-        resource_lifecycle_config) {
+        resource_lifecycle_config,
+    std::optional<impeller::AvioAntialiasingConfig> antialiasing_config) {
   if (config->type != kVulkan) {
     return nullptr;
   }
@@ -909,7 +923,7 @@ InferVulkanPlatformViewCreationCallback(
             .get_next_image = vulkan_get_next_image,
             .present_image = vulkan_present_image_callback,
         };
-    std::unique_ptr<flutter::EmbedderSurfaceVulkanImpeller> embedder_surface =
+    std::unique_ptr<flutter::EmbedderSurface> embedder_surface =
         std::make_unique<flutter::EmbedderSurfaceVulkanImpeller>(
             config->vulkan.version, vk_instance,
             config->vulkan.enabled_instance_extension_count,
@@ -920,8 +934,14 @@ InferVulkanPlatformViewCreationCallback(
             static_cast<VkDevice>(config->vulkan.device),
             config->vulkan.queue_family_index,
             static_cast<VkQueue>(config->vulkan.queue), vulkan_dispatch_table,
-            view_embedder, impeller_flags,
-            std::move(resource_lifecycle_config));
+            view_embedder, impeller_flags, std::move(resource_lifecycle_config),
+            antialiasing_config);
+    if (!embedder_surface->IsValid()) {
+      // Context capability/admission failure must reach initialization rather
+      // than constructing an engine whose surface can never render.
+      FML_LOG(ERROR) << "Could not initialize Vulkan Impeller surface.";
+      return nullptr;
+    }
 
     return fml::MakeCopyable(
         [embedder_surface = std::move(embedder_surface),
@@ -1060,7 +1080,8 @@ InferPlatformViewCreationCallback(
     bool enable_impeller,
     impeller::Flags impeller_flags,
     std::optional<flutter::EmbedderVulkanResourceLifecycleConfig>
-        resource_lifecycle_config) {
+        resource_lifecycle_config,
+    std::optional<impeller::AvioAntialiasingConfig> antialiasing_config) {
   if (config == nullptr) {
     return nullptr;
   }
@@ -1082,7 +1103,7 @@ InferPlatformViewCreationCallback(
       return InferVulkanPlatformViewCreationCallback(
           config, user_data, platform_dispatch_table,
           std::move(external_view_embedder), enable_impeller, impeller_flags,
-          std::move(resource_lifecycle_config));
+          std::move(resource_lifecycle_config), antialiasing_config);
     default:
       return nullptr;
   }
@@ -1364,7 +1385,7 @@ static sk_sp<SkSurface> MakeSkSurfaceFromBackingStore(
 #endif
 }
 
-#if defined(SHELL_ENABLE_GL) && defined(IMPELLER_SUPPORTS_RENDERING)
+#if defined(SHELL_ENABLE_GL) && IMPELLER_SUPPORTS_RENDERING
 static std::optional<impeller::PixelFormat> FlutterFormatToImpellerPixelFormat(
     uint32_t format) {
   switch (format) {
@@ -1379,7 +1400,7 @@ static std::optional<impeller::PixelFormat> FlutterFormatToImpellerPixelFormat(
   }
 }
 
-#endif  // defined(SHELL_ENABLE_GL) && defined(IMPELLER_SUPPORTS_RENDERING)
+#endif  // defined(SHELL_ENABLE_GL) && IMPELLER_SUPPORTS_RENDERING
 
 static std::unique_ptr<flutter::EmbedderRenderTarget>
 MakeRenderTargetFromBackingStoreImpeller(
@@ -1388,7 +1409,7 @@ MakeRenderTargetFromBackingStoreImpeller(
     const std::shared_ptr<impeller::AiksContext>& aiks_context,
     const FlutterBackingStoreConfig& config,
     const FlutterOpenGLFramebuffer* framebuffer) {
-#if defined(SHELL_ENABLE_GL) && defined(IMPELLER_SUPPORTS_RENDERING)
+#if defined(SHELL_ENABLE_GL) && IMPELLER_SUPPORTS_RENDERING
   auto format = FlutterFormatToImpellerPixelFormat(framebuffer->target);
   if (!format.has_value()) {
     return nullptr;
@@ -1482,7 +1503,7 @@ MakeRenderTargetFromBackingStoreImpeller(
     const std::shared_ptr<impeller::AiksContext>& aiks_context,
     const FlutterBackingStoreConfig& config,
     const FlutterMetalBackingStore* metal) {
-#if defined(SHELL_ENABLE_METAL) && defined(IMPELLER_SUPPORTS_RENDERING)
+#if defined(SHELL_ENABLE_METAL) && IMPELLER_SUPPORTS_RENDERING
   if (!metal->texture.texture) {
     FML_LOG(ERROR) << "Embedder supplied null Metal texture.";
     return nullptr;
@@ -1550,7 +1571,7 @@ MakeRenderTargetFromBackingStoreImpeller(
 // Wraps an embedder-owned VkImage + VkImageView as an Impeller
 // TextureSourceVK. Does NOT take ownership — the embedder is responsible for
 // the lifetime of both handles.
-#if defined(SHELL_ENABLE_VULKAN) && defined(IMPELLER_SUPPORTS_RENDERING)
+#if defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
 class EmbedderTextureSourceVK : public impeller::TextureSourceVK {
  public:
   EmbedderTextureSourceVK(
@@ -1703,7 +1724,7 @@ MakeRenderTargetFromBackingStoreImpeller(
     const FlutterBackingStoreConfig& config,
     const FlutterVulkanBackingStore* vulkan,
     bool selected_target_damage) {
-#if defined(SHELL_ENABLE_VULKAN) && defined(IMPELLER_SUPPORTS_RENDERING)
+#if defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
   if (!vulkan->image) {
     FML_LOG(ERROR) << "Embedder supplied null Vulkan image.";
     return nullptr;
@@ -1767,6 +1788,18 @@ MakeRenderTargetFromBackingStoreImpeller(
   auto create_target = [impeller_context = aiks_context->GetContext(), desc,
                         wrapped_source, preserved_contents,
                         owner]() -> std::unique_ptr<impeller::RenderTarget> {
+    if (impeller_context->GetAvioAntialiasingConfig().UsesCoverage()) {
+      auto render_target = flutter::MakeAvioCoverageRootTarget(
+          std::make_shared<impeller::TextureVK>(impeller_context,
+                                                wrapped_source),
+          preserved_contents);
+      ReportRootTargetAdmission(impeller_context.get(), desc, {}, {},
+                                render_target != nullptr);
+      if (render_target) {
+        ReportRootPassSampleCount(impeller_context.get(), false);
+      }
+      return render_target;
+    }
     // Impeller antialiases geometry by rastering it multisampled and resolving.
     // A single-sample root pass therefore has no antialiasing at all: every
     // clip edge and every arbitrary path in the frame lands hard-edged. That
@@ -2866,12 +2899,47 @@ FlutterEngineResult FlutterEngineInitialize(size_t version,
   flutter::Settings settings = flutter::SettingsFromCommandLine(command_line);
   settings.avio_extension_features = negotiated_avio_features;
 
+  const auto* antialiasing_config =
+      SAFE_ACCESS(args, avio_antialiasing_config, nullptr);
+  if (const char* error = flutter::ValidateAvioAntialiasingConfig(
+          antialiasing_config, negotiated_avio_features)) {
+    return LOG_EMBEDDER_ERROR(kInvalidArguments, error);
+  }
+  const auto render_features = kFlutterAvioExtensionFeatureAntialiasingPolicy |
+                               kFlutterAvioExtensionFeatureRenderResourceReport;
+  if ((negotiated_avio_features & render_features) != 0 &&
+      (config->type != kVulkan || !settings.enable_impeller)) {
+    return LOG_EMBEDDER_ERROR(
+        kInvalidArguments,
+        "Avio render policy/report requires Vulkan Impeller.");
+  }
+  if (antialiasing_config) {
+    settings.avio_antialiasing_config =
+        flutter::CopyAvioAntialiasingConfig(*antialiasing_config);
+  }
+  const bool coverage_policy =
+      settings.avio_antialiasing_config.has_value() &&
+      settings.avio_antialiasing_config->UsesCoverage();
+  if (coverage_policy &&
+      (negotiated_avio_features &
+       (kFlutterAvioExtensionFeatureRootRenderTarget |
+        kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+        kFlutterAvioExtensionFeatureRenderResourceReport)) !=
+          (kFlutterAvioExtensionFeatureRootRenderTarget |
+           kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+           kFlutterAvioExtensionFeatureRenderResourceReport)) {
+    return LOG_EMBEDDER_ERROR(
+        kInvalidArguments,
+        "Coverage requires root targets, resource limits and reports.");
+  }
+
   std::optional<flutter::EmbedderVulkanResourceLifecycleConfig>
       avio_resource_lifecycle_config;
   if (const char* error = BuildAvioResourceLifecycleConfig(
           negotiated_avio_features,
           SAFE_ACCESS(args, avio_resource_lifecycle_config, nullptr), config,
-          settings.enable_impeller, &avio_resource_lifecycle_config)) {
+          settings.enable_impeller, coverage_policy,
+          &avio_resource_lifecycle_config)) {
     return LOG_EMBEDDER_ERROR(kInvalidArguments, error);
   }
 
@@ -3173,7 +3241,8 @@ FlutterEngineResult FlutterEngineInitialize(size_t version,
       config, user_data, platform_dispatch_table,
       std::move(external_view_embedder_result.value()),
       settings.enable_impeller, impeller_flags,
-      std::move(avio_resource_lifecycle_config));
+      std::move(avio_resource_lifecycle_config),
+      settings.avio_antialiasing_config);
 
   if (!on_create_platform_view) {
     return LOG_EMBEDDER_ERROR(
@@ -4417,6 +4486,25 @@ FlutterEngineResult FlutterEngineCancelFrameOpportunity(
   return kSuccess;
 }
 
+FlutterEngineResult FlutterEngineRequestAvioRenderResourceReport(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    bool start_new_interval,
+    FlutterAvioRenderResourceReportCallback callback,
+    void* user_data) {
+  if (!engine || !callback) {
+    return LOG_EMBEDDER_ERROR(kInvalidArguments,
+                              "Missing report engine or callback.");
+  }
+  if (!reinterpret_cast<flutter::EmbedderEngine*>(engine)
+           ->RequestAvioRenderResourceReport(start_new_interval, callback,
+                                             user_data)) {
+    return LOG_EMBEDDER_ERROR(kInvalidArguments,
+                              "Report request was not negotiated, available, "
+                              "or on the platform thread.");
+  }
+  return kSuccess;
+}
+
 FlutterEngineResult FlutterEngineGetAvioExtensionCapabilities(
     FlutterAvioExtensionCapabilities* capabilities) {
   if (capabilities == nullptr) {
@@ -4430,6 +4518,10 @@ FlutterEngineResult FlutterEngineGetAvioExtensionCapabilities(
   capabilities->minimum_version = FLUTTER_AVIO_EXTENSION_VERSION;
   capabilities->maximum_version = FLUTTER_AVIO_EXTENSION_VERSION;
   capabilities->supported_features = kAvioSupportedFeatures;
+  if (STRUCT_HAS_MEMBER(capabilities, continuous_supported_classes)) {
+    capabilities->continuous_supported_classes =
+        impeller::kAvioContinuousSupportedClasses;
+  }
   return kSuccess;
 }
 
@@ -5114,6 +5206,8 @@ FlutterEngineResult FlutterEngineGetProcAddresses(
            FlutterEngineScheduleFrameForDisplayWithRequestKind);
   SET_PROC(ScheduleFrameForDisplayViewsWithRequestKind,
            FlutterEngineScheduleFrameForDisplayViewsWithRequestKind);
+  SET_PROC(RequestAvioRenderResourceReport,
+           FlutterEngineRequestAvioRenderResourceReport);
   SET_PROC(GetAvioExtensionCapabilities,
            FlutterEngineGetAvioExtensionCapabilities);
   SET_PROC(OnVsyncForDisplayWithOpportunity,

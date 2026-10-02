@@ -5,6 +5,7 @@
 #include "impeller/renderer/backend/vulkan/swapchain/swapchain_transients_vk.h"
 
 #include "flutter/fml/trace_event.h"
+#include "impeller/renderer/render_resource_scope.h"
 
 namespace impeller {
 
@@ -35,6 +36,8 @@ SwapchainTransientsVK::GetDepthStencilTexture() {
 }
 
 std::shared_ptr<Texture> SwapchainTransientsVK::CreateMSAATexture() const {
+  const AvioResourceAllocationScope allocation_scope(
+      AvioRenderResourceKind::kTransientAttachments);
   TRACE_EVENT0("impeller", __FUNCTION__);
   if (!enable_msaa_) {
     return nullptr;
@@ -61,6 +64,8 @@ std::shared_ptr<Texture> SwapchainTransientsVK::CreateMSAATexture() const {
 
 std::shared_ptr<Texture> SwapchainTransientsVK::CreateDepthStencilTexture()
     const {
+  const AvioResourceAllocationScope allocation_scope(
+      AvioRenderResourceKind::kTransientAttachments);
   TRACE_EVENT0("impeller", __FUNCTION__);
   auto context = context_.lock();
   if (!context) {

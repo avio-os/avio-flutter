@@ -4,6 +4,8 @@
 
 #include "impeller/renderer/command_buffer.h"
 
+#include <algorithm>
+
 #include "impeller/renderer/compute_pass.h"
 #include "impeller/renderer/render_pass.h"
 #include "impeller/renderer/render_target.h"
@@ -14,6 +16,13 @@ CommandBuffer::CommandBuffer(std::weak_ptr<const Context> context)
     : context_(std::move(context)) {}
 
 CommandBuffer::~CommandBuffer() = default;
+
+void CommandBuffer::RetainResource(std::shared_ptr<void> owner) {
+  if (owner && std::find(retained_resources_.begin(), retained_resources_.end(),
+                         owner) == retained_resources_.end()) {
+    retained_resources_.push_back(std::move(owner));
+  }
+}
 
 bool CommandBuffer::SubmitCommands(bool block_on_schedule,
                                    const CompletionCallback& callback) {

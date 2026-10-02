@@ -25,6 +25,7 @@
 namespace flutter {
 
 struct ShellArgs;
+class AvioRenderResourceReportRequests;
 
 // The object that is returned to the embedder as an opaque pointer to the
 // instance of the Flutter engine.
@@ -122,6 +123,11 @@ class EmbedderEngine {
 
   bool PostRenderThreadTask(const fml::closure& task);
 
+  bool RequestAvioRenderResourceReport(
+      bool start_new_interval,
+      FlutterAvioRenderResourceReportCallback callback,
+      void* user_data);
+
   bool RunTask(const FlutterTask* task);
 
   bool PostTaskOnEngineManagedNativeThreads(
@@ -155,6 +161,7 @@ class EmbedderEngine {
   std::unique_ptr<EmbedderExternalTextureResolver> external_texture_resolver_;
   const FlutterAvioExtensionFeatures avio_extension_features_;
   const std::shared_ptr<FrameOpportunityRegistry> frame_opportunity_registry_;
+  std::shared_ptr<AvioRenderResourceReportRequests> avio_report_requests_;
 #ifdef __linux__
   std::unique_ptr<DmabufTextureMailbox> dmabuf_mailbox_;
 #endif

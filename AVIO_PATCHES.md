@@ -85,6 +85,7 @@ already ancestors of the selected main target under their original commits.
 | 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 53 | Backport single-sample backdrop restore safety and shared-backdrop content depth | temporary backport — drop when rebasing past flutter#193306 and #193176 | merged upstream: flutter/flutter#193306, #193176 |
 | 54 | Screen is a coefficient blend | upstreamable memory/performance correction | submit upstream |
+| 55 | Explicit coverage AA policy, bounded coverage/layer regions, and typed resource reports | permanent opt-in ABI/rendering contract (v8); integrated source capability enabled, native release checks pending | none |
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
@@ -1088,36 +1089,40 @@ path, records edge/interior deltas, and emits paired light/dark images at
 scales 1, 1.25 and 2. It deliberately detects a changed result, and does not
 approve that result. Existing `BlendModeScreen` and `BlendModeSrcAlphaScreen`
 playground/golden cases remain relevant. Full
-engine unit tests, Vulkan/GLES pixel captures, and init/first-use pipeline
-measurements are still required before packaging. The standalone CPU oracle
+engine builds and init/first-use pipeline measurements remain packaging gates.
+The user waived the visual-comparison campaign for this memory iteration;
+comparison fixtures remain available but their presence is not executed GPU
+evidence. The standalone CPU oracle
 checks the coefficient math only; it is not an Impeller build or GPU result.
 
-#### Remaining coverage-antialiasing gates (source audit)
+#### Starting coverage-antialiasing audit (before patch 55)
 
-This change does not authorize lowering any sample count. The existing code
-still has coupled layer/coverage sample policy and depth/stencil consumers:
+Patch 54 alone did not authorize lowering any sample count. At that point the
+code still had coupled layer/coverage sample policy and depth/stencil consumers:
 
-- `ContentContext::MakeSubpass` selects 4x using `SupportsOffscreenMSAA` and a
-  boolean. `Contents::SnapshotOptions` defaults that boolean to true;
-  `ExternalCoverageContents` (patch 45's geometric foreground mask) uses that
-  default. Lowering the capability for layers would also silently remove its
-  multisample edge mask. Explicit layer and coverage sample requests must
-  precede any policy change.
-- `ClipContents::Render` writes depth for difference clips and uses stencil
-  preparation plus depth-writing cover draws for other clips.
-  `Canvas::AddRenderEntityToCurrentPass` assigns clip depth to normal draws and
-  replays it after backdrop reads. `InlinePassContext::GetRenderPass` requires
-  both depth and stencil. Coverage clips and their depth ordering replacement
-  are not implemented by these patches.
-- Path NonZero/EvenOdd fills and overdraw-preventing geometry use the stencil
-  modes in `ContentContextOptions`. Their bounded atlas/island replacement is
-  still required; deleting the attachments would change fills and strokes.
-- `EntityPassClipStack::RecordClip` retains the fractional-rect 0.124-pixel
-  rounding rule, which assumes the current 4x sample grid. A future 1x path
-  needs explicit fractional-edge coverage rather than this rounding.
-- Patch 53 removes the single-sample self-restore feedback hazard. It does not
-  implement bounded backdrop scratch or a layer/coverage arena, and remaining
-  advanced blends retain their existing framebuffer-fetch or Flip paths.
+- `ContentContext::MakeSubpass` selected 4x using `SupportsOffscreenMSAA` and a
+  boolean. `Contents::SnapshotOptions` defaulted that boolean to true;
+  `ExternalCoverageContents` (patch 45's geometric foreground mask) used that
+  default. Lowering the capability alone would have removed its multisample
+  edge mask. Patch 55 adds explicit layer and coverage requests instead.
+- `ClipContents::Render` wrote depth for difference clips and used stencil
+  preparation plus depth-writing cover draws for other clips. The Canvas
+  assigned clip depth to normal draws and replayed it after backdrop reads;
+  `InlinePassContext::GetRenderPass` required both depth and stencil. Patch 55
+  retains that legacy route and adds sample4 mask replay and bounded native4
+  islands over a color-only 1x parent for the explicit coverage policy.
+- Path NonZero/EvenOdd fills and overdraw-preventing geometry consumed stencil
+  modes in `ContentContextOptions`. Patch 55 moves those stencil consumers to
+  its bounded native4 path atlas or draw islands instead of deleting their
+  fill/stroke semantics with the root attachments.
+- `EntityPassClipStack::RecordClip` retained the fractional-rect 0.124-pixel
+  rounding rule, which assumes the native 4x sample grid. The explicit coverage
+  path now records fractional edges with quad or path masks; legacy rendering
+  retains its existing rounding behavior.
+- Patch 53 removed the single-sample self-restore feedback hazard. On its own
+  it did not provide bounded scratch or separate layer/coverage regions.
+  Patch 55 adds those regions and frozen prefix snapshots for deferred
+  backdrop readers; advanced blend operators retain their existing semantics.
 
 The old Vulkan/ANV path rendered an 8-bit MSAA source snapshot, averaged all
 four destination samples in its fetch shader, and wrote that result to each
@@ -1125,16 +1130,20 @@ covered sample. Fixed-function Screen blends per sample with an unquantized
 shader source. The real clipped-edge result can differ by more than 1/255;
 interior rounding can differ too. The algebraic identity does not establish
 pixel parity. The required design note, implementation scope, comparison
-fixtures, and outstanding GN/GPU/TL-3 and laptop look-approval gates are in
+fixtures, and the unexecuted native/GPU comparison protocol are in
 [Screen coefficient design](docs/engine/impeller/docs/avio-screen-coefficient-design.md).
-No new look is approved by these source changes. Continuous analytic coverage
-still requires the separate coverage-clip/path contracts and approved captures.
+Screen pixel parity is not established. The user waived the visual-comparison
+campaign for this iteration only; the existing fixtures do not count as
+executed comparisons. Continuous analytic coverage remains unsupported and
+would require a separate contract and validation before advertisement.
 
 Known follow-up: upstream `63768f5568` (flutter#192988, offscreen
-advanced-blend texture coordinates) is not backported here. First-use pipeline
-prewarm/measurement and removal of unused normal-route Screen advanced
-pipelines remain outstanding; the comparison fixture intentionally retains
-the old Screen fetch pipeline. Patch 50 code is independent, and the patch
+advanced-blend texture coordinates) is not backported here. Patch 55 prewarms
+the common coverage pipelines and reports successful first-use compiles, but
+application-specific runtime compilation and its device cost remain
+unmeasured. Removal of unused normal-route Screen advanced pipelines remains
+outstanding; the comparison fixture intentionally retains the old Screen fetch
+pipeline. Patch 50 code is independent, and the patch
 inventory keeps its original adjacent context so EN50 reverse-applies alone.
 
 ### Patch 53: backdrop prerequisites for single-sample rendering
@@ -1153,8 +1162,114 @@ Regressions use the upstream GLES mock feedback detector and the existing
 Canvas fixture: `CanvasGLESTest.AdvancedBlendWithoutOffscreenMSAAHasNoFeedbackLoop`
 uses Multiply, which remains an advanced blend, and
 `AiksTest.BackdropGroupSharedSnapshotReservesContentDepth` draws through a
-cached shared snapshot. The GLES fixture supplies the depth/stencil
-attachments still required by this fork; it does not enable depth-free roots.
-These are prerequisites only. Root and layer MSAA and the negotiated embedder
-ABI remain unchanged. Full engine tests and Vulkan/GLES captures are required
-before the rebuilt engine is packaged.
+cached shared snapshot. The GLES fixture exercises the legacy depth/stencil
+route; patch 53 alone does not enable color-only roots. On its own this
+prerequisite leaves root/layer MSAA and the negotiated embedder ABI unchanged.
+Full engine tests and Vulkan/GLES captures are required
+before packaging that prerequisite on its own. For the combined patch 55
+iteration the user waived the visual-comparison campaign; native build and
+correctness gates remain explicit below.
+
+### Patch 55: explicit coverage policy and resource census (EG-1 through EG-5)
+
+**Design note and scope.** Coverage is an explicit Vulkan Impeller policy, not
+an environment switch or an allocation-pressure fallback. The appended ABI v8
+`FlutterAvioAntialiasingConfig` selects legacy `msaa4` or coverage with 1x color
+layers and native 4x masks, requests continuous classes, and gives separate
+bounded coverage/layer regions. The Avio starting profile is 8 MiB coverage and
+4 MiB layers. Continuous classes currently advertise no support; requesting
+one fails instead of silently changing edge behavior. The legacy policy keeps
+4x/4x and no region budgets. Legacy transient budgets must be positive;
+coverage requires both legacy transient caps to be zero.
+
+The header, initialization validator, Settings, Vulkan surface and ContextVK
+carry the same policy. Structural bounds, unknown policy values, contradictory
+samples/budgets, missing negotiated dependencies and renderer mismatches reject
+initialization before platform-view creation. Context setup additionally
+requires standard native sample locations and the required sampled/color and
+stencil 4x formats; unsupported devices fail before the allocator is created.
+No alternate AA policy is selected after refusal.
+
+Under coverage, imported root targets contain the host's 1x color image only.
+They bypass the legacy root transient pool and root depth/stencil attachments,
+load preserved contents or clear fresh contents, and store to that same imported
+image. Its original texture source still carries external queue ownership,
+completion-fence export and backing-store collection. Masks retain native
+sample4 quantization and all four sample identities; the implementation does
+not resolve a coverage mask to a scalar and multiply that scalar into every
+draw. The coverage geometry/path atlas, clip mask cache, tiled draw replay and
+bounded layer region are separate construction contracts. Painter segments
+replay in order through fixed native4 color tiles; ordinary image edges retain
+their original native geometry. Direct 1x non-AA/filter passes avoid native4
+islands where geometric coverage is not requested. The layer region uses
+independent color images instead of a same-image layer atlas, avoiding sampled
+attachment feedback. Logical snapshot rectangles and resource custody must
+survive every deferred reader and filter; physical texture dimensions remain
+the backing allocation's dimensions. Frozen backdrop inputs and the patch 53
+single-sample restore fix remain prerequisites. Region
+exhaustion may report an explicit layer overflow allocation; it must never
+silently re-enable full-root MSAA or omit geometric coverage.
+
+This bounded-memory renderer differs from the research sketch's anticipated
+per-draw scalar masks, fringe-only replay and image analytic fast paths. Those
+performance fast paths are not implemented here. Tiled replay can repeat work
+and destination traffic; no predicted traffic reduction, GPU speedup or memory
+savings is claimed without runtime measurements.
+
+**Reports.** ABI v8 appends `FlutterEngineRequestAvioRenderResourceReport` and
+separate AA/report capability bits. An accepted platform-thread call posts a
+raster task and receives one callback there; rejection receives no callback.
+Shutdown drains accepted callbacks, including typed EngineUnavailable
+cancellations, before returning. Callback arrays are borrowed for that callback
+only and bounded to 64 resource entries and 32 coverage reasons. Transport
+preserves unknown kind/reason IDs. No reporting call creates a renderer, leases
+or ages a cache, or waits for GPU completion; interval counters reset only when
+the request asks to start a new interval.
+
+ContextVK reports its physical allocated-image ledger once and merges a
+separate pipeline ledger. Vulkan ContentContext does not add pool/cache/region
+image bytes a second time. Image registration follows the actual deferred VMA
+image resource; imported images are excluded. The reported real bytes are VMA
+allocation sizes, not a measurement of unused VMA blocks or total driver heap
+usage. Pipeline registrations include compute and immutable-sampler variants
+and survive descriptor-cache eviction while objects remain referenced. Vulkan
+does not expose their driver allocation sizes: pipeline byte/key fields are
+unavailable and zero by convention.
+
+Counter availability is explicit. `first_use_compiles` counts successful native
+pipeline creation whose cache-miss origin was an actual raster frame, including
+asynchronous workers; warm initialization, cache hits and failed creation do
+not increment it. Raster allocation counters measure scoped GPU image
+allocations, not every C++ allocation. `coverage_flushes` counts successful
+encoded native color-island tile-to-parent composites, not atlas resets,
+direct 1x passes, failed copies or GPU completion.
+Layer overflow events and their real allocation bytes have separate counters;
+they are not draw counts or pixel areas. Unimplemented kinds/counters/reasons
+remain unavailable rather than pretending to be measured zeros.
+
+**Validation and packaging gate.** The pure production ABI/report target has
+10 passing tests, also run with address/undefined-behavior sanitizers. The public
+header compiles as C. The three modified Vulkan pipeline implementation files
+pass an actual-header C++ syntax check using fetched upstream dependencies.
+The root-target GTest source is registered separately so it can link against
+the real RenderTarget/Texture implementations without a GPU; both tests pass
+in that targeted build. The actual proc-table test source also passes a syntax
+check with `FLUTTER_ENGINE_NO_PROTOTYPES`, using its proc-table API calls.
+These targeted checks do not establish a complete engine/GN build,
+generated-shader link, GPU
+execution, pixel parity or an under-500-MiB memory result.
+
+`kAvioCoveragePolicyImplemented` is true for the integrated source policy.
+AA capability advertisement and public coverage initialization share that
+implementation fact; Linux Vulkan Impeller must be compiled and device format
+support must still pass initialization. The default config remains legacy
+4x/4x; coverage requires an explicit negotiated config. Actual generated shader
+headers and targeted C++ integration checks passed before enabling the source
+capability. This does not satisfy the independent native build, artifact and
+GPU execution release gates. The user waived the visual-comparison campaign
+for this iteration.
+Native profile/debug/release artifacts have not been rebuilt for this change;
+their existing checksums are not evidence for these sources and must be updated
+from actual build outputs before packaging. No source-only check approves a new
+look or fabricates a native artifact digest. The existing Screen/EN50 code and
+backdrop failure propagation retain their separate ownership.

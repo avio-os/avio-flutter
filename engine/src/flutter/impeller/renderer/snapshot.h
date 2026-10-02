@@ -19,11 +19,12 @@ namespace impeller {
 
 class ContentContext;
 class Entity;
+class RenderTarget;
 
 /// Represents a texture and its intended draw transform/sampler configuration.
 struct Snapshot {
   std::shared_ptr<Texture> texture;
-  /// The transform that should be applied to this texture for rendering.
+  /// Maps physical texture texels into the rendered coordinate space.
   Matrix transform;
 
   SamplerDescriptor sampler_descriptor =
@@ -54,8 +55,28 @@ struct Snapshot {
     // TODO(tbd): We should re-rasterize scaled and rotated snapshots.
     return (!transform.IsTranslationOnly() &&
             transform.IsTranslationScaleOnly()) ||
-           needs_rasterization_for_runtime_effects;
+           needs_rasterization_for_runtime_effects ||
+           (texture && GetTextureRect() != Rect::MakeSize(texture->GetSize()));
   }
+
+  // Per-snapshot logical content, expressed in physical texture texels. Never
+  // changes Texture::GetSize(): nullopt preserves the legacy full-image view.
+  std::optional<Rect> texture_rect;
+  // Keeps logical region admission alive until every deferred reader encodes.
+  // GPU texture custody is separately retained by the backend submission.
+  std::shared_ptr<void> resource_owner;
+
+  // The supplied transform maps the logical content origin to world space.
+  // The resulting snapshot transform maps physical texels, including a
+  // nonzero content origin, into that same world space.
+  static Snapshot FromRenderTarget(
+      const RenderTarget& target,
+      Matrix transform = Matrix(),
+      std::optional<SamplerDescriptor> sampler = std::nullopt,
+      Scalar opacity = 1.0f,
+      bool needs_rasterization_for_runtime_effects = false);
+
+  Rect GetTextureRect() const;
 
   std::optional<Rect> GetCoverage() const;
 

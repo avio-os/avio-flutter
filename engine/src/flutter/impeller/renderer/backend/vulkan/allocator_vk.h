@@ -6,6 +6,7 @@
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_ALLOCATOR_VK_H_
 
 #include "impeller/core/allocator.h"
+#include "impeller/renderer/allocated_image_ledger.h"
 #include "impeller/renderer/backend/vulkan/context_vk.h"
 #include "impeller/renderer/backend/vulkan/device_buffer_vk.h"
 #include "impeller/renderer/backend/vulkan/device_holder_vk.h"
@@ -39,10 +40,16 @@ class AllocatorVK final : public Allocator {
       StorageMode mode,
       bool supports_memoryless_textures);
 
+  // Counts engine-owned allocated VkImages through actual deferred VMA
+  // destruction. Imported and swapchain images do not enter this ledger.
+  AvioRenderResourceReport GetAllocatedImageReport(bool start_new_interval);
+
  private:
   friend class ContextVK;
 
   UniqueAllocatorVMA allocator_;
+  std::shared_ptr<AllocatedImageLedger> allocated_image_ledger_ =
+      std::make_shared<AllocatedImageLedger>();
   UniquePoolVMA staging_buffer_pool_;
   std::weak_ptr<Context> context_;
   std::weak_ptr<DeviceHolderVK> device_holder_;

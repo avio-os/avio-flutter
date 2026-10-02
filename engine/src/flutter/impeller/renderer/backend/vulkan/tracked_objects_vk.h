@@ -47,6 +47,7 @@ class TrackedObjectsVK {
 
   GPUProbe& GetGPUProbe() const;
 
+  // Only the owning graphics queue's SubmitLocked callback may consume waits.
   std::vector<WaitSemaphore> TakeWaitSemaphores();
 
   std::vector<PendingSignalSemaphoreVK> CreateSignalSemaphores(
@@ -61,7 +62,6 @@ class TrackedObjectsVK {
   std::vector<std::shared_ptr<const DeviceBuffer>> tracked_buffers_;
   std::vector<std::shared_ptr<const Texture>> tracked_texture_wrappers_;
   std::vector<std::shared_ptr<const TextureSourceVK>> tracked_textures_;
-  std::vector<WaitSemaphore> wait_semaphores_;
   std::unique_ptr<GPUProbe> probe_;
   bool is_valid_ = false;
 

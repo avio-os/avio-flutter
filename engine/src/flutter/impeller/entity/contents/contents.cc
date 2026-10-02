@@ -22,10 +22,12 @@ ContentContextOptions OptionsFromPass(const RenderPass& pass) {
   opts.color_attachment_pixel_format = pass.GetRenderTargetPixelFormat();
 
   bool has_depth_stencil_attachments =
-      pass.HasDepthAttachment() && pass.HasStencilAttachment();
-  FML_DCHECK(pass.HasDepthAttachment() == pass.HasStencilAttachment());
+      pass.HasDepthAttachment() || pass.HasStencilAttachment();
+  FML_DCHECK(!pass.HasDepthAttachment() || pass.HasStencilAttachment());
 
   opts.has_depth_stencil_attachments = has_depth_stencil_attachments;
+  opts.is_stencil_only =
+      pass.HasStencilAttachment() && !pass.HasDepthAttachment();
   opts.depth_compare = CompareFunction::kGreaterEqual;
   opts.stencil_mode = ContentContextOptions::StencilMode::kIgnore;
   return opts;
@@ -102,7 +104,8 @@ std::optional<Snapshot> Contents::RenderToSnapshot(
       },
       options.msaa_enabled, options.depth_stencil_enabled,
       std::min(options.mip_count,
-               static_cast<int32_t>(subpass_size.MipCount())));
+               static_cast<int32_t>(subpass_size.MipCount())),
+      options.exact_texture_extent);
 
   if (!render_target.ok()) {
     return std::nullopt;
@@ -111,10 +114,8 @@ std::optional<Snapshot> Contents::RenderToSnapshot(
     return std::nullopt;
   }
 
-  auto snapshot = Snapshot{
-      .texture = render_target.value().GetRenderTargetTexture(),
-      .transform = Matrix::MakeTranslation(coverage->GetOrigin()),
-  };
+  auto snapshot = Snapshot::FromRenderTarget(
+      render_target.value(), Matrix::MakeTranslation(coverage->GetOrigin()));
   if (options.sampler_descriptor.has_value()) {
     snapshot.sampler_descriptor = options.sampler_descriptor.value();
   }

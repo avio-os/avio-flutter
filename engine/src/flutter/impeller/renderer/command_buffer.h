@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include "impeller/renderer/blit_pass.h"
 #include "impeller/renderer/compute_pass.h"
@@ -59,6 +60,12 @@ class CommandBuffer {
   virtual bool IsValid() const = 0;
 
   virtual void SetLabel(std::string_view label) const = 0;
+
+  // Region ownership differs from texture destruction custody: an encoded
+  // reader must prevent image/atlas reuse until its buffer has been queued.
+  // Coverage recorders retain these owners through this buffer's lifetime.
+  // Owners must never reference the buffer or one of its render passes.
+  void RetainResource(std::shared_ptr<void> owner);
 
   //----------------------------------------------------------------------------
   /// @brief      Block the current thread until the GPU has completed execution
@@ -121,6 +128,8 @@ class CommandBuffer {
 
  private:
   friend class CommandQueue;
+
+  std::vector<std::shared_ptr<void>> retained_resources_;
 
   //----------------------------------------------------------------------------
   /// @brief      Schedule the command encoded by render passes within this

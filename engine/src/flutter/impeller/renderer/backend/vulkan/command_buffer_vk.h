@@ -46,6 +46,23 @@ class CommandBufferVK final
   ///        completes execution.
   bool Track(const std::shared_ptr<const TextureSourceVK>& texture);
 
+  /// Acquire a declared external image before beginning a render pass or blit.
+  /// Ownership remains local for all uses in this command buffer and is
+  /// released at EndCommandBuffer, before its completion semaphore is signaled.
+  /// This must not be called while a Vulkan render pass is active.
+  bool PrepareExternalImage(
+      const std::shared_ptr<const TextureSourceVK>& texture);
+
+  /// Sampling cannot acquire an image inside an already active render pass.
+  /// An external source must have been explicitly prepared beforehand.
+  bool HasPreparedExternalImage(const TextureSourceVK& texture) const;
+
+  /// Remember this command buffer's own last image layout. A later recorded
+  /// command buffer can update the source's shared CPU bookkeeping before this
+  /// one is ended, so final release cannot infer its old layout from the
+  /// source.
+  void RecordExternalImageLayout(const TextureSourceVK& texture);
+
   /// @brief Retrieve the native command buffer from this object.
   vk::CommandBuffer GetCommandBuffer() const;
 
@@ -84,6 +101,17 @@ class CommandBufferVK final
   friend class CommandQueueVK;
 
   std::shared_ptr<TrackedObjectsVK> tracked_objects_;
+
+  struct ExternalImageUse {
+    std::shared_ptr<const TextureSourceVK> source;
+    ExternalImageOwnershipVK ownership;
+    uint32_t local_queue_family;
+    vk::ImageLayout final_layout;
+  };
+  mutable std::vector<ExternalImageUse> external_images_;
+  mutable bool external_images_finalized_ = false;
+
+  void ReleaseExternalImages() const;
 
   CommandBufferVK(std::weak_ptr<const Context> context,
                   std::shared_ptr<TrackedObjectsVK> tracked_objects);

@@ -46,6 +46,12 @@ struct BackdropData {
   size_t backdrop_count = 0;
   bool all_filters_equal = true;
   std::shared_ptr<Texture> texture_slot;
+  // The complete group's source footprint, including filter support, in
+  // global device coordinates. Unknown mappings conservatively capture the
+  // current pass. Coverage freezes this prefix before its first glass draw.
+  std::optional<Rect> required_input_coverage;
+  bool requires_full_backdrop = false;
+  std::optional<Snapshot> frozen_prefix;
   // A single snapshot of the backdrop filter that is used when there are
   // multiple backdrops that share an identical filter.
   std::optional<Snapshot> shared_filter_snapshot;
@@ -329,6 +335,7 @@ class Canvas {
   // This replay's render-target lease scope, open from SetupRenderPass until
   // EndReplay (or destruction).
   std::optional<uint64_t> render_target_scope_;
+  bool avio_raster_frame_open_ = false;
   EntityPassClipStack clip_coverage_stack_;
 
   std::deque<CanvasStackEntry> transform_stack_;

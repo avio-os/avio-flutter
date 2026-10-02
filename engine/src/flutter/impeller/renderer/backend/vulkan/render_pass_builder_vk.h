@@ -36,7 +36,8 @@ class RenderPassBuilderVK {
       StoreAction store_action,
       vk::ImageLayout current_layout = vk::ImageLayout::eUndefined,
       bool is_swapchain = false,
-      std::optional<vk::ImageLayout> preserved_resolve_layout = std::nullopt);
+      std::optional<vk::ImageLayout> preserved_resolve_layout = std::nullopt,
+      std::optional<vk::ImageLayout> preserved_colour_layout = std::nullopt);
 
   RenderPassBuilderVK& SetDepthStencilAttachment(PixelFormat format,
                                                  SampleCount sample_count,
