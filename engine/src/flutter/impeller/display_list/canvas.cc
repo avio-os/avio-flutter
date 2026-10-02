@@ -2059,7 +2059,7 @@ void Canvas::SaveLayer(const Paint& requested_paint,
         if (pass && !backdrop_entity.Render(renderer_, *pass)) {
           rendering_failed_ = true;
         }
-        Save(0);
+        Save(total_content_depth);
         return;
       }
     }
@@ -2766,28 +2766,40 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
   }
   RenderPass& current_render_pass = *pass;
 
-  // Eagerly restore the BDF contents.
+  // A single-sample pass loads its previous contents in place. Restoring that
+  // texture with a draw would sample the attached color texture, an undefined
+  // feedback loop. The MSAA pass still needs its resolved backdrop drawn back.
+  const ColorAttachment color0 =
+      current_render_pass.GetRenderTarget().GetColorAttachment(0);
+  const bool contents_already_present = color0.texture == input_texture;
+  FML_DCHECK(!contents_already_present ||
+             color0.load_action == LoadAction::kLoad)
+      << "A pass writing to the backdrop texture must load it.";
 
-  // If the pass context returns a backdrop texture, we need to draw it to the
-  // current pass. We do this because it's faster and takes significantly less
-  // memory than storing/loading large MSAA textures. Also, it's not possible
-  // to blit the non-MSAA resolve texture of the previous pass to MSAA
-  // textures (let alone a transient one).
-  Rect size_rect = Rect::MakeSize(input_texture->GetSize());
-  auto msaa_backdrop_contents = TextureContents::MakeRect(size_rect);
-  msaa_backdrop_contents->SetStencilEnabled(false);
-  msaa_backdrop_contents->SetLabel("MSAA backdrop");
-  msaa_backdrop_contents->SetSourceRect(size_rect);
-  msaa_backdrop_contents->SetTexture(input_texture);
+  if (!contents_already_present) {
+    // Eagerly restore the BDF contents.
 
-  Entity msaa_backdrop_entity;
-  msaa_backdrop_entity.SetContents(std::move(msaa_backdrop_contents));
-  msaa_backdrop_entity.SetBlendMode(BlendMode::kSrc);
-  msaa_backdrop_entity.SetClipDepth(std::numeric_limits<uint32_t>::max());
-  if (!msaa_backdrop_entity.Render(renderer_, current_render_pass)) {
-    rendering_failed_ = true;
-    VALIDATION_LOG << "Failed to render MSAA backdrop entity.";
-    return nullptr;
+    // If the pass context returns a backdrop texture, we need to draw it to the
+    // current pass. We do this because it's faster and takes significantly less
+    // memory than storing/loading large MSAA textures. Also, it's not possible
+    // to blit the non-MSAA resolve texture of the previous pass to MSAA
+    // textures (let alone a transient one).
+    Rect size_rect = Rect::MakeSize(input_texture->GetSize());
+    auto msaa_backdrop_contents = TextureContents::MakeRect(size_rect);
+    msaa_backdrop_contents->SetStencilEnabled(false);
+    msaa_backdrop_contents->SetLabel("MSAA backdrop");
+    msaa_backdrop_contents->SetSourceRect(size_rect);
+    msaa_backdrop_contents->SetTexture(input_texture);
+
+    Entity msaa_backdrop_entity;
+    msaa_backdrop_entity.SetContents(std::move(msaa_backdrop_contents));
+    msaa_backdrop_entity.SetBlendMode(BlendMode::kSrc);
+    msaa_backdrop_entity.SetClipDepth(std::numeric_limits<uint32_t>::max());
+    if (!msaa_backdrop_entity.Render(renderer_, current_render_pass)) {
+      rendering_failed_ = true;
+      VALIDATION_LOG << "Failed to render MSAA backdrop entity.";
+      return nullptr;
+    }
   }
 
   // Restore any clips that were recorded before the backdrop filter was

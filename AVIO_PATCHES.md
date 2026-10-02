@@ -86,6 +86,7 @@ already ancestors of the selected main target under their original commits.
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
+| 53 | Backport single-sample backdrop restore safety and shared-backdrop content depth | temporary backport — drop when rebasing past flutter#193306 and #193176 | merged upstream: flutter/flutter#193306, #193176 |
 | 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
@@ -754,6 +755,28 @@ return contract is unchanged. Regressions:
 shape (a backdrop filter inside an opacity layer, drawing after the
 backdrop) must equal the same picture drawn without a backdrop within
 1/255, and on Vulkan it must have taken the labelled secondary.
+
+### Patch 53: backdrop prerequisites for single-sample rendering
+
+This adapts upstream `95feccb1e78b20d4001a508218a04a1438f94530`
+(flutter#193306) and `4ae563fe6016468a142842cfd268acffe8e0f1f7`
+(flutter#193176). A single-sample pass resumes by loading its existing color
+attachment. `Canvas::FlipBackdrop` must not eagerly restore that same texture
+with a sampled draw: sampling the attached target is an undefined feedback
+loop. Multisample passes still restore their resolved backdrop. The fork's
+failure propagation and patch 48's single-sample secondary remain intact.
+The shared-backdrop fast path also reserves the saved layer's real content
+depth instead of zero before drawing its children.
+
+Regressions use the upstream GLES mock feedback detector and the existing
+Canvas fixture: `CanvasGLESTest.AdvancedBlendWithoutOffscreenMSAAHasNoFeedbackLoop`
+uses Multiply, which remains an advanced blend, and
+`AiksTest.BackdropGroupSharedSnapshotReservesContentDepth` draws through a
+cached shared snapshot. The GLES fixture supplies the depth/stencil
+attachments still required by this fork; it does not enable depth-free roots.
+These are prerequisites only. Root and layer MSAA and the negotiated embedder
+ABI remain unchanged. Full engine tests and Vulkan/GLES captures are required
+before the rebuilt engine is packaged.
 
 ### Patch 51: one RenderTargetCache aging epoch per raster frame
 
