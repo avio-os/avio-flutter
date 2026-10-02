@@ -11,6 +11,42 @@
 namespace impeller {
 namespace testing {
 
+TEST(BlendCoefficientsTest, ScreenShaderMatchesPremultipliedColorBlend) {
+  const std::array<Color, 5> colors = {
+      Color::BlackTransparent(),         Color::White(),
+      Color(0.25f, 0.75f, 0.5f, 0.125f), Color(1.0f, 0.25f, 0.0f, 0.75f),
+      Color(0.0f, 0.5f, 1.0f, 0.5f),
+  };
+  for (const bool supports_decal : {false, true}) {
+    const auto constants = GetPorterDuffSpecConstants(supports_decal);
+    const auto& c = constants[static_cast<size_t>(BlendMode::kScreen)];
+    ASSERT_EQ(c.size(), 6u);
+    EXPECT_EQ(c[0], supports_decal ? 1.0f : 0.0f);
+    for (const auto& source : colors) {
+      for (const auto& destination : colors) {
+        const auto src = source.Premultiply();
+        const auto dst = destination.Premultiply();
+        const auto result =
+            src * (c[1] + dst.alpha * c[2]) +
+            dst * (Color(c[3], c[3], c[3], c[3]) +
+                   Color(src.alpha, src.alpha, src.alpha, src.alpha) * c[4] +
+                   src * c[5]);
+        const auto expected =
+            destination.Blend(source, BlendMode::kScreen).Premultiply();
+        EXPECT_NEAR(result.red, expected.red, 1e-5f);
+        EXPECT_NEAR(result.green, expected.green, 1e-5f);
+        EXPECT_NEAR(result.blue, expected.blue, 1e-5f);
+        EXPECT_NEAR(result.alpha, expected.alpha, 1e-5f);
+      }
+    }
+  }
+}
+
+TEST(BlendCoefficientsTest, ScreenIsItsOwnInverseForVertexBlends) {
+  EXPECT_EQ(InvertPorterDuffBlend(BlendMode::kScreen), BlendMode::kScreen);
+  EXPECT_FALSE(InvertPorterDuffBlend(BlendMode::kOverlay).has_value());
+}
+
 class BlendFilterContentsTest : public EntityPlayground {
  public:
   /// Create a texture that has been cleared to transparent black.

@@ -78,6 +78,8 @@ std::optional<BlendMode> InvertPorterDuffBlend(BlendMode blend_mode) {
       return BlendMode::kPlus;
     case BlendMode::kModulate:
       return BlendMode::kModulate;
+    case BlendMode::kScreen:
+      return BlendMode::kScreen;
     default:
       return std::nullopt;
   }

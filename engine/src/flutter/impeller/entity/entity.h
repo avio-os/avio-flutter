@@ -25,7 +25,7 @@ class RenderPass;
 /// scenes. Entities can be created directly or from `Snapshot` objects.
 class Entity {
  public:
-  static constexpr BlendMode kLastPipelineBlendMode = BlendMode::kModulate;
+  static constexpr BlendMode kLastPipelineBlendMode = BlendMode::kScreen;
   static constexpr BlendMode kLastAdvancedBlendMode = BlendMode::kLuminosity;
 
   static constexpr Scalar kDepthEpsilon = 1.0f / 262144.0;

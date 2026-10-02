@@ -69,6 +69,32 @@ namespace testing {
 using EntityTest = EntityPlayground;
 INSTANTIATE_PLAYGROUND_SUITE(EntityTest);
 
+TEST(ContentContextOptionsTest, ScreenBlendIsAPipelineBlend) {
+  EXPECT_EQ(Entity::kLastPipelineBlendMode, BlendMode::kScreen);
+  EXPECT_GT(BlendMode::kOverlay, Entity::kLastPipelineBlendMode);
+  for (const SampleCount samples :
+       {SampleCount::kCount1, SampleCount::kCount4}) {
+    PipelineDescriptor descriptor;
+    descriptor.SetColorAttachmentDescriptor(
+        0u, ColorAttachmentDescriptor{.blending_enabled = true});
+    ContentContextOptions options;
+    options.blend_mode = BlendMode::kScreen;
+    options.sample_count = samples;
+    options.has_depth_stencil_attachments = false;
+    options.ApplyToPipelineDescriptor(descriptor);
+    const auto* color = descriptor.GetColorAttachmentDescriptor(0u);
+    ASSERT_NE(color, nullptr);
+    EXPECT_TRUE(color->blending_enabled);
+    EXPECT_EQ(color->src_color_blend_factor, BlendFactor::kOne);
+    EXPECT_EQ(color->dst_color_blend_factor, BlendFactor::kOneMinusSourceColor);
+    EXPECT_EQ(color->src_alpha_blend_factor, BlendFactor::kOne);
+    EXPECT_EQ(color->dst_alpha_blend_factor, BlendFactor::kOneMinusSourceAlpha);
+    EXPECT_EQ(color->color_blend_op, BlendOperation::kAdd);
+    EXPECT_EQ(color->alpha_blend_op, BlendOperation::kAdd);
+    EXPECT_EQ(descriptor.GetSampleCount(), samples);
+  }
+}
+
 TEST_P(EntityTest, CanCreateEntity) {
   Entity entity;
   ASSERT_TRUE(entity.GetTransform().IsIdentity());
@@ -748,7 +774,7 @@ TEST_P(EntityTest, BlendingModeOptions) {
     static_assert(b == BlendMode::kClear);  // Ensure the first item in
                                             // the switch is the first
                                             // item in the enum.
-    static_assert(Entity::kLastPipelineBlendMode == BlendMode::kModulate);
+    static_assert(Entity::kLastPipelineBlendMode == BlendMode::kScreen);
     switch (b) {
       case BlendMode::kClear:
         blend_mode_names.push_back("Clear");
@@ -792,6 +818,9 @@ TEST_P(EntityTest, BlendingModeOptions) {
       case BlendMode::kModulate:
         blend_mode_names.push_back("Modulate");
         blend_mode_values.push_back(BlendMode::kModulate);
+      case BlendMode::kScreen:
+        blend_mode_names.push_back("Screen");
+        blend_mode_values.push_back(BlendMode::kScreen);
     };
   }
 

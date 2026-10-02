@@ -86,6 +86,7 @@ already ancestors of the selected main target under their original commits.
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
+| 54 | Screen is a coefficient blend | upstreamable memory/performance correction | submit upstream |
 | 53 | Backport single-sample backdrop restore safety and shared-backdrop content depth | temporary backport — drop when rebasing past flutter#193306 and #193176 | merged upstream: flutter/flutter#193306, #193176 |
 | 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
 
@@ -755,6 +756,66 @@ return contract is unchanged. Regressions:
 shape (a backdrop filter inside an opacity layer, drawing after the
 backdrop) must equal the same picture drawn without a backdrop within
 1/255, and on Vulkan it must have taken the labelled secondary.
+
+### Patch 54: Screen is a coefficient blend
+
+Premultiplied Screen is `src + dst * (1 - src)`, so it needs no sampled
+destination, framebuffer-fetch extension, or backdrop Flip. Screen now ends
+`Entity::kLastPipelineBlendMode`; the fixed-function RGB factors are ONE and
+ONE_MINUS_SRC_COLOR, and alpha factors are ONE and ONE_MINUS_SRC_ALPHA.
+Canvas, DisplayList readback classification, filters and vertex blends all
+follow the same boundary. Overlay and later modes retain the advanced path.
+
+The existing Screen shader coefficient row was unreachable through normal
+coefficient routing and omitted the source term. It is corrected to
+`{1, 0, 1, 0, -1}`. Shader specialization is now built from the single
+`kPorterDuffCoefficients` table rather than its separate duplicate; Screen
+also inverts to itself for texture/vertex blends. No embedder ABI or SDK
+interface changes. Root and layer sample counts and all depth/stencil
+attachments retain their existing policy.
+
+Regressions: `ContentContextOptionsTest.ScreenBlendIsAPipelineBlend` checks
+RGB/alpha descriptors at both 1x and 4x; `BlendCoefficientsTest` compares the
+production coefficient shader equation against `Color::Blend` for transparent,
+opaque and translucent pairs and checks vertex inversion;
+`AiksTest.ScreenPipelineAndColorFilterMatchCpuOracleWithoutFlip` compares the
+actual paint and sampled color-filter pictures against CPU-reference pictures
+within 1/255 and rejects a labelled Flip secondary. Existing `BlendModeScreen`
+and `BlendModeSrcAlphaScreen` playground/golden cases remain relevant. Full
+engine unit tests, Vulkan/GLES pixel captures, and init/first-use pipeline
+measurements are still required before packaging. The standalone CPU oracle
+checks the coefficient math only; it is not an Impeller build or GPU result.
+
+#### Remaining coverage-antialiasing gates (source audit)
+
+This change does not authorize lowering any sample count. The existing code
+still has coupled layer/coverage sample policy and depth/stencil consumers:
+
+- `ContentContext::MakeSubpass` selects 4x using `SupportsOffscreenMSAA` and a
+  boolean. `Contents::SnapshotOptions` defaults that boolean to true;
+  `ExternalCoverageContents` (patch 45's geometric foreground mask) uses that
+  default. Lowering the capability for layers would also silently remove its
+  multisample edge mask. Explicit layer and coverage sample requests must
+  precede any policy change.
+- `ClipContents::Render` writes depth for difference clips and uses stencil
+  preparation plus depth-writing cover draws for other clips.
+  `Canvas::AddRenderEntityToCurrentPass` assigns clip depth to normal draws and
+  replays it after backdrop reads. `InlinePassContext::GetRenderPass` requires
+  both depth and stencil. Coverage clips and their depth ordering replacement
+  are not implemented by these patches.
+- Path NonZero/EvenOdd fills and overdraw-preventing geometry use the stencil
+  modes in `ContentContextOptions`. Their bounded atlas/island replacement is
+  still required; deleting the attachments would change fills and strokes.
+- `EntityPassClipStack::RecordClip` retains the fractional-rect 0.124-pixel
+  rounding rule, which assumes the current 4x sample grid. A future 1x path
+  needs explicit fractional-edge coverage rather than this rounding.
+- Patch 53 removes the single-sample self-restore feedback hazard. It does not
+  implement bounded backdrop scratch or a layer/coverage arena, and remaining
+  advanced blends still take the existing Flip path.
+
+Continuous analytic coverage requires the coverage-clip/path contracts and
+approved before/after captures. Screen's coefficient identity changes neither
+geometry nor edge quantization and is independent of those unfinished gates.
 
 ### Patch 53: backdrop prerequisites for single-sample rendering
 

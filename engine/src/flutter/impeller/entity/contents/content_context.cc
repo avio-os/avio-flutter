@@ -15,6 +15,7 @@
 #include "impeller/core/texture_descriptor.h"
 #include "impeller/entity/contents/framebuffer_blend_contents.h"
 #include "impeller/entity/contents/pipelines.h"
+#include "impeller/entity/contents/porter_duff_blend_coefficients.h"
 #include "impeller/entity/contents/text_shadow_cache.h"
 #include "impeller/entity/entity.h"
 #include "impeller/entity/render_target_cache.h"
@@ -433,6 +434,14 @@ void ContentContextOptions::ApplyToPipelineDescriptor(
       color0.src_alpha_blend_factor = BlendFactor::kZero;
       color0.src_color_blend_factor = BlendFactor::kZero;
       break;
+    case BlendMode::kScreen:
+      // Premultiplied screen: src + dst * (1 - src). RGB uses the
+      // source color coefficient; alpha uses the source alpha coefficient.
+      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
+      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceColor;
+      color0.src_alpha_blend_factor = BlendFactor::kOne;
+      color0.src_color_blend_factor = BlendFactor::kOne;
+      break;
     default:
       FML_UNREACHABLE();
   }
@@ -508,28 +517,6 @@ void ContentContextOptions::ApplyToPipelineDescriptor(
 
   desc.SetPrimitiveType(primitive_type);
   desc.SetPolygonMode(PolygonMode::kFill);
-}
-
-std::array<std::vector<Scalar>, 15> GetPorterDuffSpecConstants(
-    bool supports_decal) {
-  Scalar x = supports_decal ? 1 : 0;
-  return {{
-      {x, 0, 0, 0, 0, 0},    // Clear
-      {x, 1, 0, 0, 0, 0},    // Source
-      {x, 0, 0, 1, 0, 0},    // Destination
-      {x, 1, 0, 1, -1, 0},   // SourceOver
-      {x, 1, -1, 1, 0, 0},   // DestinationOver
-      {x, 0, 1, 0, 0, 0},    // SourceIn
-      {x, 0, 0, 0, 1, 0},    // DestinationIn
-      {x, 1, -1, 0, 0, 0},   // SourceOut
-      {x, 0, 0, 1, -1, 0},   // DestinationOut
-      {x, 0, 1, 1, -1, 0},   // SourceATop
-      {x, 1, -1, 0, 1, 0},   // DestinationATop
-      {x, 1, -1, 1, -1, 0},  // Xor
-      {x, 1, 0, 1, 0, 0},    // Plus
-      {x, 0, 0, 0, 0, 1},    // Modulate
-      {x, 0, 0, 1, 0, -1},   // Screen
-  }};
 }
 
 template <typename PipelineT>

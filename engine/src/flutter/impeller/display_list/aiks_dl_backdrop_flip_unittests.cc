@@ -7,6 +7,7 @@
 // (Vulkan) the flip swaps in a lazily allocated single-sample secondary.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -163,6 +164,79 @@ TEST_P(AiksTest, BackdropInsideOpacityLayerMatchesDirectDraw) {
   const size_t center = (25 * kSize.width + 25) * 4;
   EXPECT_GT(flipped_pixels[center + 3], 0u);
   EXPECT_LT(flipped_pixels[center + 3], 255u);
+}
+
+// Cover transparent and translucent source/destination colors. Direct Screen
+// paints exercise fixed-function factors; color filters exercise the shader
+// coefficients used for a sampled input and a foreground color.
+TEST_P(AiksTest, ScreenPipelineAndColorFilterMatchCpuOracleWithoutFlip) {
+  using flutter::DisplayListBuilder;
+  using flutter::DlBlendMode;
+  using flutter::DlColor;
+  using flutter::DlColorFilter;
+  using flutter::DlPaint;
+  using flutter::DlRect;
+
+  constexpr ISize kSize(100, 100);
+  const std::array<DlColor, 5> colors = {
+      DlColor(0x00000000), DlColor(0xFFFFFFFF), DlColor(0x2040BF80),
+      DlColor(0xBFFF4000), DlColor(0x800080FF),
+  };
+  auto cache = std::make_shared<LabelRecordingCache>(
+      GetContext()->GetResourceAllocator());
+  AiksContext renderer(GetContext(), nullptr, cache);
+  for (const bool color_filter : {false, true}) {
+    DisplayListBuilder blended;
+    DisplayListBuilder reference;
+    for (size_t y = 0; y < colors.size(); y++) {
+      for (size_t x = 0; x < colors.size(); x++) {
+        const auto rect = DlRect::MakeXYWH(x * 20, y * 20, 20, 20);
+        const auto source = colors[x];
+        const auto destination = colors[y];
+        DlPaint background;
+        background.setColor(destination);
+        background.setBlendMode(DlBlendMode::kSrc);
+        DlPaint foreground;
+        if (color_filter) {
+          background.setColorFilter(
+              DlColorFilter::MakeBlend(source, DlBlendMode::kScreen));
+          blended.DrawRect(rect, background);
+        } else {
+          blended.DrawRect(rect, background);
+          foreground.setColor(source);
+          foreground.setBlendMode(DlBlendMode::kScreen);
+          blended.DrawRect(rect, foreground);
+        }
+        const Color src(source.getRedF(), source.getGreenF(), source.getBlueF(),
+                        source.getAlphaF());
+        const Color dst(destination.getRedF(), destination.getGreenF(),
+                        destination.getBlueF(), destination.getAlphaF());
+        const Color expected = dst.Blend(src, BlendMode::kScreen);
+        DlPaint expected_paint;
+        expected_paint.setColor(DlColor::RGBA(expected.red, expected.green,
+                                              expected.blue, expected.alpha));
+        expected_paint.setBlendMode(DlBlendMode::kSrc);
+        reference.DrawRect(rect, expected_paint);
+      }
+    }
+    auto texture = DisplayListToTexture(blended.Build(), kSize, renderer);
+    ASSERT_TRUE(texture);
+    auto expected = DisplayListToTexture(reference.Build(), kSize, renderer);
+    ASSERT_TRUE(expected);
+    const auto pixels = ReadBackdropPixels(GetContext(), texture);
+    const auto expected_pixels = ReadBackdropPixels(GetContext(), expected);
+    ASSERT_EQ(pixels.size(), static_cast<size_t>(kSize.Area() * 4));
+    ASSERT_EQ(pixels.size(), expected_pixels.size());
+    int max_difference = 0;
+    for (size_t i = 0; i < pixels.size(); i++) {
+      max_difference = std::max(
+          max_difference, std::abs(int(pixels[i]) - int(expected_pixels[i])));
+    }
+    EXPECT_LE(max_difference, 1) << "color filter: " << color_filter;
+    EXPECT_EQ(std::find(cache->labels.begin(), cache->labels.end(),
+                        "EntityPassTarget Secondary"),
+              cache->labels.end());
+  }
 }
 
 }  // namespace impeller::testing
