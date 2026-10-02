@@ -409,7 +409,8 @@ TEST_F(DisplayListLayerDiffTest,
 TEST_F(DisplayListLayerDiffTest,
        AdvancedRootBlendsConservativelyGateImpellerOnly) {
   for (const auto mode :
-       {DlBlendMode::kSrcOver, DlBlendMode::kModulate, DlBlendMode::kScreen}) {
+       {DlBlendMode::kSrcOver, DlBlendMode::kModulate, DlBlendMode::kScreen,
+        DlBlendMode::kOverlay, DlBlendMode::kMultiply}) {
     DisplayListBuilder builder;
     builder.DrawRect(DlRect::MakeLTRB(10, 10, 80, 80),
                      DlPaint().setBlendMode(mode));
@@ -420,7 +421,10 @@ TEST_F(DisplayListLayerDiffTest,
       tree.root()->Add(CreateDisplayListLayer(display_list));
       const auto damage = DiffLayerTree(tree, MockLayerTree(), DlIRect(), 0, 0,
                                         false, impeller);
-      EXPECT_EQ(damage.has_readback, impeller && mode > DlBlendMode::kModulate);
+      // Screen is a coefficient blend and must not force a full-frame repaint.
+      const bool reads_destination =
+          mode == DlBlendMode::kOverlay || mode == DlBlendMode::kMultiply;
+      EXPECT_EQ(damage.has_readback, impeller && reads_destination);
     }
   }
 }

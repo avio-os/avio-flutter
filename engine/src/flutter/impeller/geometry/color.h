@@ -96,6 +96,11 @@ enum class BlendMode : uint8_t {
   kDefaultMode = kSrcOver,
 };
 
+// Shared by pipeline selection, shader coefficients, atlas/vertex routing,
+// and Flow's Impeller root-readback classification. Modes after this boundary
+// require a sampled destination or framebuffer fetch.
+inline constexpr BlendMode kLastCoefficientBlendMode = BlendMode::kScreen;
+
 const char* BlendModeToString(BlendMode blend_mode);
 
 /// 4x5 matrix for transforming the color and alpha components of a Bitmap.

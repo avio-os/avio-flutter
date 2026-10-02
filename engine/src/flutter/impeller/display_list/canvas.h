@@ -38,6 +38,10 @@
 
 namespace impeller {
 
+namespace testing {
+class CanvasBlendTestPeer;
+}  // namespace testing
+
 struct BackdropData {
   size_t backdrop_count = 0;
   bool all_filters_equal = true;
@@ -301,6 +305,9 @@ class Canvas {
                                       Point global_pass_position);
 
  private:
+  // Pixel regressions can explicitly replay the previous framebuffer-fetch
+  // contents under real Canvas clips without a production routing override.
+  friend class testing::CanvasBlendTestPeer;
   class BlurShape {
    public:
     virtual ~BlurShape() = default;

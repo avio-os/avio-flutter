@@ -83,11 +83,11 @@ already ancestors of the selected main target under their original commits.
 | 46b | A transient set lives while an existing view holds its extent | permanent resource-lifecycle owner (ships only with Avio G2, which keeps a ShellItem's view across extent changes) | none — upstream frees with the swapchain |
 | 46u | Report-only render-resource accounting | permanent diagnostics (internal C++ API, no ABI change) | none |
 | 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
+| 53 | Backport single-sample backdrop restore safety and shared-backdrop content depth | temporary backport — drop when rebasing past flutter#193306 and #193176 | merged upstream: flutter/flutter#193306, #193176 |
+| 54 | Screen is a coefficient blend | upstreamable memory/performance correction | submit upstream |
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
-| 54 | Screen is a coefficient blend | upstreamable memory/performance correction | submit upstream |
-| 53 | Backport single-sample backdrop restore safety and shared-backdrop content depth | temporary backport — drop when rebasing past flutter#193306 and #193176 | merged upstream: flutter/flutter#193306, #193176 |
 | 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
@@ -757,88 +757,6 @@ shape (a backdrop filter inside an opacity layer, drawing after the
 backdrop) must equal the same picture drawn without a backdrop within
 1/255, and on Vulkan it must have taken the labelled secondary.
 
-### Patch 54: Screen is a coefficient blend
-
-Premultiplied Screen is `src + dst * (1 - src)`, so it needs no sampled
-destination, framebuffer-fetch extension, or backdrop Flip. Screen now ends
-`Entity::kLastPipelineBlendMode`; the fixed-function RGB factors are ONE and
-ONE_MINUS_SRC_COLOR, and alpha factors are ONE and ONE_MINUS_SRC_ALPHA.
-Canvas, DisplayList readback classification, filters and vertex blends all
-follow the same boundary. Overlay and later modes retain the advanced path.
-
-The existing Screen shader coefficient row was unreachable through normal
-coefficient routing and omitted the source term. It is corrected to
-`{1, 0, 1, 0, -1}`. Shader specialization is now built from the single
-`kPorterDuffCoefficients` table rather than its separate duplicate; Screen
-also inverts to itself for texture/vertex blends. No embedder ABI or SDK
-interface changes. Root and layer sample counts and all depth/stencil
-attachments retain their existing policy.
-
-Regressions: `ContentContextOptionsTest.ScreenBlendIsAPipelineBlend` checks
-RGB/alpha descriptors at both 1x and 4x; `BlendCoefficientsTest` compares the
-production coefficient shader equation against `Color::Blend` for transparent,
-opaque and translucent pairs and checks vertex inversion;
-`AiksTest.ScreenPipelineAndColorFilterMatchCpuOracleWithoutFlip` compares the
-actual paint and sampled color-filter pictures against CPU-reference pictures
-within 1/255 and rejects a labelled Flip secondary. Existing `BlendModeScreen`
-and `BlendModeSrcAlphaScreen` playground/golden cases remain relevant. Full
-engine unit tests, Vulkan/GLES pixel captures, and init/first-use pipeline
-measurements are still required before packaging. The standalone CPU oracle
-checks the coefficient math only; it is not an Impeller build or GPU result.
-
-#### Remaining coverage-antialiasing gates (source audit)
-
-This change does not authorize lowering any sample count. The existing code
-still has coupled layer/coverage sample policy and depth/stencil consumers:
-
-- `ContentContext::MakeSubpass` selects 4x using `SupportsOffscreenMSAA` and a
-  boolean. `Contents::SnapshotOptions` defaults that boolean to true;
-  `ExternalCoverageContents` (patch 45's geometric foreground mask) uses that
-  default. Lowering the capability for layers would also silently remove its
-  multisample edge mask. Explicit layer and coverage sample requests must
-  precede any policy change.
-- `ClipContents::Render` writes depth for difference clips and uses stencil
-  preparation plus depth-writing cover draws for other clips.
-  `Canvas::AddRenderEntityToCurrentPass` assigns clip depth to normal draws and
-  replays it after backdrop reads. `InlinePassContext::GetRenderPass` requires
-  both depth and stencil. Coverage clips and their depth ordering replacement
-  are not implemented by these patches.
-- Path NonZero/EvenOdd fills and overdraw-preventing geometry use the stencil
-  modes in `ContentContextOptions`. Their bounded atlas/island replacement is
-  still required; deleting the attachments would change fills and strokes.
-- `EntityPassClipStack::RecordClip` retains the fractional-rect 0.124-pixel
-  rounding rule, which assumes the current 4x sample grid. A future 1x path
-  needs explicit fractional-edge coverage rather than this rounding.
-- Patch 53 removes the single-sample self-restore feedback hazard. It does not
-  implement bounded backdrop scratch or a layer/coverage arena, and remaining
-  advanced blends still take the existing Flip path.
-
-Continuous analytic coverage requires the coverage-clip/path contracts and
-approved before/after captures. Screen's coefficient identity changes neither
-geometry nor edge quantization and is independent of those unfinished gates.
-
-### Patch 53: backdrop prerequisites for single-sample rendering
-
-This adapts upstream `95feccb1e78b20d4001a508218a04a1438f94530`
-(flutter#193306) and `4ae563fe6016468a142842cfd268acffe8e0f1f7`
-(flutter#193176). A single-sample pass resumes by loading its existing color
-attachment. `Canvas::FlipBackdrop` must not eagerly restore that same texture
-with a sampled draw: sampling the attached target is an undefined feedback
-loop. Multisample passes still restore their resolved backdrop. The fork's
-failure propagation and patch 48's single-sample secondary remain intact.
-The shared-backdrop fast path also reserves the saved layer's real content
-depth instead of zero before drawing its children.
-
-Regressions use the upstream GLES mock feedback detector and the existing
-Canvas fixture: `CanvasGLESTest.AdvancedBlendWithoutOffscreenMSAAHasNoFeedbackLoop`
-uses Multiply, which remains an advanced blend, and
-`AiksTest.BackdropGroupSharedSnapshotReservesContentDepth` draws through a
-cached shared snapshot. The GLES fixture supplies the depth/stencil
-attachments still required by this fork; it does not enable depth-free roots.
-These are prerequisites only. Root and layer MSAA and the negotiated embedder
-ABI remain unchanged. Full engine tests and Vulkan/GLES captures are required
-before the rebuilt engine is packaged.
-
 ### Patch 51: one RenderTargetCache aging epoch per raster frame
 
 The cache's header promised that textures live "for at least one frame" and
@@ -1136,3 +1054,107 @@ DisplayList dispatcher. Cleanup still drains earlier queued work, and a failed
 inline pass is consumed exactly once so destruction cannot retry its commands.
 Those failures retain the conservative raster-failed classification; only
 factory failure before any GPU work carries pre-submit proof.
+
+### Patch 54: Screen is a coefficient blend
+
+Premultiplied Screen is `src + dst * (1 - src)`, so it needs no sampled
+destination, framebuffer-fetch extension, or backdrop Flip. Screen now ends
+`kLastCoefficientBlendMode` in `impeller/geometry/color.h`, with
+`Entity::kLastPipelineBlendMode` as its alias. The fixed-function RGB factors are ONE and
+ONE_MINUS_SRC_COLOR, and alpha factors are ONE and ONE_MINUS_SRC_ALPHA.
+Canvas, Flow root readback classification, DisplayList readback classification,
+AtlasContents, filters and vertex blends all follow that boundary. Overlay and later modes retain the advanced path.
+
+The existing Screen shader coefficient row was unreachable through normal
+coefficient routing and omitted the source term. It is corrected to
+`{1, 0, 1, 0, -1}`. Shader specialization is now built from the single
+`kPorterDuffCoefficients` table rather than its separate duplicate; Screen
+also inverts to itself for texture/vertex blends. No embedder ABI or SDK
+interface changes. Root and layer sample counts and all depth/stencil
+attachments retain their existing policy.
+
+Regressions: `ContentContextOptionsTest.ScreenBlendIsAPipelineBlend` checks
+RGB/alpha descriptors at both 1x and 4x; `BlendCoefficientsTest` compares the
+production coefficient shader equation against `Color::Blend` for transparent,
+opaque and translucent pairs and checks vertex inversion;
+`AiksTest.ScreenPipelineMatchesCpuOracleWithoutOffscreen` checks painted
+rectangles, and `ScreenImageFiltersAndVerticesMatchCpuOracleWithoutOffscreen`
+checks DrawImage/DrawImageRect with Screen color filters and textured colored
+DrawVertices against the CPU oracle within 1/255. The cache recorder covers
+both single-sample and MSAA requests; Screen must allocate no offscreen at all.
+`ScreenVulkanComparisonTest.ScreenPreviousFetchAndPipelineClippedEdgesGolden`
+compares actual 4x clipped gradient edges with the previous framebuffer-fetch
+path, records edge/interior deltas, and emits paired light/dark images at
+scales 1, 1.25 and 2. It deliberately detects a changed result, and does not
+approve that result. Existing `BlendModeScreen` and `BlendModeSrcAlphaScreen`
+playground/golden cases remain relevant. Full
+engine unit tests, Vulkan/GLES pixel captures, and init/first-use pipeline
+measurements are still required before packaging. The standalone CPU oracle
+checks the coefficient math only; it is not an Impeller build or GPU result.
+
+#### Remaining coverage-antialiasing gates (source audit)
+
+This change does not authorize lowering any sample count. The existing code
+still has coupled layer/coverage sample policy and depth/stencil consumers:
+
+- `ContentContext::MakeSubpass` selects 4x using `SupportsOffscreenMSAA` and a
+  boolean. `Contents::SnapshotOptions` defaults that boolean to true;
+  `ExternalCoverageContents` (patch 45's geometric foreground mask) uses that
+  default. Lowering the capability for layers would also silently remove its
+  multisample edge mask. Explicit layer and coverage sample requests must
+  precede any policy change.
+- `ClipContents::Render` writes depth for difference clips and uses stencil
+  preparation plus depth-writing cover draws for other clips.
+  `Canvas::AddRenderEntityToCurrentPass` assigns clip depth to normal draws and
+  replays it after backdrop reads. `InlinePassContext::GetRenderPass` requires
+  both depth and stencil. Coverage clips and their depth ordering replacement
+  are not implemented by these patches.
+- Path NonZero/EvenOdd fills and overdraw-preventing geometry use the stencil
+  modes in `ContentContextOptions`. Their bounded atlas/island replacement is
+  still required; deleting the attachments would change fills and strokes.
+- `EntityPassClipStack::RecordClip` retains the fractional-rect 0.124-pixel
+  rounding rule, which assumes the current 4x sample grid. A future 1x path
+  needs explicit fractional-edge coverage rather than this rounding.
+- Patch 53 removes the single-sample self-restore feedback hazard. It does not
+  implement bounded backdrop scratch or a layer/coverage arena, and remaining
+  advanced blends retain their existing framebuffer-fetch or Flip paths.
+
+The old Vulkan/ANV path rendered an 8-bit MSAA source snapshot, averaged all
+four destination samples in its fetch shader, and wrote that result to each
+covered sample. Fixed-function Screen blends per sample with an unquantized
+shader source. The real clipped-edge result can differ by more than 1/255;
+interior rounding can differ too. The algebraic identity does not establish
+pixel parity. The required design note, implementation scope, comparison
+fixtures, and outstanding GN/GPU/TL-3 and laptop look-approval gates are in
+[Screen coefficient design](docs/engine/impeller/docs/avio-screen-coefficient-design.md).
+No new look is approved by these source changes. Continuous analytic coverage
+still requires the separate coverage-clip/path contracts and approved captures.
+
+Known follow-up: upstream `63768f5568` (flutter#192988, offscreen
+advanced-blend texture coordinates) is not backported here. First-use pipeline
+prewarm/measurement and removal of unused normal-route Screen advanced
+pipelines remain outstanding; the comparison fixture intentionally retains
+the old Screen fetch pipeline. Patch 50 code is independent, and the patch
+inventory keeps its original adjacent context so EN50 reverse-applies alone.
+
+### Patch 53: backdrop prerequisites for single-sample rendering
+
+This adapts upstream `95feccb1e78b20d4001a508218a04a1438f94530`
+(flutter#193306) and `4ae563fe6016468a142842cfd268acffe8e0f1f7`
+(flutter#193176). A single-sample pass resumes by loading its existing color
+attachment. `Canvas::FlipBackdrop` must not eagerly restore that same texture
+with a sampled draw: sampling the attached target is an undefined feedback
+loop. Multisample passes still restore their resolved backdrop. The fork's
+failure propagation and patch 48's single-sample secondary remain intact.
+The shared-backdrop fast path also reserves the saved layer's real content
+depth instead of zero before drawing its children.
+
+Regressions use the upstream GLES mock feedback detector and the existing
+Canvas fixture: `CanvasGLESTest.AdvancedBlendWithoutOffscreenMSAAHasNoFeedbackLoop`
+uses Multiply, which remains an advanced blend, and
+`AiksTest.BackdropGroupSharedSnapshotReservesContentDepth` draws through a
+cached shared snapshot. The GLES fixture supplies the depth/stencil
+attachments still required by this fork; it does not enable depth-free roots.
+These are prerequisites only. Root and layer MSAA and the negotiated embedder
+ABI remain unchanged. Full engine tests and Vulkan/GLES captures are required
+before the rebuilt engine is packaged.

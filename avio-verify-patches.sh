@@ -614,6 +614,24 @@ need "exact-frame preview feature" "$F/shell/platform/embedder/embedder.h" 'kFlu
 need "retained preview scene API" "$F/lib/ui/compositing.dart" 'pushAvioWindowPreview'
 need "preview target metadata" "$F/shell/platform/embedder/embedder.h" 'window_previews_count'
 
+echo "--- Screen coefficient boundary ---"
+need "shared Screen coefficient boundary" \
+  "$F/impeller/geometry/color.h" 'kLastCoefficientBlendMode = BlendMode::kScreen'
+need "Entity aliases the shared coefficient boundary" \
+  "$F/impeller/entity/entity.h" 'kLastPipelineBlendMode = kLastCoefficientBlendMode'
+need "Flow root readback uses the shared boundary" \
+  "$F/flow/layers/display_list_layer.cc" 'impeller::kLastCoefficientBlendMode'
+need "Atlas uses the shared coefficient boundary" \
+  "$F/impeller/entity/contents/atlas_contents.cc" 'blend_mode <= kLastCoefficientBlendMode'
+need "Screen regression records MSAA offscreens" \
+  "$F/impeller/display_list/aiks_dl_backdrop_flip_unittests.cc" 'RenderTarget CreateOffscreenMSAA'
+need "Screen shader image and vertex regression" \
+  "$F/impeller/display_list/aiks_dl_backdrop_flip_unittests.cc" 'ScreenImageFiltersAndVerticesMatchCpuOracleWithoutOffscreen'
+need "Screen old-fetch versus pipeline edge comparison" \
+  "$F/impeller/display_list/aiks_dl_backdrop_flip_unittests.cc" 'ScreenPreviousFetchAndPipelineClippedEdgesGolden'
+need "Screen design and open look gates" \
+  docs/engine/impeller/docs/avio-screen-coefficient-design.md 'Pixel operator and acceptance'
+
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"

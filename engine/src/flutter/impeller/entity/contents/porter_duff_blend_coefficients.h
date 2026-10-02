@@ -35,7 +35,7 @@ constexpr std::array<std::array<Scalar, 5>, 15> kPorterDuffCoefficients = {{
 }};
 
 static_assert(kPorterDuffCoefficients.size() ==
-              static_cast<size_t>(BlendMode::kScreen) + 1);
+              static_cast<size_t>(kLastCoefficientBlendMode) + 1);
 
 inline std::array<std::vector<Scalar>, kPorterDuffCoefficients.size()>
 GetPorterDuffSpecConstants(bool supports_decal) {
