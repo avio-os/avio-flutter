@@ -79,7 +79,8 @@ EmbedderSurfaceGLImpeller::EmbedderSurfaceGLImpeller(
     bool fbo_reset_after_present,
     std::shared_ptr<EmbedderExternalViewEmbedder> external_view_embedder,
     std::shared_ptr<fml::BasicTaskRunner> io_task_runner,
-    impeller::Flags impeller_flags)
+    impeller::Flags impeller_flags,
+    std::optional<impeller::AvioAntialiasingConfig> antialiasing_config)
     : gl_dispatch_table_(std::move(gl_dispatch_table)),
       fbo_reset_after_present_(fbo_reset_after_present),
       external_view_embedder_(std::move(external_view_embedder)),
@@ -98,7 +99,8 @@ EmbedderSurfaceGLImpeller::EmbedderSurfaceGLImpeller(
   gl_dispatch_table_.gl_make_current_callback();
 
   auto gl = std::make_unique<impeller::ProcTableGLES>(
-      gl_dispatch_table_.gl_proc_resolver);
+      gl_dispatch_table_.gl_proc_resolver,
+      antialiasing_config && antialiasing_config->UsesCoverage());
   if (!gl->IsValid()) {
     return;
   }
@@ -109,9 +111,12 @@ EmbedderSurfaceGLImpeller::EmbedderSurfaceGLImpeller(
 
   impeller_context_ = impeller::ContextGLES::Create(
       impeller_flags, std::move(gl), shader_mappings,
-      /*enable_gpu_tracing=*/false, std::move(io_task_runner));
+      /*enable_gpu_tracing=*/false, std::move(io_task_runner),
+      antialiasing_config);
 
-  if (!impeller_context_) {
+  if (!impeller_context_ ||
+      !std::static_pointer_cast<impeller::Context>(impeller_context_)
+           ->IsValid()) {
     FML_LOG(ERROR) << "Could not create Impeller context.";
     return;
   }

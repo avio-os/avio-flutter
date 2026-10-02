@@ -53,7 +53,11 @@ class EmbedderSurfaceVulkanImpeller final : public EmbedderSurface,
       std::shared_ptr<EmbedderExternalViewEmbedder> external_view_embedder,
       impeller::Flags impeller_flags = {},
       std::optional<EmbedderVulkanResourceLifecycleConfig>
-          resource_lifecycle_config = std::nullopt);
+          resource_lifecycle_config = std::nullopt,
+      std::optional<impeller::AvioAntialiasingConfig> avio_antialiasing_config =
+          std::nullopt,
+      bool native_sample_shading_enabled = false,
+      bool* native_teardown_safe = nullptr);
 
   ~EmbedderSurfaceVulkanImpeller() override;
 

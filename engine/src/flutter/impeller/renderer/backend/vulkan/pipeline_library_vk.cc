@@ -14,6 +14,7 @@
 #include "impeller/renderer/backend/vulkan/formats_vk.h"
 #include "impeller/renderer/backend/vulkan/pipeline_vk.h"
 #include "impeller/renderer/backend/vulkan/shader_function_vk.h"
+#include "impeller/renderer/render_resource_scope.h"
 
 namespace impeller {
 
@@ -50,7 +51,8 @@ bool PipelineLibraryVK::IsValid() const {
 
 std::unique_ptr<ComputePipelineVK> PipelineLibraryVK::CreateComputePipeline(
     const ComputePipelineDescriptor& desc,
-    PipelineKey pipeline_key) {
+    PipelineKey pipeline_key,
+    AvioPipelineCreationOrigin origin) {
   TRACE_EVENT0("flutter", __FUNCTION__);
   vk::ComputePipelineCreateInfo pipeline_info;
 
@@ -154,7 +156,7 @@ std::unique_ptr<ComputePipelineVK> PipelineLibraryVK::CreateComputePipeline(
       std::move(pipeline),               //
       std::move(pipeline_layout.value),  //
       std::move(descs_layout),           //
-      pipeline_key);
+      pipeline_key, origin);
 }
 
 // |PipelineLibrary|
@@ -183,7 +185,8 @@ PipelineFuture<PipelineDescriptor> PipelineLibraryVK::GetPipeline(
   auto weak_this = weak_from_this();
 
   PipelineKey next_key = pipeline_key_++;
-  auto generation_task = [descriptor, weak_this, promise, next_key]() {
+  const auto origin = AvioPipelineCreationOrigin::Capture();
+  auto generation_task = [descriptor, weak_this, promise, next_key, origin]() {
     auto thiz = weak_this.lock();
     if (!thiz) {
       promise->set_value(nullptr);
@@ -194,7 +197,8 @@ PipelineFuture<PipelineDescriptor> PipelineLibraryVK::GetPipeline(
         descriptor,                                            //
         PipelineLibraryVK::Cast(*thiz).device_holder_.lock(),  //
         weak_this,                                             //
-        next_key                                               //
+        next_key,                                              //
+        {}, origin                                             //
         ));
   };
 
@@ -235,7 +239,8 @@ PipelineFuture<ComputePipelineDescriptor> PipelineLibraryVK::GetPipeline(
   auto weak_this = weak_from_this();
 
   PipelineKey next_key = pipeline_key_++;
-  auto generation_task = [descriptor, weak_this, promise, next_key]() {
+  const auto origin = AvioPipelineCreationOrigin::Capture();
+  auto generation_task = [descriptor, weak_this, promise, next_key, origin]() {
     auto self = weak_this.lock();
     if (!self) {
       promise->set_value(nullptr);
@@ -245,7 +250,7 @@ PipelineFuture<ComputePipelineDescriptor> PipelineLibraryVK::GetPipeline(
     }
 
     auto pipeline = PipelineLibraryVK::Cast(*self).CreateComputePipeline(
-        descriptor, next_key);
+        descriptor, next_key, origin);
     if (!pipeline) {
       promise->set_value(nullptr);
       VALIDATION_LOG << "Could not create pipeline: " << descriptor.GetLabel();
@@ -309,6 +314,17 @@ const std::shared_ptr<PipelineCacheVK>& PipelineLibraryVK::GetPSOCache() const {
 const std::shared_ptr<fml::ConcurrentTaskRunner>&
 PipelineLibraryVK::GetWorkerTaskRunner() const {
   return worker_task_runner_;
+}
+
+const std::shared_ptr<PipelineResourceLedger>&
+PipelineLibraryVK::GetResourceLedger() const {
+  return resource_ledger_;
+}
+
+AvioRenderResourceReport PipelineLibraryVK::GetAvioRenderResourceReport(
+    bool start_new_interval) const {
+  return IsValid() ? resource_ledger_->Report(start_new_interval)
+                   : AvioRenderResourceReport{};
 }
 
 PipelineCompileQueue* PipelineLibraryVK::GetPipelineCompileQueue() const {

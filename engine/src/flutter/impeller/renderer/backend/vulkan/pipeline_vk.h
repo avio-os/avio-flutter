@@ -15,6 +15,8 @@
 #include "impeller/renderer/backend/vulkan/vk.h"
 #include "impeller/renderer/backend/vulkan/yuv_conversion_vk.h"
 #include "impeller/renderer/pipeline.h"
+#include "impeller/renderer/pipeline_resource_ledger.h"
+#include "impeller/renderer/render_resource_scope.h"
 
 namespace impeller {
 
@@ -31,7 +33,9 @@ class PipelineVK final
       const std::shared_ptr<DeviceHolderVK>& device_holder,
       const std::weak_ptr<PipelineLibrary>& weak_library,
       PipelineKey pipeline_key,
-      std::shared_ptr<SamplerVK> immutable_sampler = {});
+      std::shared_ptr<SamplerVK> immutable_sampler = {},
+      AvioPipelineCreationOrigin origin =
+          AvioPipelineCreationOrigin::Capture());
 
   // |Pipeline|
   ~PipelineVK() override;
@@ -56,6 +60,8 @@ class PipelineVK final
                          ComparableHash<ImmutableSamplerKeyVK>,
                          ComparableEqual<ImmutableSamplerKeyVK>>;
 
+  // Declared before native handles so the census decrements after they die.
+  PipelineResourceLedger::Registration resource_registration_;
   std::weak_ptr<DeviceHolderVK> device_holder_;
   vk::UniquePipeline pipeline_;
   vk::UniqueRenderPass render_pass_;
@@ -76,7 +82,8 @@ class PipelineVK final
              vk::UniquePipelineLayout layout,
              vk::UniqueDescriptorSetLayout descriptor_set_layout,
              PipelineKey pipeline_key,
-             std::shared_ptr<SamplerVK> immutable_sampler);
+             std::shared_ptr<SamplerVK> immutable_sampler,
+             AvioPipelineCreationOrigin origin);
 
   // |Pipeline|
   bool IsValid() const override;

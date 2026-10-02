@@ -162,7 +162,10 @@ TEST(AvioCompositorMaterialTest, MalformedDescriptorsFailClosed) {
   EXPECT_FALSE(IsValidAvioCompositorMaterial(material));
   material.id = 1u;
 
+  material.recipe = AvioCompositorMaterialRecipe::kTiered;
   material.tier = 4u;
+  EXPECT_TRUE(IsValidAvioCompositorMaterial(material));
+  material.tier = 5u;
   EXPECT_FALSE(IsValidAvioCompositorMaterial(material));
   material.tier = 2u;
 

@@ -8,15 +8,19 @@
 #include <cstddef>
 
 #include "fml/status.h"
+#include "impeller/core/continuous_coverage.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/resource_binder.h"
+#include "impeller/core/sample4_source_proof.h"
 #include "impeller/core/shader_types.h"
 #include "impeller/core/vertex_buffer.h"
+#include "impeller/renderer/bounded_resource_owners.h"
 #include "impeller/renderer/command.h"
 #include "impeller/renderer/command_buffer.h"
 #include "impeller/renderer/render_target.h"
 
 namespace impeller {
+struct AvioSample4ClipDescriptor;
 
 //------------------------------------------------------------------------------
 /// @brief      Render passes encode render commands directed as one specific
@@ -81,6 +85,45 @@ class RenderPass : public ResourceBinder {
   /// If unset, no scissor is applied.
   ///
   virtual void SetScissor(IRect32 scissor);
+
+  // Conservative logical bounds for subsequent draws. Unknown bounds retain
+  // full-pass coverage; immediate backends do not need this recording hint.
+  virtual void SetDrawCoverage(std::optional<Rect>) {}
+
+  // An immutable logical clip-stack state. A recorded draw retains its exact
+  // owner rather than copying a 10 KiB expression for every source draw.
+  virtual void SetAvioSample4Clip(
+      std::shared_ptr<const AvioSample4ClipDescriptor> descriptor,
+      bool complete = true) {}
+  virtual const AvioSample4ClipDescriptor* GetAvioSample4Clip() const {
+    return nullptr;
+  }
+  // Evidence belongs to the next source draw only. Recorders clear it after
+  // accepting that draw, so a subsequent source cannot inherit its authority.
+  virtual void SetAvioSample4SourceProof(
+      std::optional<AvioSample4SourceProof> proof) {}
+
+  // Logical clip writes are distinguished from a paint's own winding/stroke
+  // depth/stencil work. A scoped marker preserves nested clip helper calls.
+  virtual void SetAvioClipOperation(bool enabled) {
+    avio_clip_operation_ = enabled;
+  }
+  bool IsAvioClipOperation() const { return avio_clip_operation_; }
+
+  virtual void SetAvioContinuousClip(
+      std::shared_ptr<const AvioContinuousClipExpression> expression) {
+    avio_continuous_clip_ = std::move(expression);
+  }
+  // A draw-owned analytic/image distance also requires the destination-aware
+  // source variant when the logical clip expression is empty.
+  virtual void SetAvioContinuousGeometry(bool enabled) {}
+  virtual void SetAvioContinuousGeometryPrimitive(
+      std::optional<AvioContinuousPrimitive> primitive) {}
+
+  // Keep suballocation/atlas custody alive through deferred command encoding.
+  // Texture ownership alone does not prevent reuse of a shared texture region.
+  virtual void RetainResource(std::shared_ptr<void> owner);
+  bool HasValidResourceOwners() const { return retained_resources_.IsValid(); }
 
   //----------------------------------------------------------------------------
   /// The number of elements to draw. When only a vertex buffer is set, this is
@@ -233,6 +276,8 @@ class RenderPass : public ResourceBinder {
   bool HasStencilAttachment() const;
 
  protected:
+  bool avio_clip_operation_ = false;
+  std::shared_ptr<const AvioContinuousClipExpression> avio_continuous_clip_;
   const std::shared_ptr<const Context> context_;
   // The following properties: sample_count, pixel_format,
   // has_stencil_attachment, and render_target_size are cached on the
@@ -262,8 +307,11 @@ class RenderPass : public ResourceBinder {
   ///
   bool AddCommand(Command&& command);
 
+  // A recording pass may have a logical coordinate extent different from
+  // its bounded physical scratch attachments. Texture metadata stays physical.
   RenderPass(std::shared_ptr<const Context> context,
-             const RenderTarget& target);
+             const RenderTarget& target,
+             std::optional<ISize> logical_size = std::nullopt);
 
   static bool ValidateVertexBuffers(const BufferView vertex_buffers[],
                                     size_t vertex_buffer_count);
@@ -290,6 +338,7 @@ class RenderPass : public ResourceBinder {
                    raw_ptr<const Sampler>);
 
   Command pending_;
+  BoundedResourceOwners retained_resources_;
   std::optional<size_t> bound_buffers_start_ = std::nullopt;
   std::optional<size_t> bound_textures_start_ = std::nullopt;
   std::optional<size_t> vertex_buffers_start_ = std::nullopt;

@@ -5,8 +5,15 @@
 #ifndef FLUTTER_IMPELLER_ENTITY_CONTENTS_CLIP_CONTENTS_H_
 #define FLUTTER_IMPELLER_ENTITY_CONTENTS_CLIP_CONTENTS_H_
 
+#include <memory>
+#include <optional>
+#include <vector>
+#include "impeller/core/continuous_coverage.h"
+
 #include "impeller/entity/contents/contents.h"
+#include "impeller/entity/contents/coverage_mask_contents.h"
 #include "impeller/entity/entity.h"
+#include "impeller/entity/geometry/coverage_geometry.h"
 #include "impeller/entity/geometry/geometry.h"
 
 namespace impeller {
@@ -35,6 +42,24 @@ class ClipContents {
   /// @brief Set the pre-tessellated clip geometry.
   void SetGeometry(GeometryResult geometry);
 
+  /// Replace tessellation replay with immutable native four-sample mask tiles.
+  /// The tile rectangles are on this clip's original pass-relative physical
+  /// grid. Every tile is combined into one union before applying the clip's
+  /// intersect/difference operation; an empty batch is an empty shape.
+  /// Strong leases keep the exact mask allocations alive across clip replay.
+  void SetCoverageMasks(std::vector<CoverageMaskTile> masks);
+
+  bool HasCoverageMasks() const { return coverage_masks_.has_value(); }
+
+  // Lines are on the original pass-relative physical grid, including affine
+  // rotation/reflection and fractional phase. Replay retains these exact lines.
+  void SetCoverageQuad(CoverageConvexQuad4 quad);
+
+  bool HasCoverageQuad() const { return coverage_quad_.has_value(); }
+
+  void SetContinuousClip(
+      std::shared_ptr<const AvioContinuousClipExpression> expression);
+
   void SetClipOperation(Entity::ClipOperation clip_op);
 
   //----------------------------------------------------------------------------
@@ -56,6 +81,9 @@ class ClipContents {
  private:
   // Pre-tessellated clip geometry.
   GeometryResult clip_geometry_;
+  std::shared_ptr<const AvioContinuousClipExpression> continuous_clip_;
+  std::optional<std::vector<CoverageMaskTile>> coverage_masks_;
+  std::optional<CoverageConvexQuad4> coverage_quad_;
   // Coverage rect of the tessellated geometry.
   Rect coverage_rect_;
   bool is_axis_aligned_rect_ = false;

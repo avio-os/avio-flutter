@@ -7,6 +7,7 @@
 
 #include <cstdint>
 
+#include "impeller/entity/clip_operation.h"
 #include "impeller/entity/contents/contents.h"
 #include "impeller/geometry/color.h"
 #include "impeller/geometry/matrix.h"
@@ -25,7 +26,7 @@ class RenderPass;
 /// scenes. Entities can be created directly or from `Snapshot` objects.
 class Entity {
  public:
-  static constexpr BlendMode kLastPipelineBlendMode = BlendMode::kModulate;
+  static constexpr BlendMode kLastPipelineBlendMode = kLastCoefficientBlendMode;
   static constexpr BlendMode kLastAdvancedBlendMode = BlendMode::kLuminosity;
 
   static constexpr Scalar kDepthEpsilon = 1.0f / 262144.0;
@@ -64,10 +65,7 @@ class Entity {
     kDecal,
   };
 
-  enum class ClipOperation {
-    kDifference,
-    kIntersect,
-  };
+  using ClipOperation = impeller::ClipOperation;
 
   /// @brief  Create an entity that can be used to render a given snapshot.
   static Entity FromSnapshot(const Snapshot& snapshot,

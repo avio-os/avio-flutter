@@ -26,6 +26,7 @@
 #include "flutter/shell/platform/linux/fl_texture_gl_private.h"
 #include "flutter/shell/platform/linux/fl_texture_registrar_private.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_plugin_registry.h"
+#include "impeller/renderer/backend/gles/native_coverage_gles.h"
 
 // Unique number associated with platform tasks.
 static constexpr size_t kPlatformTaskRunnerIdentifier = 1;
@@ -49,6 +50,9 @@ struct _FlEngine {
 
   // Type of rendering performed.
   FlutterRendererType renderer_type;
+
+  // Set only by cold capability admission, before any backing store is made.
+  gboolean avio_coverage;
 
   // Manages OpenGL contexts.
   FlOpenGLManager* opengl_manager;
@@ -292,14 +296,15 @@ static bool create_opengl_backing_store(
     preferred_format = GL_BGRA_EXT;
   }
 
-  // Flutter rasterizes into this framebuffer, so it has to carry the samples
-  // that antialias the geometry. Impeller declares the wrapped framebuffer as
-  // 4x multisampled (MakeRenderTargetFromBackingStoreImpeller), so request the
-  // same count. The framebuffer settles the format, because resolving the
-  // samples can constrain it; asking it back keeps one answer.
-  FlFramebuffer* framebuffer = fl_framebuffer_new_multisampled(
-      preferred_format, config->size.width, config->size.height, FALSE,
-      /*samples=*/4);
+  // Coverage geometry is replayed in the renderer's fixed native4 tiles.
+  // The host backing store is 1x colour only; legacy keeps its MSAA contract.
+  FlFramebuffer* framebuffer =
+      self->avio_coverage
+          ? fl_framebuffer_new_color_only(GL_RGBA, config->size.width,
+                                          config->size.height, FALSE)
+          : fl_framebuffer_new_multisampled(preferred_format,
+                                            config->size.width,
+                                            config->size.height, FALSE, 4);
   if (!framebuffer) {
     g_warning("Failed to create backing store");
     return false;
@@ -765,6 +770,7 @@ FlDisplayMonitor* fl_engine_get_display_monitor(FlEngine* self) {
 
 gboolean fl_engine_start(FlEngine* self, GError** error) {
   g_return_val_if_fail(FL_IS_ENGINE(self), FALSE);
+  self->avio_coverage = FALSE;
 
   FlutterRendererConfig config = {};
   config.type = self->renderer_type;
@@ -870,6 +876,54 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
   avio_extensions.version = FLUTTER_AVIO_EXTENSION_VERSION;
   avio_extensions.required_features =
       kFlutterAvioExtensionFeatureViewVisibility;
+  FlutterAvioAntialiasingConfig antialiasing = {};
+  antialiasing.struct_size = sizeof(antialiasing);
+  if (enable_impeller && self->renderer_type == kOpenGL) {
+    const auto required = kFlutterAvioExtensionFeatureAntialiasingPolicy |
+                          kFlutterAvioExtensionFeatureRenderResourceReport;
+    FlutterAvioExtensionCapabilities capabilities = {};
+    capabilities.struct_size = sizeof(capabilities);
+    if (!self->embedder_api.GetAvioExtensionCapabilities ||
+        !self->embedder_api.RequestAvioRenderResourceReport ||
+        self->embedder_api.GetAvioExtensionCapabilities(&capabilities) !=
+            kSuccess ||
+        capabilities.minimum_version > FLUTTER_AVIO_EXTENSION_VERSION ||
+        capabilities.maximum_version < FLUTTER_AVIO_EXTENSION_VERSION ||
+        (capabilities.supported_features & required) != required) {
+      g_set_error(
+          error, fl_engine_error_quark(), FL_ENGINE_ERROR_FAILED,
+          "Impeller engine lacks the negotiated Avio AA/report contract");
+      return FALSE;
+    }
+    if (!fl_opengl_manager_make_current(self->opengl_manager)) {
+      g_set_error(error, fl_engine_error_quark(), FL_ENGINE_ERROR_FAILED,
+                  "Could not make the GL context current for AA admission");
+      return FALSE;
+    }
+    self->avio_coverage = impeller::ProbeNativeCoverageGLES(
+        [self](const char* name) {
+          return fl_engine_gl_proc_resolver(self, name);
+        },
+        epoxy_gl_version() >= 30);
+    fl_opengl_manager_clear_current(self->opengl_manager);
+    if (self->avio_coverage) {
+      antialiasing.policy = kFlutterAvioAntialiasingPolicyCoverage;
+      antialiasing.layer_sample_count = 1;
+      antialiasing.coverage_sample_count = 4;
+      antialiasing.continuous_requested_classes = 0;
+      antialiasing.coverage_region_max_bytes = 8u * 1024u * 1024u;
+      antialiasing.layer_region_max_bytes = 4u * 1024u * 1024u;
+      avio_extensions.required_features |= required;
+      args.avio_antialiasing_config = &antialiasing;
+      g_message(
+          "Avio AA: Coverage with native4 GL tiles; physical allocation "
+          "bytes unavailable, descriptor bounds 8 MiB/4 MiB");
+    } else {
+      g_message(
+          "Avio AA: native4 explicit-resolve GL coverage unsupported; "
+          "using declared legacy MSAA4 policy");
+    }
+  }
   args.avio_extension_request = &avio_extensions;
 
   FlutterCompositor compositor = {};

@@ -57,7 +57,8 @@ void DisplayListLayer::Diff(DiffContext* context, const Layer* old_layer) {
   context->AddLayerBounds(display_list()->GetBounds());
   if (context->impeller_enabled() &&
       (display_list()->root_has_backdrop_filter() ||
-       display_list()->max_root_blend_mode() > DlBlendMode::kModulate)) {
+       display_list()->max_root_blend_mode() >
+           impeller::kLastCoefficientBlendMode)) {
     // These operations can make Impeller render the root into a readback
     // target and copy it back. Discover that before damage narrows preroll.
     // DiffContext has no framebuffer-fetch capability, so advanced root blends

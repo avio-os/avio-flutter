@@ -137,6 +137,7 @@ source_set("common") {
     ":display",
     ":platform_message_handler",
     ":snapshot_pixel_format",
+    "//flutter/impeller/renderer:render_resource_contracts",
     "//flutter/shell/version",
     "//flutter/third_party/rapidjson",
     "//flutter/third_party/tonic",

@@ -36,6 +36,8 @@ class MockLayer;
 class ContainerLayer;
 class AvioCompositorMaterialLayer;
 class AvioWindowPreviewLayer;
+class AvioFrameMetadataLayer;
+class TransformLayer;
 class DisplayListLayer;
 class PerformanceOverlayLayer;
 class TextureLayer;
@@ -216,6 +218,16 @@ class Layer {
   void set_subtree_has_avio_compositor_material(bool value) {
     subtree_has_avio_compositor_material_ = value;
   }
+  bool subtree_has_avio_frame_metadata() const {
+    return subtree_has_avio_frame_metadata_;
+  }
+  void set_subtree_has_avio_frame_metadata(bool value) {
+    subtree_has_avio_frame_metadata_ = value;
+  }
+  virtual const AvioFrameMetadataLayer* as_avio_frame_metadata_layer() const {
+    return nullptr;
+  }
+  virtual const TransformLayer* as_transform_layer() const { return nullptr; }
 
   // Returns the paint bounds in the layer's local coordinate system
   // as determined during Preroll().  The bounds should include any
@@ -290,6 +302,7 @@ class Layer {
   bool subtree_has_platform_view_ = false;
   bool subtree_has_avio_compositor_material_ = false;
   bool subtree_has_avio_window_preview_ = false;
+  bool subtree_has_avio_frame_metadata_ = false;
 
   static uint64_t NextUniqueID();
 

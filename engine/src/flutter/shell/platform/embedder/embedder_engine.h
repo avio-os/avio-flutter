@@ -9,6 +9,7 @@
 #include <memory>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "flutter/fml/macros.h"
@@ -17,6 +18,7 @@
 #include "flutter/shell/platform/embedder/embedder.h"
 #include "flutter/shell/platform/embedder/embedder_external_texture_resolver.h"
 #include "flutter/shell/platform/embedder/embedder_thread_host.h"
+#include "impeller/renderer/native_teardown_status.h"  // nogncheck
 
 #ifdef __linux__
 #include "flutter/shell/platform/embedder/dmabuf_texture_mailbox.h"
@@ -25,6 +27,7 @@
 namespace flutter {
 
 struct ShellArgs;
+class AvioRenderResourceReportRequests;
 
 // The object that is returned to the embedder as an opaque pointer to the
 // instance of the Flutter engine.
@@ -47,6 +50,20 @@ class EmbedderEngine {
   bool CollectShell();
 
   void CollectThreadHost();
+
+  // Retain exact startup custody even before Shell launch or after a failed
+  // launch. Taking it transfers the cold proof obligation to Deinitialize.
+  void SetNativeTeardownContext(std::shared_ptr<impeller::Context> context) {
+    native_teardown_context_ = std::move(context);
+  }
+
+  std::shared_ptr<impeller::Context> TakeNativeTeardownContext() {
+    return std::exchange(native_teardown_context_, nullptr);
+  }
+
+  bool RecordNativeTeardownProof(bool safe) {
+    return native_teardown_status_.RecordProof(safe);
+  }
 
   const TaskRunners& GetTaskRunners() const;
 
@@ -122,6 +139,11 @@ class EmbedderEngine {
 
   bool PostRenderThreadTask(const fml::closure& task);
 
+  bool RequestAvioRenderResourceReport(
+      bool start_new_interval,
+      FlutterAvioRenderResourceReportCallback callback,
+      void* user_data);
+
   bool RunTask(const FlutterTask* task);
 
   bool PostTaskOnEngineManagedNativeThreads(
@@ -147,6 +169,8 @@ class EmbedderEngine {
 #endif
 
  private:
+  impeller::NativeTeardownStatus native_teardown_status_;
+  std::shared_ptr<impeller::Context> native_teardown_context_;
   std::unique_ptr<EmbedderThreadHost> thread_host_;
   TaskRunners task_runners_;
   RunConfiguration run_configuration_;
@@ -155,6 +179,7 @@ class EmbedderEngine {
   std::unique_ptr<EmbedderExternalTextureResolver> external_texture_resolver_;
   const FlutterAvioExtensionFeatures avio_extension_features_;
   const std::shared_ptr<FrameOpportunityRegistry> frame_opportunity_registry_;
+  std::shared_ptr<AvioRenderResourceReportRequests> avio_report_requests_;
 #ifdef __linux__
   std::unique_ptr<DmabufTextureMailbox> dmabuf_mailbox_;
 #endif

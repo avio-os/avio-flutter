@@ -63,7 +63,7 @@ class TiledTextureContents final : public ColorSourceContents {
       const SnapshotOptions& options) const override;
 
  private:
-  std::shared_ptr<Texture> CreateFilterTexture(
+  std::optional<Snapshot> CreateFilterSnapshot(
       const ContentContext& renderer) const;
 
   SamplerDescriptor CreateSamplerDescriptor(

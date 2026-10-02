@@ -4,6 +4,8 @@
 
 #include "impeller/renderer/backend/vulkan/compute_pipeline_vk.h"
 
+#include "impeller/renderer/backend/vulkan/pipeline_library_vk.h"
+
 namespace impeller {
 
 ComputePipelineVK::ComputePipelineVK(
@@ -13,7 +15,8 @@ ComputePipelineVK::ComputePipelineVK(
     vk::UniquePipeline pipeline,
     vk::UniquePipelineLayout layout,
     vk::UniqueDescriptorSetLayout descriptor_set_layout,
-    PipelineKey pipeline_key)
+    PipelineKey pipeline_key,
+    AvioPipelineCreationOrigin origin)
     : Pipeline(std::move(library), desc),
       device_holder_(std::move(device_holder)),
       pipeline_(std::move(pipeline)),
@@ -21,6 +24,12 @@ ComputePipelineVK::ComputePipelineVK(
       descriptor_set_layout_(std::move(descriptor_set_layout)),
       pipeline_key_(pipeline_key) {
   is_valid_ = pipeline_ && layout_ && descriptor_set_layout_;
+  if (is_valid_) {
+    if (const auto library = library_.lock()) {
+      resource_registration_ = PipelineResourceLedger::Registration(
+          PipelineLibraryVK::Cast(*library).GetResourceLedger(), origin);
+    }
+  }
 }
 
 ComputePipelineVK::~ComputePipelineVK() {

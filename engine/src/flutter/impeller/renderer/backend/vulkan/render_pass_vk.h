@@ -61,6 +61,9 @@ class RenderPassVK final : public RenderPass {
   void SetPipeline(PipelineRef pipeline) override;
 
   // |RenderPass|
+  void RetainResource(std::shared_ptr<void> owner) override;
+
+  // |RenderPass|
   void SetCommandLabel(std::string_view label) override;
 
   // |RenderPass|

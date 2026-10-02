@@ -10,6 +10,7 @@
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/coverage_tiled_render_pass.h"
 #include "impeller/entity/entity_pass_target.h"
 #include "impeller/renderer/command_buffer.h"
 #include "impeller/renderer/render_pass.h"
@@ -44,6 +45,20 @@ bool InlinePassContext::IsValid() const {
 
 bool InlinePassContext::IsActive() const {
   return pass_ != nullptr;
+}
+
+bool InlinePassContext::SetAvioDirect1xProof(bool proven) {
+  if (failed_ || IsActive() || pass_count_ != 0u) {
+    return false;
+  }
+  if (proven && (!renderer_.UsesAvioCoverage() ||
+                 renderer_.GetContext()
+                         ->GetAvioAntialiasingConfig()
+                         .continuous_requested_classes != 0u)) {
+    return false;
+  }
+  avio_direct_1x_proven_ = proven;
+  return true;
 }
 
 std::shared_ptr<Texture> InlinePassContext::GetTexture() {
@@ -135,6 +150,30 @@ const std::shared_ptr<RenderPass>& InlinePassContext::GetRenderPass() {
 
   color0.store_action =
       is_msaa ? StoreAction::kMultisampleResolve : StoreAction::kStore;
+
+  if (renderer_.UsesAvioCoverage()) {
+    // Parent colour remains single-sample and has no full-size depth/stencil.
+    // The recording pass exposes the fixed island's 4x + depth/stencil state
+    // to legacy content pipelines while preserving parent logical geometry.
+    pass_target_.target_.SetColorAttachment(color0, 0);
+    pass_ =
+        avio_direct_1x_proven_
+            ? CoverageTiledRenderPass::MakeDirect1x(
+                  renderer_, pass_target_.GetRenderTarget(), command_buffer_)
+            : CoverageTiledRenderPass::Make(
+                  renderer_, pass_target_.GetRenderTarget(), command_buffer_);
+    if (!pass_) {
+      VALIDATION_LOG << "Could not create bounded coverage render pass.";
+      failed_ = true;
+      command_buffer_.reset();
+      return pass_;
+    }
+    pass_->SetLabel(avio_direct_1x_proven_
+                        ? "EntityPass Proven Direct1x Render Pass"
+                        : "EntityPass Coverage Render Pass");
+    ++pass_count_;
+    return pass_;
+  }
 
   auto depth = pass_target_.GetRenderTarget().GetDepthAttachment();
   if (!depth.has_value()) {

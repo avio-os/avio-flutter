@@ -9,6 +9,7 @@
 
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
+#include "impeller/renderer/backend/vulkan/formats_vk.h"
 #include "impeller/renderer/backend/vulkan/vk.h"
 #include "impeller/renderer/backend/vulkan/workarounds_vk.h"
 
@@ -517,6 +518,7 @@ CapabilitiesVK::GetEnabledDeviceFeatures(
     // `max_anisotropy` greater than 1 may only be created when this feature
     // is enabled.
     required.samplerAnisotropy = supported.samplerAnisotropy;
+    required.sampleRateShading = supported.sampleRateShading;
   }
   // VK_KHR_sampler_ycbcr_conversion features.
   if (IsExtensionInList(
@@ -755,6 +757,7 @@ bool CapabilitiesVK::SetPhysicalDevice(
     supports_texture_compression_bc_ = features.textureCompressionBC;
     supports_texture_compression_etc2_ = features.textureCompressionETC2;
     supports_texture_compression_astc_ = features.textureCompressionASTC_LDR;
+    native_sample_shading_enabled_ = features.sampleRateShading;
   }
 
   supports_texture_compression_astc_hdr_ =
@@ -871,6 +874,53 @@ PixelFormat CapabilitiesVK::GetDefaultStencilFormat() const {
 // |Capabilities|
 PixelFormat CapabilitiesVK::GetDefaultDepthStencilFormat() const {
   return default_depth_stencil_format_;
+}
+
+bool CapabilitiesVK::SupportsAvioCoverageResources() const {
+  const auto& limits = device_properties_.limits;
+  if (!physical_device_ || !limits.standardSampleLocations ||
+      !(limits.framebufferColorSampleCounts & vk::SampleCountFlagBits::e4) ||
+      !(limits.framebufferStencilSampleCounts & vk::SampleCountFlagBits::e4) ||
+      !(limits.sampledImageColorSampleCounts & vk::SampleCountFlagBits::e4)) {
+    return false;
+  }
+  const auto supports_four_samples = [&](vk::Format format,
+                                         vk::ImageUsageFlags usage) {
+    vk::PhysicalDeviceImageFormatInfo2 info;
+    info.format = format;
+    info.type = vk::ImageType::e2D;
+    info.tiling = vk::ImageTiling::eOptimal;
+    info.usage = usage;
+    const auto [result, properties] =
+        physical_device_.getImageFormatProperties2(info);
+    return result == vk::Result::eSuccess &&
+           !!(properties.imageFormatProperties.sampleCounts &
+              vk::SampleCountFlagBits::e4);
+  };
+  return supports_four_samples(vk::Format::eR8Unorm,
+                               vk::ImageUsageFlagBits::eColorAttachment |
+                                   vk::ImageUsageFlagBits::eSampled) &&
+         supports_four_samples(vk::Format::eS8Uint,
+                               vk::ImageUsageFlagBits::eDepthStencilAttachment);
+}
+
+bool CapabilitiesVK::SupportsAvioContinuousCoverageResources() const {
+  if (!native_sample_shading_enabled_ || !SupportsAvioCoverageResources()) {
+    return false;
+  }
+  vk::PhysicalDeviceImageFormatInfo2 info;
+  info.format = ToVKImageFormat(default_color_format_);
+  info.type = vk::ImageType::e2D;
+  info.tiling = vk::ImageTiling::eOptimal;
+  info.usage = vk::ImageUsageFlagBits::eColorAttachment |
+               vk::ImageUsageFlagBits::eSampled |
+               vk::ImageUsageFlagBits::eTransferSrc |
+               vk::ImageUsageFlagBits::eTransferDst;
+  const auto [result, properties] =
+      physical_device_.getImageFormatProperties2(info);
+  return result == vk::Result::eSuccess &&
+         !!(properties.imageFormatProperties.sampleCounts &
+            vk::SampleCountFlagBits::e4);
 }
 
 const vk::PhysicalDeviceProperties&

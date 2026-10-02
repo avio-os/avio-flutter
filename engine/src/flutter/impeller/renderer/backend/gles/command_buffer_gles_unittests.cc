@@ -118,6 +118,47 @@ TEST(CommandBufferGLES, DeferredSubmitCallbackErrorsIfReactorIsDestroyed) {
   EXPECT_EQ(callback_status, CommandBuffer::Status::kError);
 }
 
+TEST(CommandBufferGLES, DeferredSubmissionRetainsOwnersUntilReaction) {
+  auto mock_gles = MockGLES::Init();
+  auto context = CreateFakeGLESContext();
+  auto context_base = std::static_pointer_cast<Context>(context);
+  auto worker = std::make_shared<ToggleWorker>(false);
+  context->AddReactorWorker(worker);
+  auto command = context_base->CreateCommandBuffer();
+  auto owner = std::make_shared<int>(17);
+  std::weak_ptr<int> witness = owner;
+  ASSERT_TRUE(command->TryRetainResource(owner));
+  ASSERT_TRUE(context_base->GetCommandQueue()->Submit({command}).ok());
+  owner.reset();
+  command.reset();
+  EXPECT_FALSE(witness.expired());
+  worker->SetAllowed(true);
+  ASSERT_TRUE(context->GetReactor()->React());
+  EXPECT_TRUE(witness.expired());
+}
+
+TEST(CommandBufferGLES, DiscardedSubmissionHasNoReactorOwnerCycle) {
+  auto mock_gles = MockGLES::Init();
+  auto owner = std::make_shared<int>(23);
+  std::weak_ptr<int> witness = owner;
+  std::weak_ptr<ReactorGLES> reactor;
+  {
+    auto context = CreateFakeGLESContext();
+    auto context_base = std::static_pointer_cast<Context>(context);
+    auto worker = std::make_shared<ToggleWorker>(false);
+    context->AddReactorWorker(worker);
+    reactor = context->GetReactor();
+    auto command = context_base->CreateCommandBuffer();
+    ASSERT_TRUE(command->TryRetainResource(owner));
+    ASSERT_TRUE(context_base->GetCommandQueue()->Submit({command}).ok());
+    owner.reset();
+    command.reset();
+    EXPECT_FALSE(witness.expired());
+  }
+  EXPECT_TRUE(reactor.expired());
+  EXPECT_TRUE(witness.expired());
+}
+
 TEST(CommandBufferGLES, DeferredSubmitCompletesAfterPreviouslyQueuedWork) {
   auto mock_gles = MockGLES::Init();
   auto context = CreateFakeGLESContext();

@@ -23,10 +23,11 @@ std::shared_ptr<ContextGLES> ContextGLES::Create(
     std::unique_ptr<ProcTableGLES> gl,
     const std::vector<std::shared_ptr<fml::Mapping>>& shader_libraries,
     bool enable_gpu_tracing,
-    std::shared_ptr<fml::BasicTaskRunner> io_task_runner) {
-  return std::shared_ptr<ContextGLES>(
-      new ContextGLES(flags, std::move(gl), shader_libraries,
-                      enable_gpu_tracing, std::move(io_task_runner)));
+    std::shared_ptr<fml::BasicTaskRunner> io_task_runner,
+    std::optional<AvioAntialiasingConfig> antialiasing_config) {
+  return std::shared_ptr<ContextGLES>(new ContextGLES(
+      flags, std::move(gl), shader_libraries, enable_gpu_tracing,
+      std::move(io_task_runner), antialiasing_config));
 }
 
 ContextGLES::ContextGLES(
@@ -34,11 +35,28 @@ ContextGLES::ContextGLES(
     std::unique_ptr<ProcTableGLES> gl,
     const std::vector<std::shared_ptr<fml::Mapping>>& shader_libraries_mappings,
     bool enable_gpu_tracing,
-    std::shared_ptr<fml::BasicTaskRunner> io_task_runner)
-    : Context(flags) {
+    std::shared_ptr<fml::BasicTaskRunner> io_task_runner,
+    std::optional<AvioAntialiasingConfig> antialiasing_config)
+    : Context(flags),
+      antialiasing_config_(
+          antialiasing_config.value_or(AvioAntialiasingConfig{})) {
+  if ((antialiasing_config_.continuous_requested_classes &
+       ~AvioContinuousSupportedClasses(AvioCoverageBackend::kGLES)) != 0) {
+    VALIDATION_LOG << "Requested continuous coverage is unsupported on GLES.";
+    return;
+  }
   reactor_ = std::make_shared<ReactorGLES>(std::move(gl));
   if (!reactor_->IsValid()) {
     VALIDATION_LOG << "Could not create valid reactor.";
+    return;
+  }
+
+  if (antialiasing_config_.UsesCoverage() &&
+      !reactor_->GetProcTable()
+           .GetCapabilities()
+           ->SupportsAvioCoverageResources()) {
+    VALIDATION_LOG
+        << "GLES native four-sample coverage resources are unsupported.";
     return;
   }
 
@@ -87,6 +105,24 @@ ContextGLES::~ContextGLES() = default;
 
 Context::BackendType ContextGLES::GetBackendType() const {
   return Context::BackendType::kOpenGLES;
+}
+
+const AvioAntialiasingConfig& ContextGLES::GetAvioAntialiasingConfig() const {
+  return antialiasing_config_;
+}
+
+AvioRenderResourceReport ContextGLES::GetAvioRenderResourceReport(
+    bool start_new_interval) const {
+  // GL has no portable physical texture/program allocation query.
+  // ContentContext supplies the descriptor-only warm-region inventory with
+  // field availability.
+  AvioRenderResourceReport report;
+  report.available = IsValid();
+  if (report.available) {
+    report.Merge(GetAvioCoverageRegionResourceReport(start_new_interval));
+    report.Merge(GetAvioCoverageUsageReport(start_new_interval));
+  }
+  return report;
 }
 
 const std::shared_ptr<ReactorGLES>& ContextGLES::GetReactor() const {

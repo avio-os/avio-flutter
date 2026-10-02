@@ -65,33 +65,8 @@ bool UberSDFGeometry::IsAxisAlignedRect() const {
 }
 
 Rect UberSDFGeometry::GetExpandedBounds(const Matrix& transform) const {
-  // Get the scaling factor of the transform in the X and Y directions.
-  Vector2 transform_scaling = transform.GetBasisScaleXY();
-
-  // Get the device pixel size in local space units. This is the inverse of the
-  // transform scaling. E.g. if the transform performs a scale of 4 in the X
-  // direction and 0.5 in the Y direction, then 1 device pixel is size
-  // {0.25, 2.0} in local space units.
-  Size device_pixel_size = {
-      transform_scaling.x != 0 ? 1.0f / transform_scaling.x : 0,
-      transform_scaling.y != 0 ? 1.0f / transform_scaling.y : 0};
-
-  // The stroke padding is half the stroke width, if the shape is stroked.
-  Size stroke_padding;
-  if (params_.stroke) {
-    // For the purposes of stroke padding, clamp stroke width to a minimum of 1
-    // device pixel. Note that this means the stroke width padding in the X
-    // direction may differ from the stroke width padding in the Y direction.
-    Size effective_stroke_width =
-        Size(params_.stroke->width).Max(device_pixel_size);
-    stroke_padding = effective_stroke_width * 0.5f;
-  }
-
-  // Padding for antialiasing.
-  Size aa_padding = UberSDFParameters::kAntialiasPixels * device_pixel_size;
-
   return Rect::MakeEllipseBounds(params_.center, params_.size)
-      .Expand(stroke_padding + aa_padding);
+      .Expand(params_.GetRasterPadding(transform));
 }
 
 }  // namespace impeller

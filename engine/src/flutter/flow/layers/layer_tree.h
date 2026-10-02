@@ -12,6 +12,7 @@
 
 #include "flutter/common/graphics/texture.h"
 #include "flutter/flow/avio_compositor_material.h"
+#include "flutter/flow/avio_frame_facts.h"
 #include "flutter/flow/avio_window_preview.h"
 #include "flutter/flow/compositor_context.h"
 #include "flutter/flow/layers/layer.h"
@@ -55,6 +56,7 @@ class LayerTree {
       GrDirectContext* gr_context = nullptr);
 
   Layer* root_layer() const { return root_layer_.get(); }
+  const AvioFrameFacts& avio_frame_facts() const { return avio_frame_facts_; }
   const DlISize& frame_size() const { return frame_size_; }
 
   const PaintRegionMap& paint_region_map() const { return paint_region_map_; }
@@ -72,12 +74,16 @@ class LayerTree {
   bool avio_window_previews_invalid() const {
     return avio_window_previews_invalid_;
   }
+  const std::vector<AvioWindowPreview>& avio_window_previews() const {
+    return avio_window_previews_;
+  }
   bool avio_compositor_materials_invalid() const {
     return avio_compositor_materials_invalid_;
   }
 
  private:
   std::shared_ptr<Layer> root_layer_;
+  AvioFrameFacts avio_frame_facts_;
   DlISize frame_size_;  // Physical pixels.
 
   PaintRegionMap paint_region_map_;

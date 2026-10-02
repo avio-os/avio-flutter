@@ -7,6 +7,7 @@
 
 #include "dart_api.h"
 #include "flutter/flow/layers/avio_compositor_material_layer.h"
+#include "flutter/flow/layers/avio_frame_metadata_layer.h"
 #include "flutter/flow/layers/avio_window_preview_layer.h"
 #include "flutter/flow/layers/backdrop_filter_layer.h"
 #include "flutter/flow/layers/clip_path_layer.h"
@@ -41,6 +42,83 @@ SceneBuilder::SceneBuilder() {
 }
 
 SceneBuilder::~SceneBuilder() = default;
+
+void SceneBuilder::pushAvioItemEffect(
+    Dart_Handle layer_handle,
+    double opacity,
+    uint64_t declaration_id,
+    double dx,
+    double dy,
+    const fml::RefPtr<EngineLayer>& old_layer) {
+  AvioFrameFacts facts;
+  facts.item_opacity = opacity;
+  facts.item_effect_declaration_id = declaration_id;
+  auto layer = std::make_shared<AvioFrameMetadataLayer>(
+      facts, DlPoint(SafeNarrow(dx), SafeNarrow(dy)));
+  PushLayer(layer);
+  EngineLayer::MakeRetained(layer_handle, layer);
+  if (old_layer && old_layer->Layer()) {
+    layer->AssignOldLayer(old_layer->Layer().get());
+  }
+}
+
+void SceneBuilder::pushAvioReadyContent(
+    Dart_Handle layer_handle,
+    uint64_t content_revision,
+    uint32_t content_kind,
+    double dx,
+    double dy,
+    const fml::RefPtr<EngineLayer>& old_layer) {
+  AvioFrameFacts facts;
+  facts.ready_content_revision = content_revision;
+  facts.ready_content_kind = static_cast<AvioReadyContentKind>(content_kind);
+  auto layer = std::make_shared<AvioFrameMetadataLayer>(
+      facts, DlPoint(SafeNarrow(dx), SafeNarrow(dy)));
+  PushLayer(layer);
+  EngineLayer::MakeRetained(layer_handle, layer);
+  if (old_layer && old_layer->Layer()) {
+    layer->AssignOldLayer(old_layer->Layer().get());
+  }
+}
+
+void SceneBuilder::pushAvioOutputGround(
+    Dart_Handle layer_handle,
+    bool has_color,
+    uint32_t color_argb,
+    Dart_Handle region_rects_handle,
+    Dart_Handle region_colors_handle,
+    double dx,
+    double dy,
+    const fml::RefPtr<EngineLayer>& old_layer) {
+  AvioFrameFacts facts;
+  tonic::Float64List region_rects(region_rects_handle);
+  tonic::Uint32List region_colors(region_colors_handle);
+  facts.ground_authored = true;
+  if (region_colors.num_elements() > AvioFrameFacts::kMaxGroundRegions ||
+      region_rects.num_elements() != region_colors.num_elements() * 4) {
+    facts.invalid = true;
+  } else {
+    facts.ground_regions_count = region_colors.num_elements();
+    for (size_t i = 0; i < facts.ground_regions_count; ++i) {
+      facts.ground_regions[i] = {region_rects[i * 4], region_rects[i * 4 + 1],
+                                 region_rects[i * 4 + 2],
+                                 region_rects[i * 4 + 3], region_colors[i]};
+    }
+  }
+  // Release both typed-data borrows before creating/associating Dart objects.
+  region_rects.Release();
+  region_colors.Release();
+  if (has_color) {
+    facts.ground_color_argb = color_argb;
+  }
+  auto layer = std::make_shared<AvioFrameMetadataLayer>(
+      facts, DlPoint(SafeNarrow(dx), SafeNarrow(dy)));
+  PushLayer(layer);
+  EngineLayer::MakeRetained(layer_handle, layer);
+  if (old_layer && old_layer->Layer()) {
+    layer->AssignOldLayer(old_layer->Layer().get());
+  }
+}
 
 void SceneBuilder::pushTransform(Dart_Handle layer_handle,
                                  tonic::Float64List& matrix4,
@@ -392,7 +470,8 @@ void SceneBuilder::AddLayer(std::shared_ptr<Layer> layer) {
   if (!layer_stack_.empty()) {
     const bool has_material = layer->subtree_has_avio_compositor_material();
     const bool has_preview = layer->subtree_has_avio_window_preview();
-    if (has_material || has_preview) {
+    const bool has_frame_metadata = layer->subtree_has_avio_frame_metadata();
+    if (has_material || has_preview || has_frame_metadata) {
       // Active ancestors were inserted before their children. Both fresh and
       // retained sidecars must reach the root before preroll chooses their
       // collectors and full-scene cull. ContainerLayer::Add alone only marks
@@ -403,6 +482,9 @@ void SceneBuilder::AddLayer(std::shared_ptr<Layer> layer) {
         }
         if (has_preview) {
           ancestor->set_subtree_has_avio_window_preview(true);
+        }
+        if (has_frame_metadata) {
+          ancestor->set_subtree_has_avio_frame_metadata(true);
         }
       }
     }

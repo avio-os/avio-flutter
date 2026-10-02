@@ -24,7 +24,9 @@ class CapabilitiesGLES final
     : public Capabilities,
       public BackendCast<CapabilitiesGLES, Capabilities> {
  public:
-  explicit CapabilitiesGLES(const ProcTableGLES& gl);
+  explicit CapabilitiesGLES(const ProcTableGLES& gl,
+                            bool avio_coverage = false,
+                            bool native_coverage_supported = false);
 
   CapabilitiesGLES(const CapabilitiesGLES&) = delete;
 
@@ -102,6 +104,8 @@ class CapabilitiesGLES final
   // |Capabilities|
   bool SupportsOffscreenMSAA() const override;
 
+  bool SupportsAvioCoverageResources() const;
+
   // |Capabilities|
   bool SupportsImplicitResolvingMSAA() const override;
 
@@ -177,6 +181,7 @@ class CapabilitiesGLES final
   bool supports_framebuffer_fetch_ = false;
   bool supports_decal_sampler_address_mode_ = false;
   bool supports_offscreen_msaa_ = false;
+  bool supports_avio_coverage_resources_ = false;
   bool supports_implicit_msaa_ = false;
   bool supports_32bit_primitive_indices_ = false;
   bool supports_texture_max_level_ = false;

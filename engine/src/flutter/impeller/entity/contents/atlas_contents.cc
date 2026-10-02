@@ -203,7 +203,7 @@ bool AtlasContents::Render(const ContentContext& renderer,
 
   BlendMode blend_mode = geometry_->GetBlendMode();
 
-  if (blend_mode <= BlendMode::kModulate) {
+  if (blend_mode <= kLastCoefficientBlendMode) {
     using VS = PorterDuffBlendPipeline::VertexShader;
     using FS = PorterDuffBlendPipeline::FragmentShader;
 

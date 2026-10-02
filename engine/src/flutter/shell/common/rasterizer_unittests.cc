@@ -10,8 +10,11 @@
 #include <memory>
 #include <optional>
 
+#include "flutter/display_list/dl_builder.h"
 #include "flutter/flow/frame_timings.h"
 #include "flutter/flow/layers/avio_compositor_material_layer.h"
+#include "flutter/flow/layers/avio_frame_metadata_layer.h"
+#include "flutter/flow/layers/display_list_layer.h"
 #include "flutter/fml/synchronization/count_down_latch.h"
 #include "flutter/fml/time/time_point.h"
 #include "flutter/shell/common/thread_host.h"
@@ -97,6 +100,16 @@ class MockSurface : public Surface {
 
 class MockExternalViewEmbedder : public ExternalViewEmbedder {
  public:
+  MOCK_METHOD(bool, SupportsAvioEmptyFrames, (), (const, override));
+  MOCK_METHOD(bool,
+              SupportsAvioFrameFacts,
+              (const AvioFrameFacts&),
+              (const, override));
+  MOCK_METHOD(bool,
+              SubmitAvioEmptyFrame,
+              (int64_t, const SurfaceFrame::SubmitInfo&),
+              (override));
+  MOCK_METHOD(void, RejectAvioFrameFacts, (int64_t), (override));
   MOCK_METHOD(DlCanvas*, GetRootCanvas, (), (override));
   MOCK_METHOD(void, CancelFrame, (), (override));
   MOCK_METHOD(
@@ -291,6 +304,83 @@ TEST(RasterizerTest,
     latch.Signal();
   });
   latch.Wait();
+}
+
+TEST(RasterizerTest,
+     EmptyRootSkipsSurfaceAndTargetThenContentAcquiresNormally) {
+  ThreadHost threads("avio.empty",
+                     ThreadHost::Type::kPlatform | ThreadHost::Type::kRaster |
+                         ThreadHost::Type::kIo | ThreadHost::Type::kUi);
+  TaskRunners runners("test", threads.platform_thread->GetTaskRunner(),
+                      threads.raster_thread->GetTaskRunner(),
+                      threads.ui_thread->GetTaskRunner(),
+                      threads.io_thread->GetTaskRunner());
+  NiceMock<MockDelegate> delegate;
+  Settings settings;
+  ON_CALL(delegate, GetSettings()).WillByDefault(ReturnRef(settings));
+  EXPECT_CALL(delegate, GetTaskRunners()).WillRepeatedly(ReturnRef(runners));
+  ON_CALL(delegate, ShouldDiscardLayerTree).WillByDefault(Return(false));
+  auto rasterizer = std::make_unique<Rasterizer>(delegate);
+  auto surface = std::make_unique<NiceMock<MockSurface>>();
+  auto embedder = std::make_shared<NiceMock<MockExternalViewEmbedder>>();
+  rasterizer->SetExternalViewEmbedder(embedder);
+  ON_CALL(*embedder, SupportsAvioEmptyFrames()).WillByDefault(Return(true));
+  ON_CALL(*embedder, SupportsAvioFrameFacts(_)).WillByDefault(Return(true));
+  const DlISize size(64, 64);
+  SurfaceFrame::FramebufferInfo framebuffer;
+  framebuffer.supports_readback = true;
+  auto frame = std::make_unique<SurfaceFrame>(
+      nullptr, framebuffer, [](SurfaceFrame&, DlCanvas*) { return true; },
+      [](SurfaceFrame&) { return true; }, size, nullptr,
+      /*display_list_fallback=*/true);
+  EXPECT_CALL(*surface, AcquireFrame(size))
+      .Times(1)
+      .WillOnce(Return(ByMove(std::move(frame))));
+  EXPECT_CALL(*surface, MakeRenderContextCurrent()).Times(2).WillRepeatedly([] {
+    return std::make_unique<GLContextDefaultResult>(true);
+  });
+  ON_CALL(*surface, AllowsDrawingWhenGpuDisabled()).WillByDefault(Return(true));
+  EXPECT_CALL(*embedder, AcquireRootRenderTarget(kImplicitViewId, nullptr, _))
+      .Times(1)
+      .WillOnce(Return(framebuffer));
+  EXPECT_CALL(*embedder, SubmitAvioEmptyFrame(kImplicitViewId, _))
+      .Times(1)
+      .WillOnce([](int64_t, const SurfaceFrame::SubmitInfo& info) {
+        EXPECT_TRUE(info.avio_frame_facts.ground_authored);
+        EXPECT_EQ(info.avio_frame_facts.ground_regions_count, 1u);
+        return true;
+      });
+  EXPECT_CALL(*embedder, SubmitFlutterView(kImplicitViewId, nullptr, _, _))
+      .Times(1);
+  rasterizer->Setup(std::move(surface));
+  fml::AutoResetWaitableEvent done;
+  threads.raster_thread->GetTaskRunner()->PostTask([&] {
+    for (bool content : {false, true}) {
+      DisplayListBuilder builder;
+      if (content)
+        builder.DrawRect(DlRect::MakeXYWH(0, 0, 10, 10), DlPaint());
+      AvioFrameFacts facts;
+      facts.ground_authored = true;
+      facts.ground_regions_count = 1;
+      facts.ground_regions[0] = {0, 0, 32, 32, 0xFF123456};
+      auto root = std::make_shared<AvioFrameMetadataLayer>(facts, DlPoint());
+      root->Add(std::make_shared<DisplayListLayer>(DlPoint(), builder.Build(),
+                                                   false, false));
+      auto pipeline = std::make_shared<FramePipeline>(10);
+      auto item = std::make_unique<FrameItem>(
+          SingleLayerTreeList(kImplicitViewId,
+                              std::make_unique<LayerTree>(root, size),
+                              kDevicePixelRatio),
+          CreateFinishedBuildRecorder());
+      EXPECT_TRUE(pipeline->Produce().Complete(std::move(item)).success);
+      EXPECT_EQ(rasterizer->Draw(pipeline), DrawStatus::kDone);
+      EXPECT_EQ(rasterizer->GetLastDrawStatus(kImplicitViewId),
+                DrawSurfaceStatus::kSuccess);
+      EXPECT_NE(rasterizer->GetLastLayerTree(kImplicitViewId), nullptr);
+    }
+    done.Signal();
+  });
+  done.Wait();
 }
 
 TEST(RasterizerTest,

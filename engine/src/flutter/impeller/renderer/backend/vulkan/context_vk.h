@@ -81,6 +81,7 @@ class ContextVK final : public Context,
     VkQueue queue;
     std::vector<std::string> instance_extensions;
     std::vector<std::string> device_extensions;
+    bool native_sample_shading_enabled = false;
   };
 
   struct Settings {
@@ -91,6 +92,7 @@ class ContextVK final : public Context,
         PipelineCacheAccessVK::kReadWrite;
     size_t pipeline_cache_max_data_bytes = kDefaultPipelineCacheMaxDataBytes;
     std::optional<TransientsPoolLimitsVK> swapchain_transients_limits;
+    std::optional<AvioAntialiasingConfig> avio_antialiasing_config;
     bool enable_validation = false;
     bool enable_gpu_tracing = false;
     bool enable_surface_control = false;
@@ -110,7 +112,9 @@ class ContextVK final : public Context,
   /// Visible for testing.
   static size_t ChooseThreadCountForWorkers(size_t hardware_concurrency);
 
-  static std::shared_ptr<ContextVK> Create(Settings settings);
+  static std::shared_ptr<ContextVK> Create(
+      Settings settings,
+      bool* native_teardown_safe = nullptr);
 
   uint64_t GetHash() const { return hash_; }
 
@@ -125,6 +129,10 @@ class ContextVK final : public Context,
 
   // |Context|
   bool IsValid() const override;
+
+  const AvioAntialiasingConfig& GetAvioAntialiasingConfig() const override;
+  AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool start_new_interval) const override;
 
   // |Context|
   std::shared_ptr<Allocator> GetResourceAllocator() const override;
@@ -157,6 +165,10 @@ class ContextVK final : public Context,
 
   // |Context|
   void Shutdown() override;
+
+  bool IsSafeToDestroyNativeResources() const override {
+    return native_teardown_safe_;
+  }
 
   const WorkaroundsVK& GetWorkarounds() const;
 
@@ -280,6 +292,9 @@ class ContextVK final : public Context,
   }
 
  private:
+  bool ShutdownNativeCompletion();
+  bool native_teardown_safe_ = false;
+
   struct DeviceHolderImpl : public DeviceHolderVK {
     // |DeviceHolder|
     const vk::Device& GetDevice() const override { return device.get(); }
@@ -340,6 +355,7 @@ class ContextVK final : public Context,
 
   const uint64_t hash_;
 
+  AvioAntialiasingConfig avio_antialiasing_config_;
   bool is_valid_ = false;
 
   explicit ContextVK(const Flags& flags);

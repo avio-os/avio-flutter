@@ -44,6 +44,11 @@ void ComputePassVK::SetCommandLabel(std::string_view label) {
 // |ComputePass|
 void ComputePassVK::SetPipeline(
     const std::shared_ptr<Pipeline<ComputePipelineDescriptor>>& pipeline) {
+  pipeline_valid_ = false;
+  if (!pipeline || !pipeline->IsValid() ||
+      !command_buffer_->TrackPipeline(pipeline)) {
+    return;
+  }
   const auto& pipeline_vk = ComputePipelineVK::Cast(*pipeline);
   const vk::CommandBuffer& command_buffer_vk =
       command_buffer_->GetCommandBuffer();

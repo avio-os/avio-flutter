@@ -83,11 +83,20 @@ already ancestors of the selected main target under their original commits.
 | 46b | A transient set lives while an existing view holds its extent | permanent resource-lifecycle owner (ships only with Avio G2, which keeps a ShellItem's view across extent changes) | none — upstream frees with the swapchain |
 | 46u | Report-only render-resource accounting | permanent diagnostics (internal C++ API, no ABI change) | none |
 | 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
+| 53 | Backport single-sample backdrop restore safety and shared-backdrop content depth | temporary backport — drop when rebasing past flutter#193306 and #193176 | merged upstream: flutter/flutter#193306, #193176 |
+| 54 | Screen is a coefficient blend | upstreamable memory/performance correction | submit upstream |
+| 55b | Explicit coverage AA policy, bounded coverage/layer regions, and typed resource reports | permanent opt-in ABI/rendering contract (ABI9, introduced in v8); integrated source capability enabled, native release checks pending | none |
+| 56 | Exact bufferless empty content, root revision opacity and bounded output ground | permanent opt-in ABI9/scene/framework contract | none |
+| 57 | Ready Static/Live content identity with explicit Static-only sealing | permanent opt-in ABI9/scene/framework contract | none |
+| 58 | GTK/GLES bounded native-four-sample Coverage with honest descriptor-only accounting | permanent negotiated backend contract; source checks, native/GPU release checks pending | none |
+| 59 | Headless Linux Vulkan goldens and strict native4/Coverage/aliased1 edge comparisons | test-only TL3 renderer and fixtures; source/CPU checks, full native/GPU execution pending | none |
+| 60 | Opt-in continuous classes with joint shape/clip coverage and native4 destination prefixes | permanent explicit Vulkan class contract; default mask zero, native/GPU approval gates pending | none |
+| 61 | Exact clip segments, full native recipes, bounded typed recording and native submission custody | permanent bounded rendering/lifetime contract; source and CPU checks, native/GPU release checks pending | none |
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
 | 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
-| 55 | Prewarm the pipelines Avio's SDF and single-sample patches use | permanent startup-latency extension (tied to patches 48, 50 and 52) | none — upstream compiles every variant on first use |
+| 55a | Prewarm the pipelines Avio's SDF and single-sample patches use | permanent startup-latency extension (tied to patches 48, 50 and 52) | none — upstream compiles every variant on first use |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -886,7 +895,7 @@ renders with SDFs (`Playground::EnsureContextUsesSDFs`, patch 52)
 `UnsupportedColorSourceStillBlends`, `SdfGradientEdgesMatchMaskedComposite`,
 `SdfGradientLeavesUncoveredQuadPixelsTransparent`.
 
-### Patch 55: prewarm the variants Avio's SDF and single-sample paths draw with
+### Patch 55a: asynchronous prewarm of the variants Avio's SDF and single-sample paths draw with
 
 `ContentContext` compiles each pipeline's default asynchronously at
 construction, but almost no draw uses a default: `OptionsFromPass` selects
@@ -902,14 +911,14 @@ snapshots to single-sample targets without depth/stencil, so after Build 2
 those variants compiled on the raster thread at their first use, for the
 masked path during an interaction (a snap preview, a dock reveal).
 
-On a context that renders with SDFs (Avio's Shell and greeter), the
-constructor now queues the variants these paths draw with, behind the
+On a legacy-policy context that renders with SDFs, the
+constructor queues the variants these paths draw with, behind the
 defaults, on the same asynchronous path the defaults take.
 `Variants::Prewarm` derives each descriptor from the default descriptor with
 the options applied, exactly what `CreateIfNeeded` would derive, and labels it
 `"<label> V#<n> Prewarmed"`. The first use finds the handle and waits for, or
-takes over, its job; nothing in the constructor waits, so the first frame is
-never delayed. `MakeAvioPrewarmVariants(MakeAvioPrewarmTargets(capabilities))`
+takes over, its job. This legacy loop does not join in the constructor;
+first-use latency still depends on actual compilation and worker progress. `MakeAvioPrewarmVariants(MakeAvioPrewarmTargets(capabilities))`
 is the set (27 variants on Avio's Vulkan engines):
 
 - Passes Canvas draws into, multisampled with depth/stencil when the context
@@ -930,8 +939,11 @@ is the set (27 variants on Avio's Vulkan engines):
 Patch 48 adds no variant of its own: `Flip` swaps only the resolve texture,
 so the pass keeps its multisampled attachment, sample count and format
 (`RenderTarget::GetRenderTargetPixelFormat` reads the resolve texture, which
-patch 48 allocates in the same format). Contexts without SDFs (the GTK
-engine, stock Flutter) keep the stock startup. Not prewarmed: runtime effect
+patch 48 allocates in the same format). Legacy contexts without SDFs keep the
+stock startup. Coverage, including negotiated GTK/GLES, uses the separate
+caller catalogue and controlled queue-all/validate barrier described in patch
+61; it does not enqueue these legacy pass keys. Not prewarmed by the legacy
+27-key catalogue: runtime effect
 pipelines (keyed by shader, created through
 `GetCachedRuntimeEffectPipeline`), conical and sweep gradients (no Avio Dart
 source uses them), uniform and ramp-texture gradients (Avio's SDF users have
@@ -1118,3 +1130,568 @@ DisplayList dispatcher. Cleanup still drains earlier queued work, and a failed
 inline pass is consumed exactly once so destruction cannot retry its commands.
 Those failures retain the conservative raster-failed classification; only
 factory failure before any GPU work carries pre-submit proof.
+
+### Patch 54: Screen is a coefficient blend
+
+Premultiplied Screen is `src + dst * (1 - src)`, so it needs no sampled
+destination, framebuffer-fetch extension, or backdrop Flip. Screen now ends
+`kLastCoefficientBlendMode` in `impeller/geometry/color.h`, with
+`Entity::kLastPipelineBlendMode` as its alias. The fixed-function RGB factors are ONE and
+ONE_MINUS_SRC_COLOR, and alpha factors are ONE and ONE_MINUS_SRC_ALPHA.
+Canvas, Flow root readback classification, DisplayList readback classification,
+AtlasContents, filters and vertex blends all follow that boundary. Overlay and later modes retain the advanced path.
+
+The existing Screen shader coefficient row was unreachable through normal
+coefficient routing and omitted the source term. It is corrected to
+`{1, 0, 1, 0, -1}`. Shader specialization is now built from the single
+`kPorterDuffCoefficients` table rather than its separate duplicate; Screen
+also inverts to itself for texture/vertex blends. No embedder ABI or SDK
+interface changes. Root and layer sample counts and all depth/stencil
+attachments retain their existing policy.
+
+Regressions: `ContentContextOptionsTest.ScreenBlendIsAPipelineBlend` checks
+RGB/alpha descriptors at both 1x and 4x; `BlendCoefficientsTest` compares the
+production coefficient shader equation against `Color::Blend` for transparent,
+opaque and translucent pairs and checks vertex inversion;
+`AiksTest.ScreenPipelineMatchesCpuOracleWithoutOffscreen` checks painted
+rectangles, and `ScreenImageFiltersAndVerticesMatchCpuOracleWithoutOffscreen`
+checks DrawImage/DrawImageRect with Screen color filters and textured colored
+DrawVertices against the CPU oracle within 1/255. The cache recorder covers
+both single-sample and MSAA requests; Screen must allocate no offscreen at all.
+`ScreenVulkanComparisonTest.ScreenPreviousFetchAndPipelineClippedEdgesGolden`
+compares actual 4x clipped gradient edges with the previous framebuffer-fetch
+path, records edge/interior deltas, and emits paired light/dark images at
+scales 1, 1.25 and 2. It deliberately detects a changed result, and does not
+approve that result. Existing `BlendModeScreen` and `BlendModeSrcAlphaScreen`
+playground/golden cases remain relevant. Full
+engine builds and init/first-use pipeline measurements remain packaging gates.
+The user waived the visual-comparison campaign for this memory iteration;
+comparison fixtures remain available but their presence is not executed GPU
+evidence. The standalone CPU oracle
+checks the coefficient math only; it is not an Impeller build or GPU result.
+
+#### Starting coverage-antialiasing audit (before patch 55b)
+
+Patch 54 alone did not authorize lowering any sample count. At that point the
+code still had coupled layer/coverage sample policy and depth/stencil consumers:
+
+- `ContentContext::MakeSubpass` selected 4x using `SupportsOffscreenMSAA` and a
+  boolean. `Contents::SnapshotOptions` defaulted that boolean to true;
+  `ExternalCoverageContents` (patch 45's geometric foreground mask) used that
+  default. Lowering the capability alone would have removed its multisample
+  edge mask. Patch 55b adds explicit layer and coverage requests instead.
+- `ClipContents::Render` wrote depth for difference clips and used stencil
+  preparation plus depth-writing cover draws for other clips. The Canvas
+  assigned clip depth to normal draws and replayed it after backdrop reads;
+  `InlinePassContext::GetRenderPass` required both depth and stencil. Patch 55b
+  retains that legacy route and adds sample4 mask replay and bounded native4
+  islands over a color-only 1x parent for the explicit coverage policy.
+- Path NonZero/EvenOdd fills and overdraw-preventing geometry consumed stencil
+  modes in `ContentContextOptions`. Patch 55b moves those stencil consumers to
+  its bounded native4 path atlas or draw islands instead of deleting their
+  fill/stroke semantics with the root attachments.
+- `EntityPassClipStack::RecordClip` retained the fractional-rect 0.124-pixel
+  rounding rule, which assumes the native 4x sample grid. The explicit coverage
+  path now records fractional edges with quad or path masks; legacy rendering
+  retains its existing rounding behavior.
+- Patch 53 removed the single-sample self-restore feedback hazard. On its own
+  it did not provide bounded scratch or separate layer/coverage regions.
+  Patch 55b adds those regions and frozen prefix snapshots for deferred
+  backdrop readers; advanced blend operators retain their existing semantics.
+
+The old Vulkan/ANV path rendered an 8-bit MSAA source snapshot, averaged all
+four destination samples in its fetch shader, and wrote that result to each
+covered sample. Fixed-function Screen blends per sample with an unquantized
+shader source. The real clipped-edge result can differ by more than 1/255;
+interior rounding can differ too. The algebraic identity does not establish
+pixel parity. The required design note, implementation scope, comparison
+fixtures, and the unexecuted native/GPU comparison protocol are in
+[Screen coefficient design](docs/engine/impeller/docs/avio-screen-coefficient-design.md).
+Screen pixel parity is not established. The user waived the visual-comparison
+campaign for this iteration only; the existing fixtures do not count as
+executed comparisons. Continuous analytic coverage remains unsupported and
+would require a separate contract and validation before advertisement.
+
+Known follow-up: upstream `63768f5568` (flutter#192988, offscreen
+advanced-blend texture coordinates) is not backported here. Patch 55a prewarms
+the common coverage pipelines and reports successful first-use compiles, but
+application-specific runtime compilation and its device cost remain
+unmeasured. Removal of unused normal-route Screen advanced pipelines remains
+outstanding; the comparison fixture intentionally retains the old Screen fetch
+pipeline. Patch 50 code is independent, and the patch
+inventory keeps its original adjacent context so EN50 reverse-applies alone.
+
+### Patch 53: backdrop prerequisites for single-sample rendering
+
+This adapts upstream `95feccb1e78b20d4001a508218a04a1438f94530`
+(flutter#193306) and `4ae563fe6016468a142842cfd268acffe8e0f1f7`
+(flutter#193176). A single-sample pass resumes by loading its existing color
+attachment. `Canvas::FlipBackdrop` must not eagerly restore that same texture
+with a sampled draw: sampling the attached target is an undefined feedback
+loop. Multisample passes still restore their resolved backdrop. The fork's
+failure propagation and patch 48's single-sample secondary remain intact.
+The shared-backdrop fast path also reserves the saved layer's real content
+depth instead of zero before drawing its children.
+
+Regressions use the upstream GLES mock feedback detector and the existing
+Canvas fixture: `CanvasGLESTest.AdvancedBlendWithoutOffscreenMSAAHasNoFeedbackLoop`
+uses Multiply, which remains an advanced blend, and
+`AiksTest.BackdropGroupSharedSnapshotReservesContentDepth` draws through a
+cached shared snapshot. The GLES fixture exercises the legacy depth/stencil
+route; patch 53 alone does not enable color-only roots. On its own this
+prerequisite leaves root/layer MSAA and the negotiated embedder ABI unchanged.
+Full engine tests and Vulkan/GLES captures are required
+before packaging that prerequisite on its own. For the combined patch 55b
+iteration the user waived the visual-comparison campaign; native build and
+correctness gates remain explicit below.
+
+### Patch 55b: explicit coverage policy and resource census (EG-1 through EG-5)
+
+**Design note and scope.** Coverage is an explicit negotiated Impeller policy
+on Vulkan or supported GLES3, not an environment switch or an
+allocation-pressure fallback. The appended config, introduced in ABI8 and
+carried by the current ABI9 contract,
+`FlutterAvioAntialiasingConfig` selects legacy `msaa4` or coverage with 1x color
+layers and native 4x masks, requests continuous classes, and gives separate
+bounded coverage/layer regions. The Avio starting profile is 8 MiB coverage and
+4 MiB layers. Vulkan advertises the implemented opt-in continuous classes
+listed in patch 60; GLES and Metal advertise zero. The host request remains
+zero. Unsupported backend or logical-device requests fail instead of silently
+changing edge behavior. The legacy policy keeps
+4x/4x and no region budgets. Legacy transient budgets must be positive;
+coverage requires both legacy transient caps to be zero.
+
+The header, initialization validator, Settings, Vulkan surface and ContextVK
+carry the same policy. Structural bounds, unknown policy values, contradictory
+samples/budgets, missing negotiated dependencies and renderer mismatches reject
+initialization before platform-view creation. Context setup additionally
+requires standard native sample locations and the required sampled/color and
+stencil 4x formats; unsupported devices fail before the allocator is created.
+No alternate AA policy is selected after refusal.
+
+Under coverage, imported root targets contain the host's 1x color image only.
+They bypass the legacy root transient pool and root depth/stencil attachments,
+load preserved contents or clear fresh contents, and store to that same imported
+image. Its original texture source still carries external queue ownership,
+completion-fence export and backing-store collection. Masks retain native
+sample4 quantization and all four sample identities; the implementation does
+not resolve a coverage mask to a scalar and multiply that scalar into every
+draw. The coverage geometry/path atlas, clip mask cache, tiled draw replay and
+bounded layer region are separate construction contracts. Painter segments
+replay in order through fixed native4 color tiles; ordinary image edges retain
+their original native geometry. Direct 1x non-AA/filter passes avoid native4
+islands where geometric coverage is not requested. The layer region uses
+independent color images instead of a same-image layer atlas, avoiding sampled
+attachment feedback. Logical snapshot rectangles and resource custody must
+survive every deferred reader and filter; physical texture dimensions remain
+the backing allocation's dimensions. Frozen backdrop inputs and the patch 53
+single-sample restore fix remain prerequisites. Region
+exhaustion may report an explicit layer overflow allocation; it must never
+silently re-enable full-root MSAA or omit geometric coverage.
+
+This bounded-memory renderer differs from the research sketch's anticipated
+per-draw scalar masks, fringe-only replay and image analytic fast paths. Those
+performance fast paths are not implemented here. Tiled replay can repeat work
+and destination traffic; no predicted traffic reduction, GPU speedup or memory
+savings is claimed without runtime measurements.
+
+**Reports.** ABI v8 appends `FlutterEngineRequestAvioRenderResourceReport` and
+separate AA/report capability bits. An accepted platform-thread call posts a
+raster task and receives one callback there; rejection receives no callback.
+Shutdown drains accepted callbacks, including typed EngineUnavailable
+cancellations, before returning. Callback arrays are borrowed for that callback
+only and bounded to 64 resource entries and 32 coverage reasons. Transport
+preserves unknown kind/reason IDs. No reporting call creates a renderer, leases
+or ages a cache, or waits for GPU completion; interval counters reset only when
+the request asks to start a new interval.
+
+ContextVK reports its physical allocated-image ledger once and merges a
+separate pipeline ledger. Vulkan ContentContext does not add pool/cache/region
+image bytes a second time. Image registration follows the actual deferred VMA
+image resource; imported images are excluded. The reported real bytes are VMA
+allocation sizes, not a measurement of unused VMA blocks or total driver heap
+usage. Pipeline registrations include compute and immutable-sampler variants
+and survive descriptor-cache eviction while objects remain referenced. Vulkan
+does not expose their driver allocation sizes: pipeline byte/key fields are
+unavailable and zero by convention.
+
+Counter availability is explicit. `first_use_compiles` counts successful native
+pipeline creation whose cache-miss origin was an actual raster frame, including
+asynchronous workers; warm initialization, cache hits and failed creation do
+not increment it. Raster allocation counters measure scoped GPU image
+allocations, not every C++ allocation. `coverage_flushes` counts successful
+encoded native color-island tile-to-parent composites, not atlas resets,
+direct 1x passes, failed copies or GPU completion.
+Layer overflow events and their real allocation bytes have separate counters;
+they are not draw counts or pixel areas. Unimplemented kinds/counters/reasons
+remain unavailable rather than pretending to be measured zeros.
+
+**Validation and packaging gate.** The pure production ABI/report target has
+10 passing tests, also run with address/undefined-behavior sanitizers. The public
+header compiles as C. The three modified Vulkan pipeline implementation files
+pass an actual-header C++ syntax check using fetched upstream dependencies.
+The root-target GTest source is registered separately so it can link against
+the real RenderTarget/Texture implementations without a GPU; both tests pass
+in that targeted build. The actual proc-table test source also passes a syntax
+check with `FLUTTER_ENGINE_NO_PROTOTYPES`, using its proc-table API calls.
+These targeted checks do not establish a complete engine/GN build,
+generated-shader link, GPU
+execution, pixel parity or an under-500-MiB memory result.
+
+`kAvioCoveragePolicyImplemented` is true for the integrated source policy.
+AA capability advertisement and public coverage initialization share that
+implementation fact; Linux Vulkan Impeller must be compiled and device format
+support must still pass initialization. The default config remains legacy
+4x/4x; coverage requires an explicit negotiated config. Actual generated shader
+headers and targeted C++ integration checks passed before enabling the source
+capability. This does not satisfy the independent native build, artifact and
+GPU execution release gates. The user waived the visual-comparison campaign
+for this iteration.
+Native profile/debug/release artifacts have not been rebuilt for this change;
+their existing checksums are not evidence for these sources and must be updated
+from actual build outputs before packaging. No source-only check approves a new
+look or fabricates a native artifact digest. The existing Screen/EN50 code and
+backdrop failure propagation retain their separate ownership.
+
+
+### Patch 56: exact empty content and retained root frame facts (EG-6, EG-7, DS2)
+
+**Design note.** ABI9 negotiates empty-content, item-effects and output-ground
+features with exact root-target opportunities. These require root-target mode;
+a generic compositor cannot opt in. `EmptyContent` consumes the matching
+view/display/opportunity once, with no backing store, damage, render completion
+or GPU submission. It clears old content rather than acknowledging a
+`NoVisualChange`. Whole-scene preroll checks actual root paint bounds before
+surface/target acquisition. It ignores the raster cache and never paints the
+scene. Material or client-preview sidecars prevent true empty; authored output
+ground is a separate pixel-free Scene fill and can accompany empty content.
+Rejected empty revisions preserve the prior engine/producer baseline. Accepted
+empty revisions retire the engine's cached root target through normal collection
+and release its transient owner; actual submitted GPU readers retain custody.
+The next pixel frame uses ordinary exact typed acquisition again.
+
+Root item opacity, output ground and Ready Static/Live revisions are immutable frame facts,
+not placement properties. Native validation permits only a sole-child root
+prefix, including mandatory DPR/offset transforms and other root fact decorators.
+Sibling, duplicate, clip/filter/opacity ancestors and malformed facts reject
+before target acquisition. Scene image snapshots reject these view-only facts.
+The metadata layer paints original child pixels without an opacity saveLayer,
+including at external alpha zero. Framework composited-layer updates reuse the
+same framework layer and retain child painting. Changing root facts promotes the
+root to a fresh ordinary buffered raster; it does not reuse a held producer BO
+through an unimplemented metadata-only custody shortcut.
+
+Nullable root effect opacity means no author. An authored identity opacity is
+an explicit group declaration; its nonzero monotonic declaration ID travels with
+the exact revision and changes when the body author is replaced. The engine does
+not infer group lifetime from alpha or WM placement. Per-view raster TRACE spans
+carry the actual Flutter view ID passed to the matching submit operation, rather
+than the optional platform-view identifier used for composition slices.
+
+Ground is either one full logical-output ARGB convenience fill or up to four
+non-overlapping finite, positive logical view-root rectangles with packed
+straight ARGB. Split ScreenWidget regions retain their exact geometry before
+DPR; they do not turn into one full physical-output color. Native/root validation
+checks bounds against the logical frame; the host/Scene checks its current visible
+logical extent. Null author means absent authority, an authored empty descriptor
+means explicit clear. All metadata pointers and bounded region arrays are borrowed
+only during the matching present callback; conversion allocates no heap memory.
+
+Source correctness checks include the production ABI9 header oracle and real
+Flow/UI/rasterizer/embedder translation-unit syntax where dependencies exist.
+The registered native Flow, embedder and rasterizer regression fixtures and
+framework tests need a full freshly built engine/Flutter test environment to
+execute. Native debug/profile/release artifacts, linked GTK/Avio boots, driver
+validation and memory captures remain release gates; no rebuilt checksum or
+measured memory saving is claimed by these source changes.
+
+### Patch 57: ready Static/Live root content (DS2)
+
+**Design note.** `FlutterAvioReadyContent` carries one nonzero intended-content
+revision with explicit Static or Live kind. Pending decode/shader loading must
+not author readiness. Both kinds use strict sole-child root validation and the
+exact accepted buffered generation, then report acceptance before Desktop
+relinquishes its bootstrap painter. A null framework revision emits an ordinary
+native offset layer while preserving framework layer identity and child paint.
+Empty content cannot carry a ready revision, and unknown kinds fail validation.
+
+Static sealing is separately requested and accepts only Static with the exact
+accepted source view, revision and generation. Scene retains that selected BO
+before the live engine view/pool detach. Live frames and placeholders cannot
+acknowledge a static seal. This single authority replaces the earlier static-only
+sketch; it does not add a second competing revision. Source tests do not establish
+installed wallpaper continuity or executed removal/retained-reader fences.
+
+### Patch 58: GTK/GLES bounded native-four-sample Coverage (EG-9)
+
+**Design note.** GTK negotiates ABI9 AA/report before AOT data and backing-store
+creation. The shared cold GL/GLES3 probe requires exact native four samples in
+RGBA8 and D24S8, complete offscreen attachments, and explicit resolve into a
+single-sample texture. It restores bindings/scissor state and deletes only its
+temporary objects. Unsupported native capabilities retain declared legacy
+MSAA4; an admitted Coverage context that later fails cannot silently fall back.
+Coverage root framebuffers require complete single-sample RGBA color without
+depth/stencil, validated with a current reactor context and restored bindings.
+
+The GL renderer replays original geometry/stencil in fixed four-sample color
+tiles and independent one-sample layer banks. It does not sample Vulkan's native
+mask cache or use its analytic quad path. A distinct fixed prefix scratch texture
+copies borrowed host-FBO pixels before seeding tiles, avoiding texture feedback
+and preserving crop/orientation on both endpoints. Wrapped host names remain
+borrowed and are never deleted. Warm color/scratch/layer images are realized
+before raster frames; their descriptor samples, extents and mip counts fit the
+8-MiB coverage and 4-MiB layer bounds.
+
+GL has no portable physical image/program allocation-byte query. These bounds
+are descriptor bounds, unlike Vulkan's exact allocation bounds. The ABI9 entry
+tail reports independent availability: counts 1, nominal bytes 2, actual bytes
+4, uniform texture descriptor 8, physical descriptor multiplicity 16, observed
+leases 32. Vulkan's physical image census marks 1|2|4|16. Pipeline census marks
+counts only. GL regions expose aggregate lifetime count rows and distinct
+per-image nominal/descriptor rows; physical bytes and leases stay unavailable
+with a typed reason, never measured zero. Unknown kinds, bits and raw formats
+survive bounded transport. Cache ownership/idle release cannot be inferred from
+these allocation counts.
+
+Executed hosted checks include production-header capability/state fixtures,
+bounded-region/packing fixtures, ABI/report contracts and allocated-image
+lifetime fixtures, including focused ASAN/UBSAN runs. Actual GTK/backend/Flow/
+embedder translation-unit compilation checks use real dependency headers; some
+validation-only ANGLE/RapidJSON/GTK headers differ from native DEPS and do not
+replace a pinned GN build. GTK and blit regression fixtures are registered and
+source-compiled where available. Native debug/profile/release builds, linked
+GTK/Avio boots, real driver GL/Vulkan rendering and memory captures remain
+release gates. No native artifact digest, pixel parity or measured saving is
+established here. Continuous-AA requests remain off by default.
+
+### Patch 59: headless Linux Vulkan golden harness (TL-3)
+
+**Design note.** `impeller_golden_tests_vk` renders directly with a real
+ContextVK and a selected Vulkan ICD, without GLFW, a display server, WSI surface
+or swapchain. Generated native shader archives and validation layers are
+required. Linux golden fixtures use the actual Vulkan backend instead of the
+skip-only stub; the runner rejects an empty selection and any skipped test.
+
+Coverage fixtures render the same authored geometry through legacy native4,
+negotiated Coverage, and a test-only aliased1 reference. The reference disables
+scene AA and routes nested offscreen-MSAA requests through an injected allocator
+that creates only one-sample attachments, preserving available load content and
+rejecting multisample existing attachments. It never negotiates a fictitious
+one-sample Coverage policy or alters production defaults. SDF primitive fixtures
+explicitly request the existing SDF shader path. Text uses a real pinned fixture
+font; missing fonts, shader libraries, native capabilities or readback fail.
+
+The class/site catalog includes SDF primitives, text, shadows, linear/radial
+gradients, fills/strokes/arcs/borders, fractional/rotated images, nested clip
+classes, clear/src/screen/dstIn, clipped backdrop filters and focused Shell-site
+replicas, across light/dark at scales 1, 1.25 and 2 and four fractional phases.
+These replicas exercise the rendering operators; they do not establish pixels
+of installed Shell widgets. The EN50-reverted run requires a separately built
+source revision and is not emulated by a runtime flag.
+
+Readback submits the actual image-to-host-buffer transfer, waits for its own
+bounded completion, validates status, invalidates host memory, and preserves
+exact RGBA bytes (including BGRA conversion). Callback custody survives timeout.
+PNG export uses the real Skia encoder's standard straight-alpha conversion;
+opaque test backgrounds avoid confusing this with render differences. Failed
+comparisons still write their native4/Coverage/aliased1 PNGs, edge masks and
+digest for review, while the process returns failure.
+
+The edge mask is actual native4-versus-aliased byte inequality. Coverage must be
+byte-identical outside it and differ by at most one channel byte inside it.
+SDF/text/shadow/gradient classes require complete byte equality. The CPU contract
+tests prove that missing readback, a one-byte interior change and a two-byte
+edge change fail. The Screen old-fetch fixture independently asserts zero
+interior delta; edge deltas remain documented operator changes, not accepted
+parity. Source compilation and CPU tests are not an executed GPU golden run,
+visual approval, EN50-reverted proof or rebuilt native-engine artifact.
+
+### Patch 60: opt-in continuous classes and destination-aware coverage (EG-8)
+
+**Design note.** Stable class bits name rectangle, rounded-rectangle,
+rounded-superellipse and oval clips, bordered rounded rectangles, arcs, and
+image edges. Requests remain zero by default; per-backend implementation masks
+are separate from known class identities. GLES and Metal do not inherit Vulkan
+support. A borrowed Vulkan device additionally supplies the authoritative
+`native_sample_shading_enabled` logical-device creation fact: querying physical
+support cannot establish that the device enabled it. Unknown classes, unavailable
+backend/device support, singular transforms, expression overflow and missing
+source shader variants fail closed.
+
+Continuous clips retain an immutable ordered expression of at most 16 actual
+transformed analytic primitives. Identical predicates deduplicate; exact
+intersect/difference contradictions canonicalize to empty instead of producing
+a smooth rim. Signed distances for original geometry and every clip combine
+before one smoothstep coverage evaluation at each original native sample
+position. Rectangle/rrect/oval and all four rounded-superellipse quadrants retain
+their own shape parameters. Border/arc and image-edge sources defer own coverage;
+nonspatial color-filter and source snapshots retain a raw source plus its owned
+primitive for the final evaluation. Spatial blur/image-filter inputs consume
+intrinsic shape coverage and receive only the final clip thereafter.
+
+A fixed native4 destination prefix preserves lane identity for fractional Src,
+Clear and all supported coefficient operators. Each affected ordered draw ends
+its previous render pass, copies the native4 color island into a distinct native4
+image, transitions it outside render passes, resumes color/depth/stencil loads,
+and computes `mix(D, Blend(S,D), F)` with the original blend coefficients. It
+never reads a resolved one-sample prefix or samples its render attachment.
+External coverage transfer remains after the final combined source-over coverage.
+The prefix is warmed and counted inside the same 8-MiB actual Vulkan bank;
+requesting continuous classes reduces the color tile to 224 pixels. The default
+mask-zero tile remains 256. Budget admission rejects oversized native requirements.
+
+The common Vulkan source variants preserve original shader bindings and add two
+readonly storage buffers and a native4 sampler. The immutable clip expression
+uploads once per recorder state; a 704-byte draw control carries original blend
+factors, raster origin and an optional deferred own primitive. Those variants
+are Vulkan-only GN shader inputs, not GLES/Metal assets. Cold existing pipeline
+requests also warm their available variants; actual new frame compiles remain
+observed first-use events. Arbitrary runtime shader variants are not fabricated.
+
+A Vulkan Coverage renderer prewarms a dedicated shader-data arena: one
+1,024,000-byte block in each of four frame entries (4,096,000 descriptor bytes)
+for native clip controls. A renderer requesting continuous classes also prewarms
+128 immutable expression slots and expands this cold arena to three blocks per
+entry (12,288,000 descriptor bytes). Each recorder has a fixed 128-state
+upload cache. The arena retains owning buffer views through queued
+recordings and submitted command buffers; a still-owned ring entry or capacity
+exhaustion fails the frame instead of replacing storage, allocating a one-off
+buffer, waiting on the GPU, or growing the expression cache. This bounds the new expression/control storage; Patch 61 separately bounds
+the typed recorder storage. Neither claim means the whole renderer or its
+existing native command implementation allocates no CPU memory.
+
+The typed DeviceBuffers resource kind reports successful engine-owned VMA buffer
+allocations with descriptor and actual VMA allocation sizes. Its registration
+stays with the deferred native buffer resource and decrements after VMA buffer
+destruction. Together with the image provider, the raster allocation counter
+observes successful native image and buffer allocation events during raster
+frames. VMA containing-block slack, driver-private allocations and physical
+pipeline memory are not inferred from those sizes; pipeline compilation remains
+a separate observed counter.
+
+Local checks compile the actual production C++ and registered fixtures, compile
+all common wrapper shaders through genuine Impellerc, and run production
+region/budget, analytic-geometry, control-custody and ABI contracts. These are
+source/CPU/shader-compiler checks. Full GN/link, GPU execution, native artifact
+rebuilds and per-class changed-look approval remain separate gates. No continuous
+class is enabled in the host's default request, and no pixel parity or memory
+saving measurement is asserted.
+
+
+### Patch 61: exact clip segments and bounded typed recording (EG-2/3/4)
+
+The upstream asynchronous prewarm API and legacy 27-key catalogue are preserved.
+Legacy SDF contexts queue those descriptor-derived variants without a constructor
+join. Coverage uses its separate actual caller catalogue: all source keys are
+queued asynchronously from their original default descriptors before any source
+join, then the same keys and required replay derivatives are validated during
+controlled initialization. A failed queue or compile keeps public readiness
+false. The manual clip family retains its exact no-colour-write default
+descriptor for that queue. The typical 160 Coverage visitor entries count source
+keys, not native PSOs or measured pipeline memory; mask/default futures and
+required derivatives are separate. Four production visitor tests execute the
+queue-before-join and failure/readiness contract. The upstream legacy-set and
+GPU playground tests remain registered; their source compilation does not imply
+native GPU execution.
+
+**Design note.** The real DisplayList pre-pass freezes exact declaration tokens,
+ancestry, source/geometry facts, simultaneous layer demand and earlier/later
+fringe-correlation proofs before rendering. The recorder consumes those facts
+for complete root/layer routes and actual painter segments. Draw ordinals and
+matching bounding boxes never substitute for a clip declaration. Incomplete
+proofs keep the bounded native four-sample replay; destination-read boundaries
+preserve their original ordered prefix.
+
+Clip recipes retain all ancestors, operations and original native geometry.
+Rectangle, rounded-rectangle, superellipse and oval inner/outer proofs partition
+known full pixels from uncertain fringe boxes. Paths and partition overflow
+remain conservative uncertain boxes; native mask replay determines every lane.
+The executor renders proven interiors at 1x. Four unresolved mask lanes combine
+with AND/AND-NOT before any resolve. Deep/native geometry recipes stream one
+raster tile at a time through the existing fixed R8MS4 scratch and shared
+bounded depth/stencil storage. The exact logical claim survives through its
+consumer encoding, then releases; the native image independently remains alive
+through GPU completion. Queue-ordered read-to-next-write barriers permit reuse
+without accumulating leases for the entire desktop or losing older parents.
+
+This refines the research's coefficient shortcuts where attachment rounding
+invalidates their premise. Opacity alone does not prove an already encoded
+source colour. A raw one-draw joint coefficient variant requires source-owned
+full/uniform evidence and an exact encoded opaque value; currently exact solid
+colour endpoints satisfy it. Other opaque-first uniform SrcOver groups, including
+eligible immutable captured-backdrop plus fills, shade the original source into
+the standing distinct 1x UNORM resolve attachment first. Each painter store
+therefore preserves original source rounding before the final nearest encoded
+source and complete joint clip mask composite. That private composite samples
+the declared RGBA8/BGRA8 format in high precision and reconstructs its stored
+UNORM byte codes before applying coverage; it does not reuse the original
+source shader's relaxed-precision approximation of an already stored byte.
+Actual captured texture evidence
+requires full own geometry, pixel-centre source uniformity, exact opaque sample
+support and the same declaration token. Ordinary F16/bilinear colour, a format
+label or opacity metadata alone cannot manufacture that evidence.
+
+Translucent groups without an opaque overwrite retain native4 partial pixels.
+For example, 16 alpha-byte-1 paints over destination byte96 at quarter coverage
+can produce native result100 versus transparent-group result98. Even one
+translucent paint can differ by a byte if its lane is rounded before resolve.
+Raw opaque shader colour can differ too if it has not yet been stored to UNORM.
+Clear/Src and other original operators render proven full pixels at 1x and
+partial pixels in the bounded native4 fringe, preserving original destination
+lanes. No source alpha or colour is changed just to admit an optimization.
+
+Ordinary Vulkan image quads retain the original physical grid and explicit
+canonical four lane masks; source sampling, strict crop and nonlinear transfer
+retain their original ordering. A coefficient 1x image route requires separate
+encoded-source and correlation proof; unproven varying/translucent sources keep
+native lane geometry. Analytic legacy SDF-only scope admission follows the real
+owner's `use_sdfs` eligibility. Source selection and target routing are separate:
+mixed or clipped scopes keep the original UberSDF, complex-superellipse and
+circle source shaders in bounded native4 replay, including their existing
+alpha/gamma and gradient behavior. The complete unclipped scope proof alone
+permits the existing SDF source to render at 1x. Circle retains its original
+eligibility independently of the EN50 flag. Candidate SDF eligibility never
+proves equal samples for a neighboring clip segment.
+
+With an explicitly requested continuous clip, Circle and complex-superellipse
+variants export their original normalized signed distance before coverage and
+use sample-qualified geometry inputs. The wrapper combines that own distance
+with the retained clip expression before one coverage evaluation. Their default
+shader bodies remain unchanged. The native4 source keys are cold-warmed for the
+actual geometry/operator forms; a registered mixed glyph/clip/SDF/gradient
+fixture checks first-frame compilation when run on a Vulkan device. The source
+fixture has been compiled here, but that device execution remains pending.
+
+Native tile raster origins remain aligned to eight pixels. This preserves the
+original ordered-dither modulo-eight indices and derivative-quad phase when
+original gradient source shaders are translated into scratch tiles. Replay
+refuses an unaligned translated origin before binding or drawing. Production
+planner tests cover negative/fractional bounds and odd scratch capacities;
+neither those tests nor source compilation establishes native pixel parity.
+
+A cold aggregate CPU bank holds at most 64 recorder controls, 8,192 packets,
+32,768 bindings and 32,768 vertex views. Pending resources and names use fixed
+inline storage, and exact weak identities never resurrect on slot reuse.
+Capacity or busy admission fails before submission, without frame-path bank
+growth. Logical clip-write markers distinguish replayed clips from a fill's own
+winding/stroke operations. Source proofs apply to exactly one accepted draw.
+Encoded pipelines, buffers and textures transfer to actual native submission
+custody independently of recorder reuse; retaining only a C++ command-buffer
+wrapper is not a GPU fence.
+
+Production CPU admission/lifetime tests, genuine C++ fixture typechecks and
+actual official shader compilation validate the source contracts. The deep 512,
+SDF-only and native first-frame cold-pipeline fixtures are authored and registered;
+they are not reported as executed GPU goldens. Full GN/link, rebuilt artifacts,
+driver execution, changed-look approval and measured memory/performance remain
+independent release gates. The requested default continuous mask stays zero.
+
+Selected Vulkan targets also retain their external image/view destruction and
+backing-store collection callbacks in the existing native texture source.
+Native framebuffer caches retire before those callbacks, and the final
+submitted source reader owns the foreign baton. A required completion-sync FD
+failure settles the exact target as RasterFailed for host quarantine; an
+unproved idle wait never turns it into a Produced frame. Acquisition failures
+keep the original collection guard, and callbacks run once in destruction then
+collection order. Actual CPU tests exercise the source cache with fake Vulkan
+deleters; native timeline execution remains a separate gate.

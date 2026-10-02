@@ -301,6 +301,9 @@ typedef CanvasPath Path;
   V(SceneBuilder, pop)                           \
   V(SceneBuilder, pushBackdropFilter)            \
   V(SceneBuilder, pushAvioWindowPreview)         \
+  V(SceneBuilder, pushAvioItemEffect)            \
+  V(SceneBuilder, pushAvioOutputGround)          \
+  V(SceneBuilder, pushAvioReadyContent)          \
   V(SceneBuilder, pushAvioCompositorMaterial)    \
   V(SceneBuilder, pushClipPath)                  \
   V(SceneBuilder, pushClipRect)                  \

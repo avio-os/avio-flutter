@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "flutter/testing/testing.h"
 #include "gtest/gtest.h"
 #include "impeller/entity/contents/clip_contents.h"
 #include "impeller/entity/entity.h"
@@ -325,6 +324,91 @@ TEST(EntityPassClipStackTest, ClipAndRestoreWithSubpassesNonAA) {
 
   EXPECT_EQ(recorder.GetClipCoverageLayers()[1].coverage,
             Rect::MakeLTRB(50, 50, 55, 55));
+}
+
+TEST(EntityPassClipStackTest, RestoreRemovesEveryDiscardedReplayHeight) {
+  EntityPassClipStack recorder(Rect::MakeSize(Size{100, 100}));
+  for (size_t height = 1; height <= 3; height++) {
+    auto bounds = Rect::MakeLTRB(height, height, 100 - height, 100 - height);
+    recorder.RecordClip(ClipContents(bounds, false), Matrix{}, {0, 0},
+                        static_cast<uint32_t>(40 - height), 0, true);
+  }
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 3u);
+  // Draw depths are deliberately unrelated to stack height. Restoring two
+  // nested saves retains the exact parent entry for a later backdrop replay.
+  recorder.RecordRestore({0, 0}, 1);
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 1u);
+  EXPECT_EQ(recorder.GetReplayEntities()[0].clip_height, 1u);
+  EXPECT_EQ(recorder.GetReplayEntities()[0].clip_depth, 39u);
+  EXPECT_EQ(recorder.GetClipCoverageLayers().size(), 2u);
+  // A subsequent append must also have reconciled the replay cursor.
+  recorder.RecordClip(ClipContents(Rect::MakeLTRB(4, 4, 96, 96), false),
+                      Matrix{}, {0, 0}, 20, 0, true);
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 2u);
+  EXPECT_EQ(recorder.GetReplayEntities()[1].clip_height, 2u);
+  recorder.RecordRestore({0, 0}, 0);
+  EXPECT_TRUE(recorder.GetReplayEntities().empty());
+}
+
+TEST(EntityPassClipStackTest, RestoringNoOpLayerKeepsParentReplay) {
+  EntityPassClipStack recorder(Rect::MakeSize(Size{100, 100}));
+  auto parent = ClipContents(Rect::MakeLTRB(10.5, 10.5, 90.5, 90.5), false);
+  auto quad = CoverageConvexQuad4::Make(
+      Rect::MakeLTRB(10.5, 10.5, 90.5, 90.5).GetPoints());
+  ASSERT_TRUE(quad);
+  parent.SetCoverageQuad(*quad);
+  recorder.RecordClip(parent, Matrix{}, {0, 0}, 30, 0, true);
+  auto skipped =
+      recorder.RecordClip(ClipContents(Rect::MakeSize(Size{100, 100}), true),
+                          Matrix{}, {0, 0}, 29, 0, true);
+  ASSERT_FALSE(skipped.should_render);
+  ASSERT_FALSE(skipped.clip_did_change);
+  ASSERT_EQ(recorder.GetClipCoverageLayers().size(), 3u);
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 1u);
+  recorder.RecordRestore({0, 0}, 1);
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 1u);
+  EXPECT_TRUE(recorder.GetReplayEntities()[0].clip_contents.HasCoverageQuad());
+  EXPECT_EQ(recorder.GetReplayEntities()[0].clip_height, 1u);
+}
+
+TEST(EntityPassClipStackTest,
+     RestoreAcrossReplayAndNoOpLayersKeepsExactPrefix) {
+  EntityPassClipStack recorder(Rect::MakeSize(Size{100, 100}));
+  recorder.RecordClip(ClipContents(Rect::MakeLTRB(10, 10, 90, 90), false),
+                      Matrix{}, {0, 0}, 30, 0, true);
+  recorder.RecordClip(ClipContents(Rect::MakeSize(Size{100, 100}), true),
+                      Matrix{}, {0, 0}, 29, 0, true);
+  recorder.RecordClip(ClipContents(Rect::MakeLTRB(20, 20, 80, 80), false),
+                      Matrix{}, {0, 0}, 28, 0, true);
+  recorder.RecordClip(ClipContents(Rect::MakeSize(Size{100, 100}), true),
+                      Matrix{}, {0, 0}, 27, 0, true);
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 2u);
+  ASSERT_EQ(recorder.GetReplayEntities()[1].clip_height, 3u);
+  recorder.RecordRestore({0, 0}, 2);
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 1u);
+  EXPECT_EQ(recorder.GetReplayEntities()[0].clip_height, 1u);
+  EXPECT_EQ(recorder.GetClipCoverageLayers().size(), 3u);
+}
+
+TEST(EntityPassClipStackTest, MultiRestoreRespectsNonzeroSubpassFloor) {
+  EntityPassClipStack recorder(Rect::MakeSize(Size{100, 100}));
+  recorder.RecordClip(ClipContents(Rect::MakeLTRB(10, 10, 90, 90), false),
+                      Matrix{}, {0, 0}, 30, 0, true);
+  recorder.PushSubpass(Rect::MakeSize(Size{80, 80}), 5);
+  recorder.RecordClip(ClipContents(Rect::MakeLTRB(5, 5, 75, 75), false),
+                      Matrix{}, {0, 0}, 20, 5, true);
+  recorder.RecordClip(ClipContents(Rect::MakeLTRB(10, 10, 70, 70), false),
+                      Matrix{}, {0, 0}, 19, 5, true);
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 2u);
+  EXPECT_EQ(recorder.GetReplayEntities()[0].clip_height, 6u);
+  EXPECT_EQ(recorder.GetReplayEntities()[1].clip_height, 7u);
+  recorder.RecordRestore({0, 0}, 5);
+  EXPECT_TRUE(recorder.GetReplayEntities().empty());
+  ASSERT_EQ(recorder.GetClipCoverageLayers().size(), 1u);
+  EXPECT_EQ(recorder.GetClipCoverageLayers()[0].clip_height, 5u);
+  recorder.PopSubpass();
+  ASSERT_EQ(recorder.GetReplayEntities().size(), 1u);
+  EXPECT_EQ(recorder.GetReplayEntities()[0].clip_height, 1u);
 }
 
 }  // namespace testing

@@ -18,6 +18,24 @@
 #include "impeller/renderer/command_buffer.h"
 
 namespace impeller {
+namespace {
+class CompletionReservation final {
+ public:
+  CompletionReservation(TimelineCompletionVK& completion, uint64_t token)
+      : completion_(completion), token_(token) {}
+  ~CompletionReservation() {
+    if (active_) {
+      completion_.CancelCompletion(token_);
+    }
+  }
+  void Release() { active_ = false; }
+
+ private:
+  TimelineCompletionVK& completion_;
+  uint64_t token_;
+  bool active_ = true;
+};
+}  // namespace
 
 CommandQueueVK::CommandQueueVK(const std::weak_ptr<ContextVK>& context)
     : context_(context) {}
@@ -50,6 +68,10 @@ fml::Status CommandQueueVK::Submit(
                          "Failed to end command buffer.");
     }
     vk_buffers.push_back(command_buffer.GetCommandBuffer());
+    // This exact native owner follows the submitted timeline, even when the
+    // public wrapper and recorder spans are destroyed immediately afterward.
+    command_buffer.tracked_objects_->AdoptResourceOwners(
+        command_buffer.TakeResourceOwners());
     tracked_objects.push_back(std::move(command_buffer.tracked_objects_));
   }
 
@@ -65,19 +87,18 @@ fml::Status CommandQueueVK::Submit(
                        "Timeline completion tracker is not available.");
   }
 
+  const auto reserved = completion->ReserveCompletion();
+  if (!reserved) {
+    return {fml::StatusCode::kResourceExhausted,
+            "Fixed native completion custody capacity unavailable"};
+  }
+  CompletionReservation reservation(*completion, *reserved);
+
   // Collect wait semaphores from all tracked objects (e.g. DMA-BUF
   // acquire fences imported as VkSemaphores).
   std::vector<vk::Semaphore> wait_semaphore_handles;
   std::vector<vk::PipelineStageFlags> wait_stage_masks;
   std::vector<WaitSemaphore> wait_semaphores_storage;
-  for (auto& objs : tracked_objects) {
-    for (auto& sem : objs->TakeWaitSemaphores()) {
-      wait_semaphore_handles.push_back(*sem.semaphore);
-      wait_stage_masks.push_back(sem.wait_stage);
-      wait_semaphores_storage.push_back(std::move(sem));
-    }
-  }
-
   std::vector<TrackedObjectsVK::PendingSignalSemaphoreVK>
       signal_semaphores_storage;
   std::vector<vk::Semaphore> signal_semaphore_handles;
@@ -107,10 +128,6 @@ fml::Status CommandQueueVK::Submit(
 
   vk::SubmitInfo render_submit_info;
   render_submit_info.setCommandBuffers(vk_buffers);
-  if (!wait_semaphore_handles.empty()) {
-    render_submit_info.setWaitSemaphores(wait_semaphore_handles);
-    render_submit_info.setWaitDstStageMask(wait_stage_masks);
-  }
   signal_semaphore_handles.push_back(internal_dependency_semaphore.get());
   render_submit_info.setSignalSemaphores(signal_semaphore_handles);
 
@@ -142,6 +159,23 @@ fml::Status CommandQueueVK::Submit(
   uint64_t completion_value = 0u;
   auto status = context->GetGraphicsQueue()->SubmitLocked(
       [&](const vk::Queue& queue) -> vk::Result {
+        if (!completion->CanSubmit(*reserved)) {
+          return vk::Result::eErrorUnknown;
+        }
+        // Take producer dependencies at actual submission, rather than while
+        // recording. The queue lock orders two readers of one source and also
+        // keeps a failed first submit's returned wait ahead of the next reader.
+        for (auto& objs : tracked_objects) {
+          for (auto& wait : objs->TakeWaitSemaphores()) {
+            wait_semaphore_handles.push_back(*wait.semaphore);
+            wait_stage_masks.push_back(wait.wait_stage);
+            wait_semaphores_storage.push_back(std::move(wait));
+          }
+        }
+        if (!wait_semaphore_handles.empty()) {
+          submit_infos[0].setWaitSemaphores(wait_semaphore_handles);
+          submit_infos[0].setWaitDstStageMask(wait_stage_masks);
+        }
         // Timeline values must reflect actual queue submission order. The
         // marker batch waits on a queue-local binary semaphore signaled by the
         // render batch, so CPU completion cannot run before render execution
@@ -149,7 +183,15 @@ fml::Status CommandQueueVK::Submit(
         completion_value = completion->ReserveSubmitValue();
         submission_id = tracker->RecordSubmission();
         completion_signal_values[0] = completion_value;
-        return queue.submit(submit_infos, vk::Fence{});
+        const auto result = queue.submit(submit_infos, vk::Fence{});
+        if (result != vk::Result::eSuccess) {
+          for (auto& wait : wait_semaphores_storage) {
+            auto source = wait.source;
+            source->ReturnAcquireSemaphoreFromFailedSubmit(std::move(wait));
+          }
+          wait_semaphores_storage.clear();
+        }
+        return result;
       });
   if (status != vk::Result::eSuccess) {
     if (submission_id != 0u) {
@@ -159,22 +201,25 @@ fml::Status CommandQueueVK::Submit(
     return fml::Status(fml::StatusCode::kCancelled, "Failed to submit queue: ");
   }
 
+  // From here the native GPU owns this exact submission. The completion
+  // tracker must adopt it even if observation becomes unavailable afterward.
+  reservation.Release();
+  reset.Release();
   for (const auto& signal : signal_semaphores_storage) {
     signal.texture->SetRenderCompleteSyncFD(signal.semaphore->CreateFD());
   }
 
   // Submit will proceed, call callback with true when it is done and do not
   // call when `reset` is collected.
-  auto added_completion = completion->AddCompletion(
-      completion_value,
+  auto added_completion = completion->AddSubmittedCompletion(
+      *reserved, completion_value,
       fml::MakeCopyable(
-          [completion_callback, tracker, submission_id,
-           tracked_objects = std::move(tracked_objects),
+          [tracker, submission_id, tracked_objects = std::move(tracked_objects),
            signal_semaphores_storage = std::move(signal_semaphores_storage),
            internal_dependency_semaphore =
                std::move(internal_dependency_semaphore),
-           wait_semaphores_storage = std::move(wait_semaphores_storage)](
-              CommandBuffer::Status status) mutable {
+           wait_semaphores_storage =
+               std::move(wait_semaphores_storage)]() mutable {
             // Ensure tracked objects and semaphores are destructed before
             // calling any final callbacks.
             signal_semaphores_storage.clear();
@@ -182,18 +227,12 @@ fml::Status CommandQueueVK::Submit(
             wait_semaphores_storage.clear();
             tracked_objects.clear();
             tracker->RecordCompletion(submission_id);
-            if (completion_callback) {
-              completion_callback(status);
-            }
-          }));
+          }),
+      completion_callback);
   if (!added_completion) {
-    if (completion->WaitFor(completion_value)) {
-      tracker->RecordCompletion(submission_id);
-    }
     return fml::Status(fml::StatusCode::kCancelled,
                        "Failed to add timeline completion.");
   }
-  reset.Release();
   return fml::Status();
 }
 

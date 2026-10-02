@@ -7,8 +7,10 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include "impeller/renderer/blit_pass.h"
+#include "impeller/renderer/bounded_resource_owners.h"
 #include "impeller/renderer/compute_pass.h"
 
 namespace impeller {
@@ -59,6 +61,21 @@ class CommandBuffer {
   virtual bool IsValid() const = 0;
 
   virtual void SetLabel(std::string_view label) const = 0;
+
+  // Region ownership differs from texture destruction custody: an encoded
+  // reader must prevent image/atlas reuse until its buffer has been queued.
+  // Vulkan moves these owners into native submission tracking before enqueue;
+  // wrapper destruction is never treated as GPU completion.
+  // Owners must never reference the buffer, its render passes or the backend
+  // execution queue. Region leases meet this contract with weak State custody.
+  void RetainResource(std::shared_ptr<void> owner);
+  bool TryRetainResource(std::shared_ptr<void> owner);
+  bool HasValidResourceOwners() const {
+    return resource_owners_valid_ && retained_resources_.IsValid();
+  }
+  BoundedResourceOwners TakeResourceOwners() {
+    return std::move(retained_resources_);
+  }
 
   //----------------------------------------------------------------------------
   /// @brief      Block the current thread until the GPU has completed execution
@@ -121,6 +138,9 @@ class CommandBuffer {
 
  private:
   friend class CommandQueue;
+
+  BoundedResourceOwners retained_resources_;
+  bool resource_owners_valid_ = true;
 
   //----------------------------------------------------------------------------
   /// @brief      Schedule the command encoded by render passes within this

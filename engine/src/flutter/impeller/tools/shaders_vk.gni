@@ -33,6 +33,11 @@ template("impeller_shaders_vk") {
       intermediates_subdir = "vk"
     }
     shader_target_flags = [ "--vulkan" ]
+    if (defined(invoker.vulkan_include_dirs)) {
+      foreach(dir, invoker.vulkan_include_dirs) {
+        shader_target_flags += [ "--include=" + rebase_path(dir, root_build_dir) ]
+      }
+    }
 
     defines = [ "IMPELLER_TARGET_VULKAN" ]
 

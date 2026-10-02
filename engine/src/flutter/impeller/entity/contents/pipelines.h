@@ -13,6 +13,12 @@
 #include "impeller/entity/circle.vert.h"
 #include "impeller/entity/clip.frag.h"
 #include "impeller/entity/clip.vert.h"
+#ifdef IMPELLER_ENABLE_VULKAN
+#include "impeller/entity/coverage_mask.frag.h"
+#include "impeller/entity/coverage_mask.vert.h"
+#include "impeller/entity/coverage_quad.frag.h"
+#include "impeller/entity/coverage_quad.vert.h"
+#endif
 #include "impeller/entity/color_matrix_color_filter.frag.h"
 #include "impeller/entity/complex_rse.frag.h"
 #include "impeller/entity/conical_gradient_fill_conical.frag.h"
@@ -108,6 +114,10 @@ using BlendSoftLightPipeline = AdvancedBlendPipelineHandle;
 using BorderMaskBlurPipeline = RenderPipelineHandle<FilterPositionUvVertexShader, BorderMaskBlurFragmentShader>;
 using CirclePipeline = RenderPipelineHandle<CircleVertexShader, CircleFragmentShader>;
 using ClipPipeline = RenderPipelineHandle<ClipVertexShader, ClipFragmentShader>;
+#ifdef IMPELLER_ENABLE_VULKAN
+using CoverageMaskPipeline = RenderPipelineHandle<CoverageMaskVertexShader, CoverageMaskFragmentShader>;
+using CoverageQuadPipeline = RenderPipelineHandle<CoverageQuadVertexShader, CoverageQuadFragmentShader>;
+#endif
 using ColorMatrixColorFilterPipeline = RenderPipelineHandle<FilterPositionUvVertexShader, ColorMatrixColorFilterFragmentShader>;
 using ConicalGradientFillConicalPipeline = GradientPipelineHandle<ConicalGradientFillConicalFragmentShader>;
 using ConicalGradientFillRadialPipeline = GradientPipelineHandle<ConicalGradientFillRadialFragmentShader>;

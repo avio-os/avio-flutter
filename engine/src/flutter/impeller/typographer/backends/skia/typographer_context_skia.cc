@@ -4,6 +4,8 @@
 
 #include "impeller/typographer/backends/skia/typographer_context_skia.h"
 
+#include "impeller/renderer/render_resource_scope.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -551,6 +553,8 @@ std::shared_ptr<GlyphAtlas> TypographerContextSkia::CreateGlyphAtlas(
     HostBuffer& data_host_buffer,
     const std::shared_ptr<GlyphAtlasContext>& atlas_context,
     const std::vector<RenderableText>& renderable_texts) const {
+  const AvioRasterAllocationCauseScope glyph_operation(
+      AvioRasterAllocationCause::kGlyphAtlasGrowth);
   TRACE_EVENT0("impeller", __FUNCTION__);
   if (!IsValid()) {
     return nullptr;
@@ -682,8 +686,12 @@ std::shared_ptr<GlyphAtlas> TypographerContextSkia::CreateGlyphAtlas(
   descriptor.size = atlas_size;
   descriptor.storage_mode = StorageMode::kDevicePrivate;
   descriptor.usage = TextureUsage::kShaderRead;
-  std::shared_ptr<Texture> new_texture =
-      context.GetResourceAllocator()->CreateTexture(descriptor);
+  std::shared_ptr<Texture> new_texture;
+  {
+    const AvioResourceAllocationScope allocation_scope(
+        AvioRenderResourceKind::kGlyphAtlases);
+    new_texture = context.GetResourceAllocator()->CreateTexture(descriptor);
+  }
   if (!new_texture) {
     return nullptr;
   }

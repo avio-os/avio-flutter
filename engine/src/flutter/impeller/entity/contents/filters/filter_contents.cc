@@ -267,7 +267,11 @@ std::optional<Snapshot> FilterContents::RenderToSnapshot(
          .sampler_descriptor = std::nullopt,
          .msaa_enabled = true,
          .mip_count = options.mip_count,
-         .label = options.label});
+         .label = options.label,
+         .coverage_expansion = options.coverage_expansion,
+         .pixel_aligned = options.pixel_aligned,
+         .depth_stencil_enabled = options.depth_stencil_enabled,
+         .exact_texture_extent = options.exact_texture_extent});
   }
 
   return std::nullopt;

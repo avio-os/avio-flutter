@@ -397,6 +397,11 @@ class CapabilitiesVK final : public Capabilities,
   /// available.
   bool SupportsDmabufImport() const;
 
+  /// Exact resources required by the sample-identity coverage cache. Global
+  /// framebuffer sample limits alone do not establish sampled R8 4x support.
+  bool SupportsAvioCoverageResources() const;
+  bool SupportsAvioContinuousCoverageResources() const;
+
   //----------------------------------------------------------------------------
   /// @brief      Get the fixed compression rate supported by the context for
   ///             the given format and usage.
@@ -432,6 +437,7 @@ class CapabilitiesVK final : public Capabilities,
   size_t minimum_uniform_alignment_ = 256;
   size_t minimum_storage_alignment_ = 256;
   bool supports_compute_subgroups_ = false;
+  bool native_sample_shading_enabled_ = false;
   bool supports_device_transient_textures_ = false;
   bool supports_texture_fixed_rate_compression_ = false;
   ISize max_render_pass_attachment_size_ = ISize{0, 0};

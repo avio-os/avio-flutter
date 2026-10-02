@@ -21,6 +21,8 @@ source_set("common") {
 
   deps = [ "//flutter/fml" ]
 
+  public_deps = [ "//flutter/impeller/core:antialiasing_policy" ]
+
   public_configs = [
     ":flutter_config",
     "//flutter:config",

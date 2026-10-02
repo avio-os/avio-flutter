@@ -11,6 +11,7 @@
 #include "impeller/renderer/backend/vulkan/device_holder_vk.h"
 #include "impeller/renderer/backend/vulkan/vk.h"
 #include "impeller/renderer/pipeline.h"
+#include "impeller/renderer/pipeline_resource_ledger.h"
 
 namespace impeller {
 
@@ -25,7 +26,8 @@ class ComputePipelineVK final
                     vk::UniquePipeline pipeline,
                     vk::UniquePipelineLayout layout,
                     vk::UniqueDescriptorSetLayout descriptor_set_layout,
-                    PipelineKey pipeline_key);
+                    PipelineKey pipeline_key,
+                    AvioPipelineCreationOrigin origin = {});
 
   // |Pipeline|
   ~ComputePipelineVK() override;
@@ -43,6 +45,8 @@ class ComputePipelineVK final
  private:
   friend class PipelineLibraryVK;
 
+  // Declared before native handles so the census decrements after they die.
+  PipelineResourceLedger::Registration resource_registration_;
   std::weak_ptr<DeviceHolderVK> device_holder_;
   vk::UniquePipeline pipeline_;
   vk::UniquePipelineLayout layout_;

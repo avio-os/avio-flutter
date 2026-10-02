@@ -7,18 +7,22 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "fml/closure.h"
 #include "impeller/base/flags.h"
 #include "impeller/base/thread_safety.h"
 #include "impeller/core/allocator.h"
+#include "impeller/core/antialiasing_policy.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/gpu_submission_tracker.h"
 #include "impeller/renderer/capabilities.h"
 #include "impeller/renderer/command_queue.h"
+#include "impeller/renderer/render_resource_report.h"
 #include "impeller/renderer/sampler_library.h"
 
 namespace flutter::testing {
@@ -30,6 +34,7 @@ namespace impeller {
 class ShaderLibrary;
 class CommandBuffer;
 class PipelineLibrary;
+class AvioCoverageRegion;
 
 /// Accounted resources held by a context-owned idle cache.
 struct ResourceCacheUsage {
@@ -142,6 +147,18 @@ class Context {
   ///
   virtual bool IsValid() const = 0;
 
+  // Immutable context policy; embedders without negotiation retain MSAA4.
+  virtual const AvioAntialiasingConfig& GetAvioAntialiasingConfig() const {
+    static constexpr AvioAntialiasingConfig legacy;
+    return legacy;
+  }
+
+  // Report only. Unsupported backends return unavailable, never false zeros.
+  virtual AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool start_new_interval) const {
+    return {};
+  }
+
   //----------------------------------------------------------------------------
   /// @brief      Get the capabilities of Impeller context. All optionally
   ///             supported feature of the platform, client-rendering API, and
@@ -212,6 +229,10 @@ class Context {
   ///             achieved by deleting all owned concurrent message loops.
   ///
   virtual void Shutdown() = 0;
+
+  // Cold teardown proof, queried only after Shutdown. Backends without borrowed
+  // native-device quarantine preserve their existing shutdown contract.
+  virtual bool IsSafeToDestroyNativeResources() const { return true; }
 
   /// Stores a task on the `ContextMTL` that is awaiting access for the GPU.
   ///
@@ -314,6 +335,29 @@ class Context {
 
   const Flags& GetFlags() const { return flags_; }
 
+  // Initialization is serialized once per context. Readers only take a
+  // bounded bookkeeping lock; texture creation never runs on a frame turn.
+  std::shared_ptr<AvioCoverageRegion> GetAvioCoverageRegion() const;
+  // Fixed CPU counters. Areas are integer device bounding-box pixels, never
+  // allocation bytes or inferred shaded-sample counts.
+  void RecordAvioCoverageDraw(AvioCoverageReason reason,
+                              uint64_t bounding_box_pixels);
+  void RecordAvioCoverageClassification(AvioCoverageReason reason,
+                                        uint64_t draw_count,
+                                        uint64_t bounding_box_pixels);
+  void RecordAvioCoverageLayerDemand(uint64_t nominal_bytes,
+                                     uint64_t scope_count);
+  AvioRenderResourceReport GetAvioCoverageUsageReport(
+      bool start_new_interval) const;
+  std::shared_ptr<AvioCoverageRegion> InitializeAvioCoverageRegion(
+      const std::function<std::shared_ptr<AvioCoverageRegion>()>& create,
+      std::function<AvioRenderResourceReport(const AvioCoverageRegion&, bool)>
+          descriptor_report = {});
+  // The immutable cold provider exposes a region's fixed descriptor inventory
+  // without making the backend renderer depend on entity implementation types.
+  AvioRenderResourceReport GetAvioCoverageRegionResourceReport(
+      bool start_new_interval) const;
+
  protected:
   explicit Context(const Flags& flags);
 
@@ -321,6 +365,14 @@ class Context {
   std::vector<std::function<void()>> per_frame_task_;
 
  private:
+  mutable std::mutex avio_coverage_region_mutex_;
+  mutable std::mutex avio_coverage_usage_mutex_;
+  mutable AvioRenderResourceReport avio_coverage_usage_;
+  mutable uint64_t avio_nominal_layer_demand_ = 0;
+  mutable uint64_t avio_classified_scope_count_ = 0;
+  std::shared_ptr<AvioCoverageRegion> avio_coverage_region_;
+  std::function<AvioRenderResourceReport(const AvioCoverageRegion&, bool)>
+      avio_region_descriptor_report_;
   Context(const Context&) = delete;
 
   Context& operator=(const Context&) = delete;

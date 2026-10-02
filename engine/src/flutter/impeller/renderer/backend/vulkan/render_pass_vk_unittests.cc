@@ -90,6 +90,26 @@ TEST(RenderPassVK, BoundedPassRejectsUnknownContentsWithoutWidening) {
   EXPECT_TRUE(GetMockVulkanQueueSubmitBatchCounts().empty());
 }
 
+TEST(RenderPassVK, ExplicitFullAreaInitializesNewLayerWithoutWidening) {
+  auto context = MockVulkanContextBuilder().Build();
+  RenderTargetAllocator allocator(context->GetResourceAllocator());
+  auto target = allocator.CreateOffscreen(*context, {100, 100}, 1);
+  ASSERT_TRUE(target.SetRenderArea(IRect::MakeSize(ISize(100, 100))));
+  ASSERT_TRUE(target.SetContentRect(IRect::MakeSize(ISize(40, 30))));
+  auto buffer = context->CreateCommandBuffer();
+  auto pass = buffer->CreateRenderPass(target);
+  ASSERT_TRUE(pass);
+  const auto& areas =
+      GetRecordedRenderAreas(CommandBufferVK::Cast(*buffer).GetCommandBuffer());
+  ASSERT_EQ(areas.size(), 1u);
+  EXPECT_EQ(areas[0].offset.x, 0);
+  EXPECT_EQ(areas[0].offset.y, 0);
+  EXPECT_EQ(areas[0].extent.width, 100u);
+  EXPECT_EQ(areas[0].extent.height, 100u);
+  EXPECT_EQ(target.GetContentRect(), IRect::MakeSize(ISize(40, 30)));
+  EXPECT_TRUE(pass->EncodeCommands());
+}
+
 TEST(RenderPassVK, BoundedAndFullPassesDoNotShareIncompatibleCachedPolicy) {
   auto context = MockVulkanContextBuilder().Build();
   RenderTargetAllocator allocator(context->GetResourceAllocator());
@@ -225,6 +245,10 @@ TEST(RenderPassVK, TransfersExternalRenderTargetOwnership) {
 
   auto& barriers = GetImageMemoryBarriers(
       CommandBufferVK::Cast(*command_buffer).GetCommandBuffer());
+  // Ending one pass does not hand the image back while the same command
+  // buffer can still seed, replay, and copy later coverage tiles.
+  ASSERT_EQ(barriers.size(), 1u);
+  ASSERT_TRUE(CommandBufferVK::Cast(*command_buffer).EndCommandBuffer());
   ASSERT_EQ(barriers.size(), 2u);
   const uint32_t local_family =
       static_cast<uint32_t>(context->GetGraphicsQueue()->GetIndex().family);
@@ -234,9 +258,9 @@ TEST(RenderPassVK, TransfersExternalRenderTargetOwnership) {
   EXPECT_EQ(barriers[0].oldLayout, VK_IMAGE_LAYOUT_GENERAL);
   EXPECT_EQ(barriers[0].newLayout, VK_IMAGE_LAYOUT_GENERAL);
   EXPECT_EQ(barriers[0].subresourceRange.layerCount, 1u);
-  EXPECT_EQ(barriers[0].dstAccessMask,
-            VkAccessFlags{VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT});
+  EXPECT_EQ(
+      barriers[0].dstAccessMask,
+      VkAccessFlags{VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT});
 
   EXPECT_EQ(barriers[1].srcQueueFamilyIndex, local_family);
   EXPECT_EQ(barriers[1].dstQueueFamilyIndex, VK_QUEUE_FAMILY_FOREIGN_EXT);
@@ -244,6 +268,124 @@ TEST(RenderPassVK, TransfersExternalRenderTargetOwnership) {
   EXPECT_EQ(barriers[1].newLayout, VK_IMAGE_LAYOUT_GENERAL);
   EXPECT_EQ(barriers[1].subresourceRange.layerCount, 1u);
   EXPECT_EQ(barriers[1].dstAccessMask, VkAccessFlags{0});
+}
+
+TEST(RenderPassVK, ExternalParentRemainsOwnedAcrossSeedAndTileCopies) {
+  auto context = MockVulkanContextBuilder().Build();
+  TextureDescriptor desc;
+  desc.size = ISize(32, 32);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+  desc.storage_mode = StorageMode::kDevicePrivate;
+  desc.usage = TextureUsage::kRenderTarget | TextureUsage::kShaderRead;
+  auto allocation = context->GetResourceAllocator()->CreateTexture(desc);
+  ASSERT_TRUE(allocation);
+  const auto& image = TextureVK::Cast(*allocation);
+  auto source = std::make_shared<ExternalRenderTargetSourceVK>(
+      image.GetImage(), image.GetImageView(), desc);
+  auto parent = std::make_shared<TextureVK>(context, source);
+  RenderTarget target;
+  ColorAttachment colour;
+  colour.texture = parent;
+  colour.load_action = LoadAction::kClear;
+  colour.store_action = StoreAction::kStore;
+  target.SetColorAttachment(colour, 0);
+  auto buffer = context->CreateCommandBuffer();
+  auto& buffer_vk = CommandBufferVK::Cast(*buffer);
+  auto initialize = buffer->CreateRenderPass(target);
+  ASSERT_TRUE(initialize);
+  ASSERT_TRUE(initialize->EncodeCommands());
+  ASSERT_TRUE(buffer_vk.HasPreparedExternalImage(*source));
+  for (int tile = 0; tile < 2; tile++) {
+    auto blit = buffer->CreateBlitPass();
+    ASSERT_TRUE(blit);
+    ASSERT_TRUE(blit->ConvertTextureToShaderRead(parent));
+    EXPECT_EQ(source->GetLayout(), vk::ImageLayout::eShaderReadOnlyOptimal);
+    // A freshly resolved tile is copied back after the parent shader read.
+    auto resolved = context->GetResourceAllocator()->CreateTexture(desc);
+    ASSERT_TRUE(resolved);
+    TextureVK::Cast(*resolved).SetLayoutWithoutEncoding(
+        vk::ImageLayout::eShaderReadOnlyOptimal);
+    ASSERT_TRUE(blit->AddCopy(resolved, parent, IRect::MakeXYWH(0, 0, 8, 8),
+                              IPoint{tile * 8, 0}));
+    ASSERT_TRUE(blit->EncodeCommands());
+  }
+  const auto raw = buffer_vk.GetCommandBuffer();
+  const auto& recorded = GetRecordedImageBarriers(raw);
+  uint32_t acquires = 0;
+  uint32_t releases = 0;
+  uint32_t shader_reads_before_transfer = 0;
+  for (const auto& entry : recorded) {
+    const auto& barrier = entry.barrier;
+    if (barrier.image != static_cast<VkImage>(source->GetImage())) {
+      continue;
+    }
+    acquires += barrier.srcQueueFamilyIndex == VK_QUEUE_FAMILY_FOREIGN_EXT;
+    releases += barrier.dstQueueFamilyIndex == VK_QUEUE_FAMILY_FOREIGN_EXT;
+    if (barrier.oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+        barrier.newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+      shader_reads_before_transfer++;
+      EXPECT_NE(entry.source_stage & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u);
+      EXPECT_NE(barrier.srcAccessMask & VK_ACCESS_MEMORY_READ_BIT, 0u);
+      EXPECT_EQ(entry.destination_stage, VK_PIPELINE_STAGE_TRANSFER_BIT);
+      EXPECT_EQ(barrier.dstAccessMask, VK_ACCESS_TRANSFER_WRITE_BIT);
+    }
+  }
+  EXPECT_EQ(acquires, 1u);
+  EXPECT_EQ(releases, 0u);
+  EXPECT_EQ(shader_reads_before_transfer, 2u);
+  ASSERT_TRUE(buffer_vk.EndCommandBuffer());
+  ASSERT_GE(recorded.size(), 2u);
+  const auto& transition = recorded[recorded.size() - 2].barrier;
+  EXPECT_EQ(transition.oldLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  EXPECT_EQ(transition.newLayout, VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(transition.srcQueueFamilyIndex, VK_QUEUE_FAMILY_IGNORED);
+  const auto& release = recorded.back();
+  EXPECT_EQ(release.barrier.oldLayout, VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(release.barrier.newLayout, VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(release.barrier.dstQueueFamilyIndex, VK_QUEUE_FAMILY_FOREIGN_EXT);
+  EXPECT_NE(release.source_stage & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u);
+  EXPECT_EQ(release.destination_stage, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  EXPECT_EQ(release.barrier.dstAccessMask, 0u);
+  EXPECT_EQ(source->GetLayout(), vk::ImageLayout::eGeneral);
+}
+
+TEST(RenderPassVK, DeferredReleaseUsesItsOwnCommandBufferLayout) {
+  auto context = MockVulkanContextBuilder().Build();
+  TextureDescriptor desc;
+  desc.size = ISize(8, 8);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+  desc.usage = TextureUsage::kRenderTarget | TextureUsage::kShaderRead;
+  auto allocation = context->GetResourceAllocator()->CreateTexture(desc);
+  ASSERT_TRUE(allocation);
+  const auto& image = TextureVK::Cast(*allocation);
+  auto source = std::make_shared<ExternalRenderTargetSourceVK>(
+      image.GetImage(), image.GetImageView(), desc);
+  auto external = std::make_shared<TextureVK>(context, source);
+  auto first = context->CreateCommandBuffer();
+  auto second = context->CreateCommandBuffer();
+  auto first_blit = first->CreateBlitPass();
+  auto second_blit = second->CreateBlitPass();
+  ASSERT_TRUE(first_blit);
+  ASSERT_TRUE(second_blit);
+  ASSERT_TRUE(first_blit->ConvertTextureToShaderRead(external));
+  auto input = context->GetResourceAllocator()->CreateTexture(desc);
+  ASSERT_TRUE(input);
+  ASSERT_TRUE(second_blit->AddCopy(input, external));
+  EXPECT_EQ(source->GetLayout(), vk::ImageLayout::eTransferDstOptimal);
+  auto& first_vk = CommandBufferVK::Cast(*first);
+  auto& second_vk = CommandBufferVK::Cast(*second);
+  ASSERT_TRUE(first_vk.EndCommandBuffer());
+  const auto& first_barriers =
+      GetImageMemoryBarriers(first_vk.GetCommandBuffer());
+  ASSERT_GE(first_barriers.size(), 2u);
+  EXPECT_EQ(first_barriers[first_barriers.size() - 2].oldLayout,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  ASSERT_TRUE(second_vk.EndCommandBuffer());
+  const auto& second_barriers =
+      GetImageMemoryBarriers(second_vk.GetCommandBuffer());
+  ASSERT_GE(second_barriers.size(), 2u);
+  EXPECT_EQ(second_barriers[second_barriers.size() - 2].oldLayout,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 }
 
 }  // namespace testing

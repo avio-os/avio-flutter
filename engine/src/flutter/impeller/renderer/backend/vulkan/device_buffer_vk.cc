@@ -13,13 +13,15 @@ DeviceBufferVK::DeviceBufferVK(DeviceBufferDescriptor desc,
                                std::weak_ptr<Context> context,
                                UniqueBufferVMA buffer,
                                VmaAllocationInfo info,
-                               bool is_host_coherent)
+                               bool is_host_coherent,
+                               AllocatedBufferLedger::Registration registration)
     : DeviceBuffer(desc),
       context_(std::move(context)),
       resource_(ContextVK::Cast(*context_.lock().get()).GetResourceManager(),
                 BufferResource{
-                    std::move(buffer),  //
-                    info                //
+                    std::move(buffer),       //
+                    info,                    //
+                    std::move(registration)  //
                 }),
       is_host_coherent_(is_host_coherent) {}
 

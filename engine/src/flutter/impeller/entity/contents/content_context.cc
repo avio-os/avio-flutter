@@ -5,26 +5,37 @@
 #include "impeller/entity/contents/content_context.h"
 
 #include <algorithm>
+#include <atomic>
 #include <format>
 #include <memory>
 #include <utility>
 #include <vector>
 
 #include "flutter/display_list/image/dl_image.h"
+#include "fml/closure.h"
 #include "fml/trace_event.h"
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/texture_descriptor.h"
+#include "impeller/entity/avio_coverage_region.h"
+#include "impeller/entity/contents/avio_pipeline_prewarm.h"
+#include "impeller/entity/contents/coverage_path_atlas.h"
 #include "impeller/entity/contents/framebuffer_blend_contents.h"
 #include "impeller/entity/contents/pipelines.h"
+#include "impeller/entity/contents/porter_duff_blend_coefficients.h"
 #include "impeller/entity/contents/text_shadow_cache.h"
+#include "impeller/entity/coverage_tiled_render_pass.h"
 #include "impeller/entity/entity.h"
 #include "impeller/entity/render_target_cache.h"
 #include "impeller/renderer/command_buffer.h"
+#include "impeller/renderer/continuous_coverage_pipeline.h"
 #include "impeller/renderer/pipeline.h"
 #include "impeller/renderer/pipeline_descriptor.h"
 #include "impeller/renderer/pipeline_library.h"
+#include "impeller/renderer/render_resource_scope.h"
 #include "impeller/renderer/render_target.h"
+#include "impeller/renderer/sampler_library.h"
+#include "impeller/renderer/shader_function.h"
 #include "impeller/renderer/texture_util.h"
 #include "impeller/tessellator/tessellator.h"
 #include "impeller/typographer/typographer_context.h"
@@ -182,7 +193,7 @@ RenderPipelineHandleT* CreateIfNeeded(
     Variants<RenderPipelineHandleT>& container,
     ContentContextOptions opts,
     PipelineCompileQueue* compile_queue) {
-  if (!context->IsValid()) {
+  if (!context->CanCreatePipelines()) {
     return nullptr;
   }
 
@@ -228,7 +239,15 @@ PipelineRef GetPipeline(const ContentContext* context,
   if (!pipeline) {
     return raw_ptr<Pipeline<PipelineDescriptor>>();
   }
-  return raw_ptr(pipeline->WaitAndGet(compile_queue));
+  auto result = pipeline->WaitAndGet(compile_queue);
+  if (result &&
+      context->GetContext()->GetAvioAntialiasingConfig().UsesCoverage() &&
+      !IsAvioRasterFrameActive()) {
+    if (!context->WarmAvioPipelineVariants(result)) {
+      return raw_ptr<Pipeline<PipelineDescriptor>>();
+    }
+  }
+  return raw_ptr(result);
 }
 
 }  // namespace
@@ -253,6 +272,10 @@ struct ContentContext::Pipelines {
   Variants<BorderMaskBlurPipeline> border_mask_blur;
   Variants<CirclePipeline> circle;
   Variants<ClipPipeline> clip;
+#ifdef IMPELLER_ENABLE_VULKAN
+  Variants<CoverageMaskPipeline> coverage_mask;
+  Variants<CoverageQuadPipeline> coverage_quad;
+#endif
   Variants<ColorMatrixColorFilterPipeline> color_matrix_color_filter;
   Variants<ConicalGradientFillConicalPipeline> conical_gradient_fill;
   Variants<ConicalGradientFillRadialPipeline> conical_gradient_fill_radial;
@@ -452,6 +475,14 @@ void ContentContextOptions::ApplyToPipelineDescriptor(
       color0.src_alpha_blend_factor = BlendFactor::kZero;
       color0.src_color_blend_factor = BlendFactor::kZero;
       break;
+    case BlendMode::kScreen:
+      // Premultiplied screen: src + dst * (1 - src). RGB uses the
+      // source color coefficient; alpha uses the source alpha coefficient.
+      color0.dst_alpha_blend_factor = BlendFactor::kOneMinusSourceAlpha;
+      color0.dst_color_blend_factor = BlendFactor::kOneMinusSourceColor;
+      color0.src_alpha_blend_factor = BlendFactor::kOne;
+      color0.src_color_blend_factor = BlendFactor::kOne;
+      break;
     default:
       FML_UNREACHABLE();
   }
@@ -460,11 +491,15 @@ void ContentContextOptions::ApplyToPipelineDescriptor(
   if (!has_depth_stencil_attachments) {
     desc.ClearDepthAttachment();
     desc.ClearStencilAttachments();
+  } else if (is_stencil_only) {
+    desc.ClearDepthAttachment();
+    desc.SetStencilPixelFormat(PixelFormat::kS8UInt);
   }
 
   auto maybe_stencil = desc.GetFrontStencilAttachmentDescriptor();
   auto maybe_depth = desc.GetDepthStencilAttachmentDescriptor();
-  FML_DCHECK(has_depth_stencil_attachments == maybe_depth.has_value())
+  FML_DCHECK((has_depth_stencil_attachments && !is_stencil_only) ==
+             maybe_depth.has_value())
       << "Depth attachment doesn't match expected pipeline state. "
          "has_depth_stencil_attachments="
       << has_depth_stencil_attachments;
@@ -527,28 +562,6 @@ void ContentContextOptions::ApplyToPipelineDescriptor(
 
   desc.SetPrimitiveType(primitive_type);
   desc.SetPolygonMode(PolygonMode::kFill);
-}
-
-std::array<std::vector<Scalar>, 15> GetPorterDuffSpecConstants(
-    bool supports_decal) {
-  Scalar x = supports_decal ? 1 : 0;
-  return {{
-      {x, 0, 0, 0, 0, 0},    // Clear
-      {x, 1, 0, 0, 0, 0},    // Source
-      {x, 0, 0, 1, 0, 0},    // Destination
-      {x, 1, 0, 1, -1, 0},   // SourceOver
-      {x, 1, -1, 1, 0, 0},   // DestinationOver
-      {x, 0, 1, 0, 0, 0},    // SourceIn
-      {x, 0, 0, 0, 1, 0},    // DestinationIn
-      {x, 1, -1, 0, 0, 0},   // SourceOut
-      {x, 0, 0, 1, -1, 0},   // DestinationOut
-      {x, 0, 1, 1, -1, 0},   // SourceATop
-      {x, 1, -1, 0, 1, 0},   // DestinationATop
-      {x, 1, -1, 1, -1, 0},  // Xor
-      {x, 1, 0, 1, 0, 0},    // Plus
-      {x, 0, 0, 0, 0, 1},    // Modulate
-      {x, 0, 0, 1, 0, -1},   // Screen
-  }};
 }
 
 namespace {
@@ -711,6 +724,43 @@ ContentContext::ContentContext(
     return;
   }
 
+  AvioPipelineInitialization::Scope initialization(pipeline_initialization_);
+
+  if (context_->GetAvioAntialiasingConfig().UsesCoverage()) {
+    sample4_clip_pool_ = std::make_unique<AvioSample4ClipPool>();
+    coverage_recorder_storage_ = CoverageTiledRenderPass::CreateStorage();
+    if (!coverage_recorder_storage_) {
+      return;
+    }
+  }
+
+  if (context_->GetAvioAntialiasingConfig().continuous_requested_classes != 0) {
+    continuous_clip_pool_ = std::make_unique<AvioContinuousClipPool>();
+  }
+  if (context_->GetAvioAntialiasingConfig().UsesCoverage() &&
+      context_->GetBackendType() == Context::BackendType::kVulkan) {
+    const size_t blocks =
+        context_->GetAvioAntialiasingConfig().continuous_requested_classes != 0
+            ? 3u
+            : 1u;
+    continuous_data_host_buffer_ = HostBuffer::CreateBounded(
+        context_->GetResourceAllocator(), context_->GetIdleWaiter(),
+        context_->GetCapabilities()->GetMinimumStorageBufferAlignment(),
+        blocks);
+    if (!continuous_data_host_buffer_) {
+      VALIDATION_LOG << "Could not prewarm fixed continuous shader storage.";
+      return;
+    }
+    SamplerDescriptor nearest;
+    auto pixel_prefix = nearest;
+    pixel_prefix.mip_filter = MipFilter::kBase;
+    if (!context_->GetSamplerLibrary()->GetSampler(nearest) ||
+        !context_->GetSamplerLibrary()->GetSampler(pixel_prefix)) {
+      VALIDATION_LOG << "Could not prewarm fixed coverage samplers.";
+      return;
+    }
+  }
+
   // On most backends, indexes and other data can be allocated into the same
   // buffers. However, some backends (namely WebGL) require indexes used in
   // indexed draws to be allocated separately from other data. For those
@@ -732,16 +782,25 @@ ContentContext::ContentContext(
     std::array<uint8_t, 4> data = Color::BlackTransparent().ToR8G8B8A8();
     std::shared_ptr<CommandBuffer> cmd_buffer =
         GetContext()->CreateCommandBuffer();
-    std::shared_ptr<BlitPass> blit_pass = cmd_buffer->CreateBlitPass();
+    std::shared_ptr<BlitPass> blit_pass =
+        cmd_buffer ? cmd_buffer->CreateBlitPass() : nullptr;
+    if (!empty_texture_ || !cmd_buffer || !blit_pass) {
+      VALIDATION_LOG << "Failed to create required empty texture resources.";
+      return;
+    }
     HostBuffer& data_host_buffer = GetTransientsDataBuffer();
     BufferView buffer_view = data_host_buffer.Emplace(data);
-    blit_pass->AddCopy(buffer_view, empty_texture_);
+    if (!buffer_view || !blit_pass->AddCopy(buffer_view, empty_texture_)) {
+      VALIDATION_LOG << "Failed to initialize the required empty texture.";
+      return;
+    }
 
     if (!blit_pass->EncodeCommands() || !GetContext()
                                              ->GetCommandQueue()
                                              ->Submit({std::move(cmd_buffer)})
                                              .ok()) {
       VALIDATION_LOG << "Failed to create empty texture.";
+      return;
     }
   }
 
@@ -776,7 +835,13 @@ ContentContext::ContentContext(
     pipelines_->texture.CreateDefault(*context_, options);
     pipelines_->fast_gradient.CreateDefault(*context_, options);
     pipelines_->circle.CreateDefault(*context_, options);
-    if (context_->GetFlags().use_sdfs) {
+    const bool continuous_sdf =
+        context_->GetAvioAntialiasingConfig().RequestsContinuous(
+            AvioContinuousClass::kArc) ||
+        context_->GetAvioAntialiasingConfig().RequestsContinuous(
+            AvioContinuousClass::kBorderedRoundedRect);
+    if (context_->GetFlags().use_sdfs || continuous_sdf) {
+      // Negotiated arc/border consumers use UberSDF independently of EN50.
       // UberSDF reads gradient stops from a storage buffer where the backend
       // has one, and a gradient ramp texture otherwise.
       if (context_->GetCapabilities()->SupportsSSBO()) {
@@ -784,6 +849,8 @@ ContentContext::ContentContext(
       } else {
         pipelines_->uber_sdf.CreateDefault(*context_, options);
       }
+    }
+    if (context_->GetFlags().use_sdfs) {
       pipelines_->complex_rse.CreateDefault(*context_, options);
     }
 
@@ -844,6 +911,8 @@ ContentContext::ContentContext(
     }
     clip_pipeline_descriptor->SetColorAttachmentDescriptors(
         std::move(clip_color_attachments));
+    // Preserve the exact no-colour-write descriptor for async clip variants.
+    pipelines_->clip.SetDefaultDescriptor(clip_pipeline_descriptor);
     pipelines_->clip.SetDefault(
         options,
         std::make_unique<ClipPipeline>(*context_, clip_pipeline_descriptor));
@@ -1019,27 +1088,228 @@ ContentContext::ContentContext(
 #endif  // IMPELLER_ENABLE_OPENGLES
   }
 
-  // Avio's Shell and greeter render with SDFs. Queue the variants their SDF,
-  // color source and backdrop paths draw with behind the defaults, so their
-  // first use does not compile them on the raster thread. Nothing here waits;
-  // a use that arrives before its compile finished waits for it or, while it
-  // is still queued, takes the job over, as for the defaults.
-  if (context_->GetFlags().use_sdfs) {
+  if (UsesAvioCoverage()) {
+    std::string error;
+    const auto& policy = context_->GetAvioAntialiasingConfig();
+    const auto region = context_->InitializeAvioCoverageRegion(
+        [&] {
+          AvioCoverageRegionConfig config;
+          config.coverage_max_bytes = policy.coverage_region_max_bytes;
+          config.layer_max_bytes = policy.layer_region_max_bytes;
+          config.colour_format =
+              context_->GetCapabilities()->GetDefaultColorFormat();
+          config.colour_depth_stencil_format =
+              context_->GetCapabilities()->GetDefaultDepthStencilFormat();
+          if (policy.continuous_requested_classes != 0) {
+            config.continuous_destination_prefix = true;
+            // D32S8 may require eight physical bytes per texel. Reserve the
+            // additional native4 prefix inside the same 8 MiB coverage bank;
+            // exact allocation requirements still fail admission if larger.
+            config.colour_size = {224, 224};
+          }
+          if (context_->GetBackendType() == Context::BackendType::kOpenGLES) {
+            config.cache_native_masks = false;
+            config.require_exact_allocated_bytes = false;
+          }
+          return AvioCoverageRegion::Create(context_->GetResourceAllocator(),
+                                            config, &error);
+        },
+        [](const AvioCoverageRegion& fixed_region, bool reset_interval) {
+          return fixed_region.GetDescriptorResourceReport(reset_interval);
+        });
+    if (!region) {
+      VALIDATION_LOG << "Could not initialize negotiated coverage regions: "
+                     << error;
+      return;
+    }
+    if (!region->InitializeColourOnce([&] {
+          auto commands = context_->CreateCommandBuffer();
+          auto initialize =
+              commands
+                  ? commands->CreateRenderPass(region->GetColourIslandTarget())
+                  : nullptr;
+          return initialize && initialize->EncodeCommands() &&
+                 context_->EnqueueCommandBuffer(std::move(commands));
+        })) {
+      VALIDATION_LOG << "Could not initialize the bounded colour island.";
+      return;
+    }
+    if (context_->GetBackendType() == Context::BackendType::kOpenGLES) {
+      // GL storage is allocated lazily when attached. Realize every fixed
+      // warm layer (and prefix scratch) here, outside the raster-frame scope.
+      auto commands = context_->CreateCommandBuffer();
+      if (!commands)
+        return;
+      for (auto target : region->GetWarmLayerTargets()) {
+        auto clear = commands->CreateRenderPass(target);
+        if (!clear || !clear->EncodeCommands())
+          return;
+      }
+      RenderTarget scratch;
+      ColorAttachment colour;
+      colour.texture = region->GetColourSeedTexture();
+      colour.load_action = LoadAction::kClear;
+      colour.store_action = StoreAction::kStore;
+      scratch.SetColorAttachment(colour, 0);
+      auto clear = commands->CreateRenderPass(scratch);
+      if (!clear || !clear->EncodeCommands() ||
+          !context_->EnqueueCommandBuffer(std::move(commands)) ||
+          !context_->FlushCommandBuffers())
+        return;
+    }
+    if (region->CachesNativeMasks()) {
+      coverage_path_atlas_ =
+          std::make_unique<CoveragePathAtlas>(region, context_);
+      if (!coverage_path_atlas_->Initialize()) {
+        VALIDATION_LOG << "Could not initialize native coverage mask samples.";
+        return;
+      }
+#ifdef IMPELLER_ENABLE_VULKAN
+      auto descriptor =
+          CoverageMaskPipeline::Builder::MakeDefaultPipelineDescriptor(
+              *context_);
+      if (!descriptor.has_value()) {
+        VALIDATION_LOG << "Native four-sample mask shader is unavailable.";
+        return;
+      }
+      auto mask_options = options_trianglestrip;
+      mask_options.blend_mode = BlendMode::kDst;
+      mask_options.stencil_mode =
+          ContentContextOptions::StencilMode::kStencilIncrementAll;
+      mask_options.depth_compare = CompareFunction::kGreaterEqual;
+      mask_options.ApplyToPipelineDescriptor(*descriptor);
+      pipelines_->coverage_mask.SetDefault(
+          mask_options,
+          std::make_unique<CoverageMaskPipeline>(*context_, descriptor));
+      // Native mask replay and binary R8 winding variants are warmed before the
+      // first raster frame. No first-use shader compilation is hidden in a
+      // draw.
+      if (!GetCoverageMaskPipeline(mask_options)) {
+        return;
+      }
+      auto quad_descriptor =
+          CoverageQuadPipeline::Builder::MakeDefaultPipelineDescriptor(
+              *context_);
+      if (!quad_descriptor.has_value()) {
+        VALIDATION_LOG << "Native analytic quad shader is unavailable.";
+        return;
+      }
+      mask_options.ApplyToPipelineDescriptor(*quad_descriptor);
+      pipelines_->coverage_quad.SetDefault(
+          mask_options,
+          std::make_unique<CoverageQuadPipeline>(*context_, quad_descriptor));
+      if (!GetCoverageQuadPipeline(mask_options)) {
+        return;
+      }
+      // Deep stacks replay through the fixed R8 native4 scratch with borrowed
+      // D32S8. Every variant is provisioned before raster, including difference
+      // depth writes and the final binary fill. Persistent path masks
+      // separately use their original atlas S8-only variants.
+      auto scratch_options = mask_options;
+      scratch_options.color_attachment_pixel_format = PixelFormat::kR8UNormInt;
+      scratch_options.is_stencil_only = false;
+      if (!GetCoverageMaskPipeline(scratch_options) ||
+          !GetCoverageQuadPipeline(scratch_options)) {
+        return;
+      }
+      for (auto primitive :
+           {PrimitiveType::kTriangle, PrimitiveType::kTriangleFan,
+            PrimitiveType::kTriangleStrip}) {
+        if (primitive == PrimitiveType::kTriangleFan &&
+            !GetDeviceCapabilities().SupportsTriangleFan()) {
+          continue;
+        }
+        scratch_options.primitive_type = primitive;
+        for (bool writes_depth : {false, true}) {
+          scratch_options.depth_write_enabled = writes_depth;
+          const auto modes =
+              writes_depth
+                  ? std::
+                        array{ContentContextOptions::StencilMode::kIgnore,
+                              ContentContextOptions::StencilMode::kCoverCompare,
+                              ContentContextOptions::StencilMode::
+                                  kCoverCompareInverted}
+                  : std::array{
+                        ContentContextOptions::StencilMode::
+                            kStencilIncrementAll,
+                        ContentContextOptions::StencilMode::kStencilNonZeroFill,
+                        ContentContextOptions::StencilMode::
+                            kStencilEvenOddFill};
+          for (auto mode : modes) {
+            if (writes_depth && primitive != PrimitiveType::kTriangleStrip &&
+                mode != ContentContextOptions::StencilMode::kIgnore) {
+              continue;  // stencil covers are always one triangle-strip quad
+            }
+            scratch_options.stencil_mode = mode;
+            if (!GetClipPipeline(scratch_options)) {
+              return;
+            }
+          }
+        }
+      }
+      scratch_options.primitive_type = PrimitiveType::kTriangleStrip;
+      scratch_options.blend_mode = BlendMode::kSrc;
+      scratch_options.stencil_mode =
+          ContentContextOptions::StencilMode::kIgnore;
+      scratch_options.depth_write_enabled = false;
+      if (!GetSolidFillPipeline(scratch_options)) {
+        return;
+      }
+      auto writer_options = mask_options;
+      writer_options.color_attachment_pixel_format = PixelFormat::kR8UNormInt;
+      writer_options.is_stencil_only = true;
+      for (auto primitive :
+           {PrimitiveType::kTriangle, PrimitiveType::kTriangleFan,
+            PrimitiveType::kTriangleStrip}) {
+        if (primitive == PrimitiveType::kTriangleFan &&
+            !GetDeviceCapabilities().SupportsTriangleFan()) {
+          continue;
+        }
+        writer_options.primitive_type = primitive;
+        writer_options.blend_mode = BlendMode::kDst;
+        for (auto mode :
+             {ContentContextOptions::StencilMode::kStencilNonZeroFill,
+              ContentContextOptions::StencilMode::kStencilEvenOddFill}) {
+          writer_options.stencil_mode = mode;
+          if (!GetClipPipeline(writer_options)) {
+            return;
+          }
+        }
+        writer_options.blend_mode = BlendMode::kSrcOver;
+        for (auto mode : {ContentContextOptions::StencilMode::kIgnore,
+                          ContentContextOptions::StencilMode::kCoverCompare}) {
+          writer_options.stencil_mode = mode;
+          if (!GetSolidFillPipeline(writer_options)) {
+            return;
+          }
+        }
+      }
+#endif
+    }
+    if (!PrewarmAvioCoveragePipelines()) {
+      VALIDATION_LOG << "Could not prewarm negotiated coverage pipelines.";
+      return;
+    }
+  }
+  // Preserve main's asynchronous SDF catalogue for legacy targets. Coverage
+  // uses its own physical target catalogue and validates every queued source
+  // and required derivative before publishing Ready.
+  if (context_->GetFlags().use_sdfs &&
+      !context_->GetAvioAntialiasingConfig().UsesCoverage()) {
     TRACE_EVENT0("impeller", "ContentContext::PrewarmPipelineVariants");
     for (const PrewarmVariant& variant : MakeAvioPrewarmVariants(
              MakeAvioPrewarmTargets(*context_->GetCapabilities()))) {
       PrewarmPipelineVariant(variant);
     }
   }
-
-  is_valid_ = true;
   InitializeCommonlyUsedShadersIfNeeded();
+  initialization.Complete();
 }
 
 ContentContext::~ContentContext() = default;
 
 bool ContentContext::IsValid() const {
-  return is_valid_;
+  return pipeline_initialization_.IsReady();
 }
 
 std::shared_ptr<Texture> ContentContext::GetEmptyTexture() const {
@@ -1053,9 +1323,31 @@ fml::StatusOr<RenderTarget> ContentContext::MakeSubpass(
     const SubpassCallback& subpass_callback,
     bool msaa_enabled,
     bool depth_stencil_enabled,
-    int32_t mip_count) const {
+    int32_t mip_count,
+    bool exact_texture_extent) const {
   const std::shared_ptr<Context>& context = GetContext();
   RenderTarget subpass_target;
+
+  if (UsesAvioCoverage()) {
+    if (!BeginAvioRasterFrame()) {
+      return fml::Status(fml::StatusCode::kUnknown,
+                         "Coverage frame initialization failed");
+    }
+    fml::ScopedCleanupClosure close_frame([this] { EndAvioRasterFrame(); });
+    const auto allocation = GetAvioCoverageRegion()->AcquireLayer(
+        texture_size, mip_count, exact_texture_extent);
+    if (!allocation.lease) {
+      return fml::Status(fml::StatusCode::kUnknown,
+                         "Coverage layer allocation failed");
+    }
+    subpass_target = allocation.lease->GetRenderTarget();
+    subpass_target.SetContentRect(allocation.lease->GetContentRect());
+    subpass_target.SetResourceOwner(allocation.lease);
+    // Clear the whole physical bank image. Filter taps outside the logical
+    // rectangle must see transparent pixels rather than the previous tenant.
+    return MakeSubpass(label, subpass_target, command_buffer, subpass_callback,
+                       msaa_enabled || depth_stencil_enabled);
+  }
 
   std::optional<RenderTarget::AttachmentConfig> depth_stencil_config =
       depth_stencil_enabled ? RenderTarget::kDefaultStencilAttachmentConfig
@@ -1087,7 +1379,8 @@ fml::StatusOr<RenderTarget> ContentContext::MakeSubpass(
     std::string_view label,
     const RenderTarget& subpass_target,
     const std::shared_ptr<CommandBuffer>& command_buffer,
-    const SubpassCallback& subpass_callback) const {
+    const SubpassCallback& subpass_callback,
+    bool coverage_antialiasing) const {
   const std::shared_ptr<Context>& context = GetContext();
 
   auto subpass_texture = subpass_target.GetRenderTargetTexture();
@@ -1095,7 +1388,28 @@ fml::StatusOr<RenderTarget> ContentContext::MakeSubpass(
     return fml::Status(fml::StatusCode::kUnknown, "");
   }
 
-  auto sub_renderpass = command_buffer->CreateRenderPass(subpass_target);
+  const bool coverage_parent =
+      UsesAvioCoverage() &&
+      subpass_target.GetSampleCount() == SampleCount::kCount1;
+  if (UsesAvioCoverage() && !coverage_parent &&
+      subpass_target.GetColorAttachment(0).texture !=
+          GetAvioCoverageRegion()
+              ->GetCoverageAtlasTarget()
+              .GetColorAttachment(0)
+              .texture) {
+    return fml::Status(fml::StatusCode::kUnknown,
+                       "Unbounded multisample coverage subpass rejected");
+  }
+  std::shared_ptr<RenderPass> sub_renderpass;
+  if (coverage_parent) {
+    sub_renderpass = coverage_antialiasing
+                         ? CoverageTiledRenderPass::Make(*this, subpass_target,
+                                                         command_buffer)
+                         : CoverageTiledRenderPass::MakeDirect1x(
+                               *this, subpass_target, command_buffer);
+  } else {
+    sub_renderpass = command_buffer->CreateRenderPass(subpass_target);
+  }
   if (!sub_renderpass) {
     return fml::Status(fml::StatusCode::kUnknown, "");
   }
@@ -1166,7 +1480,122 @@ void ContentContext::ClearCachedRuntimeEffectPipeline(
   }
 }
 
+bool ContentContext::WarmAvioPipelineVariants(
+    const std::shared_ptr<Pipeline<PipelineDescriptor>>& source) const {
+  if (!source) {
+    return false;
+  }
+  if (IsAvioRasterFrameActive() ||
+      !context_->GetAvioAntialiasingConfig().UsesCoverage() ||
+      context_->GetBackendType() != Context::BackendType::kVulkan) {
+    return true;
+  }
+  std::scoped_lock lock(avio_pipeline_variants_mutex_);
+  const size_t hash = (reinterpret_cast<uintptr_t>(source.get()) >> 4u) &
+                      (kAvioPipelineVariantCapacity - 1u);
+  for (size_t probe = 0; probe < kAvioPipelineVariantCapacity; ++probe) {
+    auto& entry =
+        avio_pipeline_variants_[(hash + probe) % kAvioPipelineVariantCapacity];
+    if (entry.source == source) {
+      return entry.ready;
+    }
+    if (entry.source) {
+      continue;
+    }
+    entry.source = source;
+    entry.ready = true;
+    const auto fragment =
+        source->GetDescriptor().GetEntrypointForStage(ShaderStage::kFragment);
+    const auto name = fragment ? fragment->GetName() : std::string{};
+    const auto* colour =
+        source->GetDescriptor().GetColorAttachmentDescriptor(0);
+    const bool preserves_colour =
+        colour && colour->blending_enabled &&
+        colour->src_color_blend_factor == BlendFactor::kZero &&
+        colour->dst_color_blend_factor == BlendFactor::kOne &&
+        colour->src_alpha_blend_factor == BlendFactor::kZero &&
+        colour->dst_alpha_blend_factor == BlendFactor::kOne;
+    const bool colour_output =
+        colour && colour->write_mask != ColorWriteMaskBits::kNone &&
+        colour->format != PixelFormat::kR8UNormInt && !preserves_colour;
+    if (colour_output &&
+        (name == "solid_fill_fragment_main" ||
+         name == "texture_fill_fragment_main") &&
+        source->GetDescriptor().GetSampleCount() == SampleCount::kCount4) {
+      for (auto kind : {AvioCoveragePipelineVariant::kDirect1x,
+                        AvioCoveragePipelineVariant::kJointSample4,
+                        AvioCoveragePipelineVariant::kInteriorSample4,
+                        AvioCoveragePipelineVariant::kFringeSample4}) {
+        if (name == "texture_fill_fragment_main" &&
+            kind == AvioCoveragePipelineVariant::kJointSample4) {
+          continue;  // Raw sampled colour has not passed attachment rounding.
+        }
+        entry.variants[static_cast<size_t>(kind)] =
+            CreateAvioCoveragePipelineVariant(*context_,
+                                              source->GetDescriptor(), kind);
+        entry.ready =
+            entry.ready && entry.variants[static_cast<size_t>(kind)] != nullptr;
+      }
+    }
+    if (colour_output && name == "texture_fill_fragment_main" &&
+        source->GetDescriptor().GetSampleCount() == SampleCount::kCount1) {
+      entry.variants[static_cast<size_t>(
+          AvioCoveragePipelineVariant::kLayerSample4)] =
+          CreateAvioCoveragePipelineVariant(
+              *context_, source->GetDescriptor(),
+              AvioCoveragePipelineVariant::kLayerSample4);
+      entry.ready = entry.ready &&
+                    entry.variants[static_cast<size_t>(
+                        AvioCoveragePipelineVariant::kLayerSample4)] != nullptr;
+    }
+    if (colour_output &&
+        source->GetDescriptor().GetSampleCount() == SampleCount::kCount4 &&
+        context_->GetAvioAntialiasingConfig().continuous_requested_classes !=
+            0) {
+      entry.variants[static_cast<size_t>(
+          AvioCoveragePipelineVariant::kContinuous)] =
+          CreateAvioCoveragePipelineVariant(
+              *context_, source->GetDescriptor(),
+              AvioCoveragePipelineVariant::kContinuous);
+      entry.ready = entry.ready &&
+                    entry.variants[static_cast<size_t>(
+                        AvioCoveragePipelineVariant::kContinuous)] != nullptr;
+    }
+    return entry.ready;
+  }
+  return false;
+}
+
+std::shared_ptr<Pipeline<PipelineDescriptor>>
+ContentContext::GetAvioPipelineVariant(
+    const std::shared_ptr<Pipeline<PipelineDescriptor>>& source,
+    AvioCoveragePipelineVariant kind) const {
+  if (!source || kind >= AvioCoveragePipelineVariant::kCount) {
+    return nullptr;
+  }
+  std::unique_lock lock(avio_pipeline_variants_mutex_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    return nullptr;
+  }
+  const size_t hash = (reinterpret_cast<uintptr_t>(source.get()) >> 4u) &
+                      (kAvioPipelineVariantCapacity - 1u);
+  for (size_t probe = 0; probe < kAvioPipelineVariantCapacity; ++probe) {
+    const auto& entry =
+        avio_pipeline_variants_[(hash + probe) % kAvioPipelineVariantCapacity];
+    if (entry.source == source) {
+      return entry.variants[static_cast<size_t>(kind)];
+    }
+    if (!entry.source) {
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
 void ContentContext::ResetTransientsBuffers() {
+  if (continuous_data_host_buffer_) {
+    continuous_data_host_buffer_->Reset();
+  }
   data_host_buffer_->Reset();
 
   // We should only reset the indexes host buffer if it is actually different
@@ -1179,6 +1608,176 @@ void ContentContext::ResetTransientsBuffers() {
 
 void ContentContext::InitializeCommonlyUsedShadersIfNeeded() const {
   GetContext()->InitializeCommonlyUsedShadersIfNeeded();
+}
+
+bool ContentContext::PrewarmAvioCoveragePipelines() const {
+  const auto region = context_->GetAvioCoverageRegion();
+  if (!region) {
+    return false;
+  }
+  const AvioPipelinePrewarmConfig config{
+      .native_format = region->GetConfig().colour_format,
+      .native_stencil_only = region->GetConfig().colour_depth_stencil_format ==
+                             PixelFormat::kS8UInt,
+      .supports_ssbo = GetDeviceCapabilities().SupportsSSBO(),
+      .supports_triangle_fan = GetDeviceCapabilities().SupportsTriangleFan(),
+      .use_sdfs = context_->GetFlags().use_sdfs,
+      .continuous_sdf_cuts =
+          context_->GetAvioAntialiasingConfig().RequestsContinuous(
+              AvioContinuousClass::kArc) ||
+          context_->GetAvioAntialiasingConfig().RequestsContinuous(
+              AvioContinuousClass::kBorderedRoundedRect),
+      .needs_gles_decal_downsample =
+          context_->GetBackendType() == Context::BackendType::kOpenGLES &&
+          !GetDeviceCapabilities().SupportsDecalSamplerAddressMode(),
+  };
+  using Family = AvioPrewarmPipeline;
+  using Storage = AvioPrewarmGradientStorage;
+  // One family selector owns both phases: queue every actual source key via
+  // main's asynchronous default-descriptor authority, then join/validate the
+  // same keys and their required Coverage derivatives before public Ready.
+  const auto dispatch =
+      [this](Family family, const ContentContextOptions& options,
+             Storage storage, ConicalKind conical, bool queue) -> bool {
+    const auto process = [&](auto& variants) {
+      if (queue) {
+        variants.Prewarm(*context_, options);
+        return variants.Get(options) != nullptr;
+      }
+      return !!GetPipeline(this, variants, options);
+    };
+    const auto choose_conical = [&](auto& base, auto& radial, auto& strip,
+                                    auto& strip_radial) {
+      switch (conical) {
+        case ConicalKind::kConical:
+          return process(base);
+        case ConicalKind::kRadial:
+          return process(radial);
+        case ConicalKind::kStrip:
+          return process(strip);
+        case ConicalKind::kStripAndRadial:
+          return process(strip_radial);
+      }
+      return false;
+    };
+    switch (family) {
+      case Family::kSolid:
+        return process(pipelines_->solid_fill);
+      case Family::kTexture:
+        return process(pipelines_->texture);
+      case Family::kStrictTexture:
+        return process(pipelines_->texture_strict_src);
+      case Family::kTiledTexture:
+        return process(pipelines_->tiled_texture);
+      case Family::kGlyph:
+        return process(pipelines_->glyph_atlas);
+      case Family::kShadowVertices:
+        return process(pipelines_->shadow_vertices_);
+      case Family::kCircle:
+        return process(pipelines_->circle);
+      case Family::kUberSdf:
+        return GetDeviceCapabilities().SupportsSSBO()
+                   ? process(pipelines_->uber_sdf_ssbo)
+                   : process(pipelines_->uber_sdf);
+      case Family::kComplexRse:
+        return process(pipelines_->complex_rse);
+      case Family::kFastGradient:
+        return process(pipelines_->fast_gradient);
+      case Family::kLinearGradient:
+        switch (storage) {
+          case Storage::kSsbo:
+            return process(pipelines_->linear_gradient_ssbo_fill);
+          case Storage::kUniform:
+            return process(pipelines_->linear_gradient_uniform_fill);
+          case Storage::kTexture:
+            return process(pipelines_->linear_gradient_fill);
+        }
+        return false;
+      case Family::kRadialGradient:
+        switch (storage) {
+          case Storage::kSsbo:
+            return process(pipelines_->radial_gradient_ssbo_fill);
+          case Storage::kUniform:
+            return process(pipelines_->radial_gradient_uniform_fill);
+          case Storage::kTexture:
+            return process(pipelines_->radial_gradient_fill);
+        }
+        return false;
+      case Family::kSweepGradient:
+        switch (storage) {
+          case Storage::kSsbo:
+            return process(pipelines_->sweep_gradient_ssbo_fill);
+          case Storage::kUniform:
+            return process(pipelines_->sweep_gradient_uniform_fill);
+          case Storage::kTexture:
+            return process(pipelines_->sweep_gradient_fill);
+        }
+        return false;
+      case Family::kConicalGradient:
+        switch (storage) {
+          case Storage::kSsbo:
+            return choose_conical(
+                pipelines_->conical_gradient_ssbo_fill,
+                pipelines_->conical_gradient_ssbo_fill_radial,
+                pipelines_->conical_gradient_ssbo_fill_strip,
+                pipelines_->conical_gradient_ssbo_fill_strip_and_radial);
+          case Storage::kUniform:
+            return choose_conical(
+                pipelines_->conical_gradient_uniform_fill,
+                pipelines_->conical_gradient_uniform_fill_radial,
+                pipelines_->conical_gradient_uniform_fill_strip,
+                pipelines_->conical_gradient_uniform_fill_strip_and_radial);
+          case Storage::kTexture:
+            return choose_conical(
+                pipelines_->conical_gradient_fill,
+                pipelines_->conical_gradient_fill_radial,
+                pipelines_->conical_gradient_fill_strip,
+                pipelines_->conical_gradient_fill_strip_and_radial);
+        }
+        return false;
+      case Family::kClip:
+        return process(pipelines_->clip);
+      case Family::kRRectBlur:
+        return process(pipelines_->rrect_blur);
+      case Family::kRSuperellipseBlur:
+        return process(pipelines_->rsuperellipse_blur);
+      case Family::kGaussianBlur:
+        return process(pipelines_->gaussian_blur);
+      case Family::kBorderMaskBlur:
+        return process(pipelines_->border_mask_blur);
+      case Family::kColorMatrix:
+        return process(pipelines_->color_matrix_color_filter);
+      case Family::kLinearToSrgb:
+        return process(pipelines_->linear_to_srgb_filter);
+      case Family::kSrgbToLinear:
+        return process(pipelines_->srgb_to_linear_filter);
+      case Family::kMorphology:
+        return process(pipelines_->morphology_filter);
+      case Family::kYuvToRgb:
+        return process(pipelines_->yuv_to_rgb_filter);
+      case Family::kDownsample:
+        return process(pipelines_->texture_downsample);
+      case Family::kDownsampleBounded:
+        return process(pipelines_->texture_downsample_bounded);
+      case Family::kDownsampleGles:
+#ifdef IMPELLER_ENABLE_OPENGLES
+        return process(pipelines_->texture_downsample_gles);
+#else
+        return false;
+#endif
+    }
+    return false;
+  };
+  return PrewarmAvioPipelineKeysInTwoPhases(
+      config,
+      [&](Family family, const ContentContextOptions& options, Storage storage,
+          ConicalKind conical) {
+        return dispatch(family, options, storage, conical, true);
+      },
+      [&](Family family, const ContentContextOptions& options, Storage storage,
+          ConicalKind conical) {
+        return dispatch(family, options, storage, conical, false);
+      });
 }
 
 void ContentContext::PrewarmPipelineVariant(const PrewarmVariant& variant) {
@@ -1377,6 +1976,34 @@ PipelineRef ContentContext::GetSrgbToLinearFilterPipeline(
 
 PipelineRef ContentContext::GetClipPipeline(ContentContextOptions opts) const {
   return GetPipeline(this, pipelines_->clip, opts);
+}
+
+PipelineRef ContentContext::GetCoverageMaskPipeline(
+    ContentContextOptions opts) const {
+#ifdef IMPELLER_ENABLE_VULKAN
+  if (!UsesAvioCoverage() || opts.sample_count != SampleCount::kCount4) {
+    return {};
+  }
+  return GetPipeline(this, pipelines_->coverage_mask, opts);
+#else
+  return {};
+#endif
+}
+
+PipelineRef ContentContext::GetCoverageQuadPipeline(
+    ContentContextOptions opts) const {
+#ifdef IMPELLER_ENABLE_VULKAN
+  if (!UsesAvioCoverage() || opts.sample_count != SampleCount::kCount4) {
+    return {};
+  }
+  return GetPipeline(this, pipelines_->coverage_quad, opts);
+#else
+  return {};
+#endif
+}
+
+CoveragePathAtlas* ContentContext::GetCoveragePathAtlas() const {
+  return coverage_path_atlas_.get();
 }
 
 PipelineRef ContentContext::GetGlyphAtlasPipeline(
@@ -1790,6 +2417,77 @@ void ContentContext::RemoveCachedTexture(const flutter::DlImage* image) const {
 
 void ContentContext::ClearCachedTextures() const {
   texture_cache_.clear();
+}
+
+bool ContentContext::UsesAvioCoverage() const {
+  return context_->GetAvioAntialiasingConfig().UsesCoverage();
+}
+
+std::shared_ptr<AvioCoverageRegion> ContentContext::GetAvioCoverageRegion()
+    const {
+  return context_->GetAvioCoverageRegion();
+}
+
+bool ContentContext::BeginAvioRasterFrame() const {
+  if (!UsesAvioCoverage()) {
+    return true;
+  }
+  if (avio_raster_frame_depth_ != 0u) {
+    ++avio_raster_frame_depth_;
+    return true;
+  }
+  ReclaimUnusedAvioSample4Clips();
+  static std::atomic<uint64_t> next_epoch{1u};
+  const auto region = GetAvioCoverageRegion();
+  if (!region || !region->BeginRasterFrame(
+                     next_epoch.fetch_add(1u, std::memory_order_relaxed))) {
+    return false;
+  }
+  avio_raster_frame_depth_ = 1u;
+  return true;
+}
+
+void ContentContext::EndAvioRasterFrame() const {
+  if (!UsesAvioCoverage() || avio_raster_frame_depth_ == 0u) {
+    return;
+  }
+  if (--avio_raster_frame_depth_ == 0u) {
+    GetAvioCoverageRegion()->EndRasterFrame();
+  }
+}
+
+AvioRenderResourceReport ContentContext::GetAvioRenderResourceReport(
+    bool start_new_interval) const {
+  AvioRenderResourceReport report;
+  report.available = IsValid();
+  if (!report.available) {
+    return report;
+  }
+  // Vulkan's physical allocation ledger accounts every image once, including
+  // cached targets retained by in-flight submissions. Do not add cache bytes
+  // to that census a second time.
+  if (context_->GetBackendType() != Context::BackendType::kVulkan) {
+    AvioRenderResourceEntry cache;
+    cache.kind_id = static_cast<uint32_t>(AvioRenderResourceKind::kOffscreens);
+    cache.usage = GetRenderTargetCache()->ReportUsage(start_new_interval);
+    cache.fields_supported =
+        kAvioResourceFieldCounts | kAvioResourceFieldDescriptorBytes;
+    cache.unsupported_reason_id =
+        kAvioResourceReasonPhysicalAllocationUnavailable;
+    report.AddEntry(cache);
+  }
+  if (const auto region = GetAvioCoverageRegion()) {
+    auto usage = region->ReportUsage(start_new_interval);
+    report.counters_supported |= kAvioCounterCoverageFlushes;
+    if (region->HasExactAllocatedBytes()) {
+      report.counters_supported |= kAvioCounterLayerRegionOverflows;
+    }
+    report.coverage_flushes = usage.coverage_flushes;
+    report.layer_region_overflows = usage.layer_region_overflow;
+    report.layer_region_overflow_real_bytes =
+        usage.layer_region_overflow_real_bytes;
+  }
+  return report;
 }
 
 }  // namespace impeller

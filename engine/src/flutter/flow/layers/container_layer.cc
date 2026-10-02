@@ -105,6 +105,9 @@ void ContainerLayer::DiffChildren(DiffContext* context,
 }
 
 void ContainerLayer::Add(std::shared_ptr<Layer> layer) {
+  if (layer->subtree_has_avio_frame_metadata()) {
+    set_subtree_has_avio_frame_metadata(true);
+  }
   if (layer->subtree_has_avio_window_preview()) {
     set_subtree_has_avio_window_preview(true);
   }

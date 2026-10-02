@@ -56,9 +56,12 @@ bool ExternalCoverageContents::Render(const ContentContext& renderer,
   if (!snapshot.has_value()) {
     return false;
   }
-  auto rect = Rect::MakeSize(snapshot->texture->GetSize());
+  auto rect = snapshot->GetTextureRect();
   auto contents = TextureContents::MakeRect(rect);
   contents->SetTexture(snapshot->texture);
+  contents->SetResourceOwner(snapshot->resource_owner);
+  contents->SetStrictSourceRect(rect !=
+                                Rect::MakeSize(snapshot->texture->GetSize()));
   contents->SetSourceRect(rect);
   contents->SetOpacity(opacity_ * snapshot->opacity);
   contents->SetCoverageMode(flutter::DlCoverageMode::kExternalLinearBackdrop);

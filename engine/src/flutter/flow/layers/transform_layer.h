@@ -12,6 +12,7 @@ namespace flutter {
 class TransformLayer : public ContainerLayer {
  public:
   explicit TransformLayer(const DlMatrix& transform);
+  const TransformLayer* as_transform_layer() const override { return this; }
 
   void Diff(DiffContext* context, const Layer* old_layer) override;
 

@@ -5,9 +5,11 @@
 #ifndef FLUTTER_IMPELLER_ENTITY_CONTENTS_CONTENT_CONTEXT_H_
 #define FLUTTER_IMPELLER_ENTITY_CONTENTS_CONTENT_CONTEXT_H_
 
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -19,6 +21,11 @@
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/host_buffer.h"
+#include "impeller/entity/contents/avio_pipeline_initialization.h"
+#include "impeller/entity/contents/content_context_options.h"
+#include "impeller/entity/contents/continuous_clip_pool.h"
+#include "impeller/entity/contents/sample4_clip.h"
+#include "impeller/entity/contents/sample4_clip_pipeline.h"
 #include "impeller/entity/contents/text_shadow_cache.h"
 #include "impeller/geometry/color.h"
 #include "impeller/renderer/capabilities.h"
@@ -30,94 +37,6 @@
 #include "impeller/typographer/typographer_context.h"
 
 namespace impeller {
-/// Pipeline state configuration.
-///
-/// Each unique combination of these options requires a different pipeline state
-/// object to be built. This struct is used as a key for the per-pipeline
-/// variant cache.
-///
-/// When adding fields to this key, reliant features should take care to limit
-/// the combinatorical explosion of variations. A sufficiently complicated
-/// Flutter application may easily require building hundreds of PSOs in total,
-/// but they shouldn't require e.g. 10s of thousands.
-struct ContentContextOptions {
-  enum class StencilMode : uint8_t {
-    /// Turn the stencil test off. Used when drawing without stencil-then-cover.
-    kIgnore,
-
-    // Operations used for stencil-then-cover.
-
-    /// Draw the stencil for the NonZero fill path rule.
-    ///
-    /// The stencil ref should always be 0 on commands using this mode.
-    kStencilNonZeroFill,
-    /// Draw the stencil for the EvenOdd fill path rule.
-    ///
-    /// The stencil ref should always be 0 on commands using this mode.
-    kStencilEvenOddFill,
-    /// Draw a stencil which always increments once for everything in the vertex
-    /// coverage regardless of triangle overlap.
-    ///
-    /// The stencil ref should always be 0 on commands using this mode.
-    kStencilIncrementAll,
-    /// Used for draw calls which fill in the stenciled area. Intended to be
-    /// used after `kStencilNonZeroFill` or `kStencilEvenOddFill` is used to set
-    /// up the stencil buffer. Also cleans up the stencil buffer by resetting
-    /// everything to zero.
-    ///
-    /// The stencil ref should always be 0 on commands using this mode.
-    kCoverCompare,
-    /// The opposite of `kCoverCompare`. Used for draw calls which fill in the
-    /// non-stenciled area (intersection clips). Intended to be used after
-    /// `kStencilNonZeroFill` or `kStencilEvenOddFill` is used to set up the
-    /// stencil buffer. Also cleans up the stencil buffer by resetting
-    /// everything to zero.
-    ///
-    /// The stencil ref should always be 0 on commands using this mode.
-    kCoverCompareInverted,
-  };
-
-  SampleCount sample_count = SampleCount::kCount1;
-  BlendMode blend_mode = BlendMode::kSrcOver;
-  CompareFunction depth_compare = CompareFunction::kAlways;
-  StencilMode stencil_mode = ContentContextOptions::StencilMode::kIgnore;
-  PrimitiveType primitive_type = PrimitiveType::kTriangle;
-  PixelFormat color_attachment_pixel_format = PixelFormat::kUnknown;
-  bool has_depth_stencil_attachments = true;
-  bool depth_write_enabled = false;
-  bool is_for_rrect_blur_clear = false;
-
-  constexpr uint64_t ToKey() const {
-    static_assert(sizeof(sample_count) == 1);
-    static_assert(sizeof(blend_mode) == 1);
-    static_assert(sizeof(sample_count) == 1);
-    static_assert(sizeof(depth_compare) == 1);
-    static_assert(sizeof(stencil_mode) == 1);
-    static_assert(sizeof(primitive_type) == 1);
-    static_assert(sizeof(color_attachment_pixel_format) == 1);
-
-    return (is_for_rrect_blur_clear ? 1llu : 0llu) << 0 |
-           (0) << 1 |  // // Unused, previously wireframe.
-           (has_depth_stencil_attachments ? 1llu : 0llu) << 2 |
-           (depth_write_enabled ? 1llu : 0llu) << 3 |
-           // enums
-           static_cast<uint64_t>(color_attachment_pixel_format) << 8 |
-           static_cast<uint64_t>(primitive_type) << 16 |
-           static_cast<uint64_t>(stencil_mode) << 24 |
-           static_cast<uint64_t>(depth_compare) << 32 |
-           static_cast<uint64_t>(blend_mode) << 40 |
-           static_cast<uint64_t>(sample_count) << 48;
-  }
-
-  void ApplyToPipelineDescriptor(PipelineDescriptor& desc) const;
-};
-
-enum ConicalKind {
-  kConical,
-  kRadial,
-  kStrip,
-  kStripAndRadial,
-};
 
 /// A pipeline variant that `ContentContext` compiles asynchronously when it is
 /// constructed, so that its first use does not compile it synchronously on the
@@ -172,6 +91,10 @@ std::vector<PrewarmVariant> MakeAvioPrewarmVariants(
 
 class Tessellator;
 class RenderTargetCache;
+class AvioCoverageRegion;
+class CoverageRecorderStorage;
+class CoveragePathAtlas;
+class CoverageDisplayListPlan;
 
 class ContentContext {
  public:
@@ -183,6 +106,44 @@ class ContentContext {
   ~ContentContext();
 
   bool IsValid() const;
+
+  // Cold factory access only: public IsValid remains false until every
+  // negotiated pipeline and storage resource has finished initialization.
+  bool CanCreatePipelines() const {
+    return pipeline_initialization_.CanCreatePipelines();
+  }
+  bool UsesAvioCoverage() const;
+  std::shared_ptr<AvioCoverageRegion> GetAvioCoverageRegion() const;
+  std::shared_ptr<CoverageRecorderStorage> GetCoverageRecorderStorage() const {
+    return coverage_recorder_storage_;
+  }
+  CoveragePathAtlas* GetCoveragePathAtlas() const;
+  AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool start_new_interval) const;
+
+  // Nested snapshots share the enclosing raster frame's fixed regions. The
+  // final scope closes only after all recorded readers have been encoded.
+  bool BeginAvioRasterFrame() const;
+  void EndAvioRasterFrame() const;
+
+  std::shared_ptr<AvioContinuousClipExpression>
+  AcquireAvioContinuousClipExpression(
+      const std::shared_ptr<const AvioContinuousClipExpression>& previous)
+      const {
+    return continuous_clip_pool_ ? continuous_clip_pool_->Acquire(previous)
+                                 : nullptr;
+  }
+
+  std::shared_ptr<AvioSample4ClipDescriptor> AcquireAvioSample4Clip(
+      const std::shared_ptr<const AvioSample4ClipDescriptor>& previous) const {
+    return sample4_clip_pool_ ? sample4_clip_pool_->Acquire(previous) : nullptr;
+  }
+
+  void ReclaimUnusedAvioSample4Clips() const {
+    if (sample4_clip_pool_) {
+      sample4_clip_pool_->ReclaimUnused();
+    }
+  }
 
   Tessellator& GetTessellator() const;
 
@@ -206,6 +167,8 @@ class ContentContext {
   PipelineRef GetCirclePipeline(ContentContextOptions opts) const;
   PipelineRef GetClearBlendPipeline(ContentContextOptions opts) const;
   PipelineRef GetClipPipeline(ContentContextOptions opts) const;
+  PipelineRef GetCoverageMaskPipeline(ContentContextOptions opts) const;
+  PipelineRef GetCoverageQuadPipeline(ContentContextOptions opts) const;
   PipelineRef GetColorMatrixColorFilterPipeline(ContentContextOptions opts) const;
   PipelineRef GetConicalGradientFillPipeline(ContentContextOptions opts, ConicalKind kind) const;
   PipelineRef GetConicalGradientSSBOFillPipeline(ContentContextOptions opts, ConicalKind kind) const;
@@ -284,6 +247,17 @@ class ContentContext {
 
   std::shared_ptr<Context> GetContext() const;
 
+  // Populated by the display-list owner at cold AiksContext initialization.
+  // Forward declaration keeps entity independent of the dispatch library.
+  void SetCoverageClassifierStorage(
+      std::shared_ptr<CoverageDisplayListPlan> storage) {
+    coverage_classifier_storage_ = std::move(storage);
+  }
+  std::shared_ptr<CoverageDisplayListPlan> GetCoverageClassifierStorage()
+      const {
+    return coverage_classifier_storage_;
+  }
+
   const Capabilities& GetDeviceCapabilities() const;
 
   using SubpassCallback =
@@ -298,14 +272,16 @@ class ContentContext {
       const SubpassCallback& subpass_callback,
       bool msaa_enabled = true,
       bool depth_stencil_enabled = false,
-      int32_t mip_count = 1) const;
+      int32_t mip_count = 1,
+      bool exact_texture_extent = false) const;
 
   /// Makes a subpass that will render to `subpass_target`.
   fml::StatusOr<RenderTarget> MakeSubpass(
       std::string_view label,
       const RenderTarget& subpass_target,
       const std::shared_ptr<CommandBuffer>& command_buffer,
-      const SubpassCallback& subpass_callback) const;
+      const SubpassCallback& subpass_callback,
+      bool coverage_antialiasing = false) const;
 
   const std::shared_ptr<LazyGlyphAtlas>& GetLazyGlyphAtlas() const {
     return lazy_glyph_atlas_;
@@ -370,6 +346,15 @@ class ContentContext {
   /// This is only safe to use from the raster threads. Other threads should
   /// allocate their own device buffers.
   HostBuffer& GetTransientsDataBuffer() const { return *data_host_buffer_; }
+  bool WarmAvioPipelineVariants(
+      const std::shared_ptr<Pipeline<PipelineDescriptor>>& source) const;
+  std::shared_ptr<Pipeline<PipelineDescriptor>> GetAvioPipelineVariant(
+      const std::shared_ptr<Pipeline<PipelineDescriptor>>& source,
+      AvioCoveragePipelineVariant kind) const;
+
+  HostBuffer* GetAvioContinuousDataBuffer() const {
+    return continuous_data_host_buffer_.get();
+  }
 
   /// @brief Resets the transients buffers held onto by the content context.
   void ResetTransientsBuffers();
@@ -388,7 +373,10 @@ class ContentContext {
   }
 
  private:
+  friend struct CoverageTiledRenderPassTestPeer;
+
   std::shared_ptr<Context> context_;
+  std::shared_ptr<CoverageDisplayListPlan> coverage_classifier_storage_;
   std::shared_ptr<LazyGlyphAtlas> lazy_glyph_atlas_;
 
   /// Run backend specific additional setup and create common shader variants.
@@ -399,9 +387,9 @@ class ContentContext {
   /// shader variants, as well as forcing driver initialization.
   void InitializeCommonlyUsedShadersIfNeeded() const;
 
-  /// Starts the asynchronous compile of `variant`. Must run after the
-  /// pipeline's default is created.
+  /// Starts main's asynchronous legacy variant compile after its default.
   void PrewarmPipelineVariant(const PrewarmVariant& variant);
+  bool PrewarmAvioCoveragePipelines() const;
 
   struct RuntimeEffectPipelineKey {
     std::string unique_entrypoint_name;
@@ -432,13 +420,30 @@ class ContentContext {
   struct Pipelines;
   std::unique_ptr<Pipelines> pipelines_;
 
-  bool is_valid_ = false;
+  AvioPipelineInitialization pipeline_initialization_;
+  mutable size_t avio_raster_frame_depth_ = 0u;
   std::shared_ptr<Tessellator> tessellator_;
   std::shared_ptr<RenderTargetAllocator> render_target_cache_;
   std::shared_ptr<HostBuffer> data_host_buffer_;
   std::shared_ptr<HostBuffer> indexes_host_buffer_;
   std::shared_ptr<Texture> empty_texture_;
   std::unique_ptr<TextShadowCache> text_shadow_cache_;
+  std::unique_ptr<CoveragePathAtlas> coverage_path_atlas_;
+  std::unique_ptr<AvioContinuousClipPool> continuous_clip_pool_;
+  std::unique_ptr<AvioSample4ClipPool> sample4_clip_pool_;
+  std::shared_ptr<CoverageRecorderStorage> coverage_recorder_storage_;
+  std::shared_ptr<HostBuffer> continuous_data_host_buffer_;
+  struct AvioPipelineVariants {
+    std::shared_ptr<Pipeline<PipelineDescriptor>> source;
+    bool ready = false;
+    std::array<std::shared_ptr<Pipeline<PipelineDescriptor>>,
+               static_cast<size_t>(AvioCoveragePipelineVariant::kCount)>
+        variants;
+  };
+  static constexpr size_t kAvioPipelineVariantCapacity = 2048;
+  mutable std::array<AvioPipelineVariants, kAvioPipelineVariantCapacity>
+      avio_pipeline_variants_{};
+  mutable std::mutex avio_pipeline_variants_mutex_;
 
   bool is_texture_caching_enabled_ = false;
   mutable std::unordered_map<const flutter::DlImage*, std::shared_ptr<Texture>>

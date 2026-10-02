@@ -98,6 +98,10 @@ class EmbedderRenderTarget {
 
   virtual fml::UniqueFD TakeRenderCompleteSyncFD() { return {}; }
 
+  // Negotiated Vulkan presentation requires a real completion dependency.
+  // An absent FD cannot be treated as synchronous completion of that image.
+  virtual bool RequiresRenderCompleteSyncFD() const { return false; }
+
   //----------------------------------------------------------------------------
   /// @brief      Make the render target current.
   ///

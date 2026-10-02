@@ -76,7 +76,8 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
       FlutterViewId view_id,
       const std::vector<const FlutterLayer*>& layers,
       const std::vector<FlutterAvioCompositorMaterial>& compositor_materials,
-      bool compositor_materials_invalid)>;
+      bool compositor_materials_invalid,
+      const AvioFrameFacts& frame_facts)>;
   using PresentRenderTargetCallback = std::function<bool(
       FlutterViewId view_id,
       FlutterFrameOpportunityId opportunity_id,
@@ -87,7 +88,8 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
       const std::vector<FlutterAvioCompositorMaterial>& compositor_materials,
       bool compositor_materials_invalid,
       const std::vector<FlutterAvioWindowPreview>& window_previews,
-      bool window_previews_invalid)>;
+      bool window_previews_invalid,
+      const AvioFrameFacts& frame_facts)>;
   using SurfaceTransformationCallback = std::function<DlMatrix(void)>;
 
   //----------------------------------------------------------------------------
@@ -114,7 +116,8 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
       const CreateRenderTargetCallback& create_render_target_callback,
       const AcquireRenderTargetCallback& acquire_render_target_callback,
       const PresentCallback& present_callback,
-      const PresentRenderTargetCallback& present_render_target_callback);
+      const PresentRenderTargetCallback& present_render_target_callback,
+      FlutterAvioExtensionFeatures avio_frame_features = 0u);
 
   //----------------------------------------------------------------------------
   /// @brief      Collects the external view embedder.
@@ -167,6 +170,11 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
 
   // |ExternalViewEmbedder|
   bool SupportsMetadataFrameDamageForCurrentFrame() const override;
+  bool SupportsAvioEmptyFrames() const override;
+  bool SupportsAvioFrameFacts(const AvioFrameFacts& facts) const override;
+  bool SubmitAvioEmptyFrame(int64_t view_id,
+                            const SurfaceFrame::SubmitInfo& info) override;
+  void RejectAvioFrameFacts(int64_t view_id) override;
 
   // |ExternalViewEmbedder|
   void PrerollCompositeEmbeddedView(
@@ -214,6 +222,8 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
   const FlutterCompositorMode compositor_mode_;
   const bool selected_target_damage_;
   const bool avoid_backing_store_cache_;
+  const FlutterAvioExtensionFeatures avio_frame_features_;
+  AvioFrameFacts pending_frame_facts_;
   const CreateRenderTargetCallback create_render_target_callback_;
   const AcquireRenderTargetCallback acquire_render_target_callback_;
   const PresentCallback present_callback_;

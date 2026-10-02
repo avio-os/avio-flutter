@@ -318,7 +318,7 @@ enum class DebugResourceType {
 class ProcTableGLES {
  public:
   using Resolver = std::function<void*(const char* function_name)>;
-  explicit ProcTableGLES(Resolver resolver);
+  explicit ProcTableGLES(Resolver resolver, bool avio_coverage = false);
   ProcTableGLES(ProcTableGLES&& other) = default;
 
   ~ProcTableGLES();

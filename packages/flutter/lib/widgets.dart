@@ -30,6 +30,7 @@ export 'src/widgets/async.dart';
 export 'src/widgets/autocomplete.dart';
 export 'src/widgets/autofill.dart';
 export 'src/widgets/automatic_keep_alive.dart';
+export 'src/widgets/avio_item_effect.dart';
 export 'src/widgets/banner.dart';
 export 'src/widgets/basic.dart';
 export 'src/widgets/binding.dart';

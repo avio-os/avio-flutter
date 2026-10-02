@@ -41,6 +41,8 @@ LoadAction ColorLoadActionForPass(uint32_t pass_count,
 
 class InlinePassContext {
  public:
+  // Negotiated Avio coverage records a logical 1x/no-depth parent pass and
+  // replays it through the context's fixed 4x colour island at EndPass.
   /// @param  honor_declared_load_action  Whether the first render pass keeps
   ///         the load action that `pass_target`'s color attachment already
   ///         declares, instead of clearing. See `ColorLoadActionForPass`.
@@ -53,6 +55,15 @@ class InlinePassContext {
   bool IsValid() const;
 
   bool IsActive() const;
+
+  bool CanUpdateFirstPassClearColor() const {
+    return pass_count_ == 0u && !IsActive();
+  }
+
+  // A complete immutable root/layer classification may prove that no native
+  // coverage, clips, continuous geometry or destination read is required.
+  // Install before the first pass; changing samples mid-scope is forbidden.
+  bool SetAvioDirect1xProof(bool proven);
 
   std::shared_ptr<Texture> GetTexture();
 
@@ -72,6 +83,7 @@ class InlinePassContext {
   uint32_t pass_count_ = 0;
   bool honor_declared_load_action_ = false;
   bool failed_ = false;
+  bool avio_direct_1x_proven_ = false;
 
   InlinePassContext(const InlinePassContext&) = delete;
 

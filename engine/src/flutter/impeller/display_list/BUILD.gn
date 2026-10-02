@@ -28,6 +28,9 @@ impeller_component("display_list") {
     "canvas.h",
     "color_filter.cc",
     "color_filter.h",
+    "coverage_classifier.cc",
+    "coverage_classifier.h",
+    "coverage_classifier_dispatcher.cc",
     "dl_atlas_geometry.cc",
     "dl_atlas_geometry.h",
     "dl_dispatcher.cc",
@@ -42,6 +45,7 @@ impeller_component("display_list") {
     "dl_vertices_geometry.h",
     "image_filter.cc",
     "image_filter.h",
+    "legacy_analytic_source.h",
     "nine_patch_converter.cc",
     "nine_patch_converter.h",
     "paint.cc",
@@ -93,6 +97,9 @@ template("display_list_unittests_component") {
     "dl_playground.h",
     "dl_unittests.cc",
     "paint_unittests.cc",
+    "coverage_classifier_unittests.cc",
+    "coverage_classifier_dispatcher_unittests.cc",
+    "legacy_analytic_source_unittests.cc",
     "testing/render_text_in_canvas.cc",
     "testing/render_text_in_canvas.h",
     "testing/rmse.cc",
@@ -192,7 +199,12 @@ template("aiks_unittests_component") {
     defines += [ "_USE_MATH_DEFINES" ]
 
     sources = predefined_sources + additional_sources
-    deps = [
+    if (defined(invoker.deps)) {
+      deps = invoker.deps
+    } else {
+      deps = []
+    }
+    deps += [
       ":aiks_playground",
       ":display_list",
       "//flutter/impeller/geometry:geometry_asserts",
@@ -210,6 +222,10 @@ template("aiks_unittests_component") {
 
 aiks_unittests_component("aiks_unittests") {
   sources = [ "canvas_unittests.cc" ]
+  if (impeller_enable_opengles) {
+    sources += [ "canvas_gles_unittests.cc" ]
+    deps = [ "//flutter/impeller/renderer/backend/gles:mock_gles" ]
+  }
 }
 
 aiks_unittests_component("aiks_unittests_golden") {

@@ -785,6 +785,70 @@ TEST(ContextVKTest, DeletePipelineAfterContext) {
                         "vkDestroyDevice") != functions->end());
 }
 
+TEST(ContextVKTest, PipelineCensusTracksAsyncFrameOriginAndRetainedObjects) {
+  auto context = MockVulkanContextBuilder().Build();
+  ASSERT_TRUE(context);
+  auto library = context->GetPipelineLibrary();
+  auto& vk_library = PipelineLibraryVK::Cast(*library);
+  auto ledger = vk_library.GetResourceLedger();
+  PipelineDescriptor descriptor;
+  descriptor.SetVertexDescriptor(std::make_shared<VertexDescriptor>());
+  std::shared_ptr<Pipeline<PipelineDescriptor>> warm;
+  {
+    warm = library->GetPipeline(descriptor, /*async=*/false).Get();
+  }
+  ASSERT_TRUE(warm);
+  auto report = vk_library.GetAvioRenderResourceReport(true);
+  ASSERT_EQ(report.entries_count, 1u);
+  EXPECT_EQ(report.entries[0].usage.entries, 1u);
+  EXPECT_EQ(report.entries[0].usage.created_entries, 1u);
+  EXPECT_EQ(report.first_use_compiles, 0u);
+  descriptor.SetSampleCount(SampleCount::kCount4);
+  std::shared_ptr<Pipeline<PipelineDescriptor>> frame;
+  {
+    PipelineFuture<PipelineDescriptor> pending;
+    {
+      const AvioRasterFrameScope scope;
+      pending = library->GetPipeline(descriptor, /*async=*/true);
+    }
+    frame = pending.Get();
+  }
+  ASSERT_TRUE(frame);
+  {
+    const AvioRasterFrameScope scope;
+    EXPECT_EQ(library->GetPipeline(descriptor, /*async=*/false).Get(), frame);
+  }
+  report = vk_library.GetAvioRenderResourceReport(true);
+  EXPECT_EQ(report.entries[0].usage.entries, 2u);
+  EXPECT_EQ(report.entries[0].usage.created_entries, 1u);
+  EXPECT_EQ(report.first_use_compiles, 1u);
+  context.reset();
+  library.reset();
+  EXPECT_EQ(ledger->Report(false).entries[0].usage.entries, 2u);
+  warm.reset();
+  frame.reset();
+  EXPECT_EQ(ledger->Report(false).entries[0].usage.entries, 0u);
+}
+
+TEST(ContextVKTest, FailedComputeCreationDoesNotCountAsFirstUseCompile) {
+  ScopedValidationDisable disable_validation;
+  auto context = MockVulkanContextBuilder().Build();
+  ASSERT_TRUE(context);
+  auto library = context->GetPipelineLibrary();
+  auto& vk_library = PipelineLibraryVK::Cast(*library);
+  const auto before = vk_library.GetAvioRenderResourceReport(true);
+  {
+    const AvioRasterFrameScope scope;
+    EXPECT_EQ(library->GetPipeline(ComputePipelineDescriptor{}, /*async=*/false)
+                  .Get(),
+              nullptr);
+  }
+  const auto after = vk_library.GetAvioRenderResourceReport(false);
+  EXPECT_EQ(after.entries[0].usage.entries, before.entries[0].usage.entries);
+  EXPECT_EQ(after.entries[0].usage.created_entries, 0u);
+  EXPECT_EQ(after.first_use_compiles, 0u);
+}
+
 TEST(ContextVKTest, DeleteShaderFunctionAfterContext) {
   std::shared_ptr<const ShaderFunction> shader_function;
   std::shared_ptr<std::vector<std::string>> functions;
@@ -976,6 +1040,87 @@ TEST(ContextVKTest, EmbedderOverrides) {
   EXPECT_EQ(context->GetPhysicalDevice(), other_context->GetPhysicalDevice());
   EXPECT_EQ(context->GetGraphicsQueue()->GetIndex().index, 0u);
   EXPECT_EQ(context->GetGraphicsQueue()->GetIndex().family, 0u);
+}
+
+TEST(CapabilitiesVKTest, CoverageQueriesExactSampledR8AndStencilResources) {
+  std::vector<VkPhysicalDeviceImageFormatInfo2> requests;
+  auto context = MockVulkanContextBuilder()
+                     .SetImageFormatPropertiesCallback(
+                         [&](VkPhysicalDevice,
+                             const VkPhysicalDeviceImageFormatInfo2* info,
+                             VkImageFormatProperties2* properties) {
+                           requests.push_back(*info);
+                           properties->imageFormatProperties.sampleCounts =
+                               VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+                           return VK_SUCCESS;
+                         })
+                     .Build();
+  ASSERT_TRUE(context);
+  const auto& capabilities = CapabilitiesVK::Cast(*context->GetCapabilities());
+  EXPECT_TRUE(capabilities.SupportsAvioCoverageResources());
+  EXPECT_TRUE(
+      std::any_of(requests.begin(), requests.end(), [](const auto& info) {
+        return info.format == VK_FORMAT_R8_UNORM &&
+               info.type == VK_IMAGE_TYPE_2D &&
+               info.tiling == VK_IMAGE_TILING_OPTIMAL &&
+               info.usage == (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                              VK_IMAGE_USAGE_SAMPLED_BIT) &&
+               info.flags == 0;
+      }));
+  EXPECT_TRUE(
+      std::any_of(requests.begin(), requests.end(), [](const auto& info) {
+        return info.format == VK_FORMAT_S8_UINT &&
+               info.usage == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+      }));
+}
+
+TEST(CapabilitiesVKTest, CoverageRejectsNonStandardSampleLocations) {
+  auto context =
+      MockVulkanContextBuilder()
+          .SetPhysicalPropertiesCallback(
+              [](VkPhysicalDevice, VkPhysicalDeviceProperties* props) {
+                props->limits.standardSampleLocations = VK_FALSE;
+              })
+          .Build();
+  ASSERT_TRUE(context);
+  EXPECT_FALSE(CapabilitiesVK::Cast(*context->GetCapabilities())
+                   .SupportsAvioCoverageResources());
+}
+
+TEST(CapabilitiesVKTest, CoverageRejectsUnsupportedSampledR8FourSamples) {
+  auto context =
+      MockVulkanContextBuilder()
+          .SetImageFormatPropertiesCallback(
+              [](VkPhysicalDevice, const VkPhysicalDeviceImageFormatInfo2* info,
+                 VkImageFormatProperties2* properties) {
+                properties->imageFormatProperties.sampleCounts =
+                    info->format == VK_FORMAT_R8_UNORM ? VK_SAMPLE_COUNT_1_BIT
+                                                       : VK_SAMPLE_COUNT_4_BIT;
+                return VK_SUCCESS;
+              })
+          .Build();
+  ASSERT_TRUE(context);
+  EXPECT_FALSE(CapabilitiesVK::Cast(*context->GetCapabilities())
+                   .SupportsAvioCoverageResources());
+}
+
+TEST(CapabilitiesVKTest, CoverageRejectsUnsupportedStencilFormatUsage) {
+  auto context =
+      MockVulkanContextBuilder()
+          .SetImageFormatPropertiesCallback(
+              [](VkPhysicalDevice, const VkPhysicalDeviceImageFormatInfo2* info,
+                 VkImageFormatProperties2* properties) {
+                if (info->format == VK_FORMAT_S8_UINT) {
+                  return VK_ERROR_FORMAT_NOT_SUPPORTED;
+                }
+                properties->imageFormatProperties.sampleCounts =
+                    VK_SAMPLE_COUNT_4_BIT;
+                return VK_SUCCESS;
+              })
+          .Build();
+  ASSERT_TRUE(context);
+  EXPECT_FALSE(CapabilitiesVK::Cast(*context->GetCapabilities())
+                   .SupportsAvioCoverageResources());
 }
 
 TEST(ContextVKTest, BatchSubmitCommandBuffersOnArm) {

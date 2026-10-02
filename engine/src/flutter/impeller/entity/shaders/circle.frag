@@ -19,7 +19,11 @@ frag_info;
 
 out vec4 frag_color;
 
+#ifdef AVIO_CONTINUOUS_COVERAGE
+sample in highp vec2 v_position;
+#else
 highp in vec2 v_position;
+#endif
 
 float distanceFromCircle(float dist_to_center, float radius) {
   return dist_to_center - radius;
@@ -84,7 +88,15 @@ void main() {
   // the aa_pixels factor.
   float fade_size = local_dist_towards_center * frag_info.aa_pixels * 0.5;
 
+#ifdef AVIO_CONTINUOUS_COVERAGE
+  // Supply the original physical-width distance before clip intersection.
+  // The destination-aware wrapper evaluates the combined coverage once.
+  avio_geometry_distance = sdf_distance / max(2.0 * fade_size, 0.00001);
+  avio_has_geometry_distance = true;
+  float alpha = 1.0;
+#else
   float alpha = 1.0 - smoothstep(-fade_size, fade_size, sdf_distance);
+#endif
 
   float finalAlpha = frag_info.color.a * alpha;
 

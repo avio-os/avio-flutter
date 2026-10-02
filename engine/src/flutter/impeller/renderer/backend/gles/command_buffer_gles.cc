@@ -67,12 +67,15 @@ void CommandBufferGLES::SetLabel(std::string_view label) const {
 
 // |CommandBuffer|
 bool CommandBufferGLES::IsValid() const {
-  return is_valid_;
+  return is_valid_ && HasValidResourceOwners();
 }
 
 // |CommandBuffer|
 bool CommandBufferGLES::OnSubmitCommands(bool block_on_schedule,
                                          CompletionCallback callback) {
+  // One submission owns this exact command buffer, including its generic
+  // region/resource custody. A later submission must use a fresh buffer.
+  is_valid_ = false;
   // The reactor consumes commands on the GL thread and GL synchronizes
   // buffer reuse implicitly, so submissions are tracked at reactor
   // consumption granularity rather than GPU completion.
@@ -104,6 +107,7 @@ bool CommandBufferGLES::OnSubmitCommands(bool block_on_schedule,
   }
   if (!reactor_->AddOperation(
           [deferred_callback, tracker,
+           command_buffer_owner = shared_from_this(),
            submission_id](const ReactorGLES& reactor) {
             if (tracker) {
               tracker->RecordCompletion(submission_id);
@@ -118,17 +122,28 @@ bool CommandBufferGLES::OnSubmitCommands(bool block_on_schedule,
     }
     return false;
   }
+  // The existing marker keeps the exact CB owners through reactor consumption.
+  // Retaining its strong reactor handle as well would make a standing cycle
+  // and prevent discarded operations from releasing their owners/callbacks.
+  submitted_reactor_ = reactor_;
+  reactor_.reset();
   return true;
 }
 
 // |CommandBuffer|
 void CommandBufferGLES::OnWaitUntilCompleted() {
-  reactor_->GetProcTable().Finish();
+  const auto reactor = reactor_ ? reactor_ : submitted_reactor_.lock();
+  if (reactor) {
+    reactor->GetProcTable().Finish();
+  }
 }
 
 // |CommandBuffer|
 void CommandBufferGLES::OnWaitUntilScheduled() {
-  reactor_->GetProcTable().Flush();
+  const auto reactor = reactor_ ? reactor_ : submitted_reactor_.lock();
+  if (reactor) {
+    reactor->GetProcTable().Flush();
+  }
 }
 
 // |CommandBuffer|

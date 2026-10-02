@@ -48,6 +48,30 @@ class LayerSceneBuilder implements ui.SceneBuilder {
   late ContainerLayer currentLayer;
 
   @override
+  ui.AvioItemEffectEngineLayer pushAvioItemEffect({
+    required double opacity,
+    int declarationId = 1,
+    ui.Offset offset = ui.Offset.zero,
+    ui.AvioItemEffectEngineLayer? oldLayer,
+  }) => throw UnsupportedError("Avio root item effects require the native root-frame contract.");
+
+  @override
+  ui.AvioOutputGroundEngineLayer pushAvioOutputGround({
+    required ui.Color? color,
+    List<ui.AvioOutputGroundRegion> regions = const <ui.AvioOutputGroundRegion>[],
+    ui.Offset offset = ui.Offset.zero,
+    ui.AvioOutputGroundEngineLayer? oldLayer,
+  }) => throw UnsupportedError("Avio output ground requires the native root-frame contract.");
+
+  @override
+  ui.AvioReadyContentEngineLayer pushAvioReadyContent({
+    required int contentRevision,
+    ui.AvioReadyContentKind kind = ui.AvioReadyContentKind.static,
+    ui.Offset offset = ui.Offset.zero,
+    ui.AvioReadyContentEngineLayer? oldLayer,
+  }) => throw UnsupportedError("Avio ready content requires the native root-frame contract.");
+
+  @override
   void addPerformanceOverlay(int enabledOptions, ui.Rect bounds) {
     // Not implemented on Web. Avoid crashing; warn once to guide developers.
     if (!_webPerfOverlayWarned) {

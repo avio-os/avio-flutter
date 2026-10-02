@@ -11,7 +11,9 @@
 
 namespace impeller {
 
-class CommandBufferGLES final : public CommandBuffer {
+class CommandBufferGLES final
+    : public CommandBuffer,
+      public std::enable_shared_from_this<CommandBufferGLES> {
  public:
   // |CommandBuffer|
   ~CommandBufferGLES() override;
@@ -20,6 +22,7 @@ class CommandBufferGLES final : public CommandBuffer {
   friend class ContextGLES;
 
   std::shared_ptr<ReactorGLES> reactor_;
+  std::weak_ptr<ReactorGLES> submitted_reactor_;
   bool is_valid_ = false;
 
   CommandBufferGLES(std::weak_ptr<const Context> context,

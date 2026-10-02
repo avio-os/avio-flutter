@@ -21,6 +21,63 @@
 
 namespace flutter {
 
+bool EmbedderExternalViewEmbedder::SupportsAvioEmptyFrames() const {
+  return compositor_mode_ == kFlutterCompositorModeRootRenderTarget &&
+         (avio_frame_features_ & kFlutterAvioExtensionFeatureEmptyFrame) != 0;
+}
+
+bool EmbedderExternalViewEmbedder::SupportsAvioFrameFacts(
+    const AvioFrameFacts& facts) const {
+  return facts.IsValid() &&
+         (!facts.HasMetadata() ||
+          compositor_mode_ == kFlutterCompositorModeRootRenderTarget) &&
+         (!facts.item_opacity ||
+          (avio_frame_features_ & kFlutterAvioExtensionFeatureItemEffects)) &&
+         (!facts.ground_authored ||
+          (avio_frame_features_ & kFlutterAvioExtensionFeatureOutputGround)) &&
+         (!facts.ready_content_revision ||
+          (avio_frame_features_ & kFlutterAvioExtensionFeatureReadyContent));
+}
+
+bool EmbedderExternalViewEmbedder::SubmitAvioEmptyFrame(
+    int64_t view_id,
+    const SurfaceFrame::SubmitInfo& info) {
+  if (root_target_results_.contains(view_id)) {
+    return false;  // One terminal callback per view in this frame.
+  }
+  if (!SupportsAvioEmptyFrames() ||
+      !SupportsAvioFrameFacts(info.avio_frame_facts) ||
+      info.avio_frame_facts.ready_content_revision.has_value() ||
+      !info.avio_compositor_materials.empty() ||
+      !info.avio_window_previews.empty() ||
+      info.avio_compositor_materials_invalid ||
+      info.avio_window_previews_invalid || composition_order_.size() != 1u ||
+      pending_root_render_target_) {
+    RejectAvioFrameFacts(view_id);
+    return false;
+  }
+  pending_frame_facts_ = info.avio_frame_facts;
+  const bool accepted = CompleteRootRenderTarget(
+      view_id, kFlutterPresentRenderTargetStatusEmptyContent);
+  if (accepted) {
+    // A subsequent pixel frame must establish fresh coverage, even if an old
+    // physical backing store is still retained while its readers drain.
+    root_paint_regions_.erase(view_id);
+    // Drop only engine cache custody through the ordinary backing-store
+    // collection edge. Submitted GPU/producer readers retain their resources.
+    render_target_caches_.erase(view_id);
+  }
+  return accepted;
+}
+
+void EmbedderExternalViewEmbedder::RejectAvioFrameFacts(int64_t view_id) {
+  pending_frame_facts_ = {};
+  if (compositor_mode_ == kFlutterCompositorModeRootRenderTarget) {
+    CompleteRootRenderTarget(
+        view_id, kFlutterPresentRenderTargetStatusInvalidFrameFacts);
+  }
+}
+
 static const auto kRootViewIdentifier = EmbedderExternalView::ViewIdentifier{};
 
 EmbedderExternalViewEmbedder::EmbedderExternalViewEmbedder(
@@ -30,10 +87,12 @@ EmbedderExternalViewEmbedder::EmbedderExternalViewEmbedder(
     const CreateRenderTargetCallback& create_render_target_callback,
     const AcquireRenderTargetCallback& acquire_render_target_callback,
     const PresentCallback& present_callback,
-    const PresentRenderTargetCallback& present_render_target_callback)
+    const PresentRenderTargetCallback& present_render_target_callback,
+    FlutterAvioExtensionFeatures avio_frame_features)
     : compositor_mode_(compositor_mode),
       selected_target_damage_(selected_target_damage),
       avoid_backing_store_cache_(avoid_backing_store_cache),
+      avio_frame_features_(avio_frame_features),
       create_render_target_callback_(create_render_target_callback),
       acquire_render_target_callback_(acquire_render_target_callback),
       present_callback_(present_callback),
@@ -111,6 +170,7 @@ void EmbedderExternalViewEmbedder::PrepareFlutterView(
     DlISize frame_size,
     double device_pixel_ratio) {
   Reset();
+  pending_frame_facts_ = {};
 
   pending_frame_size_ = frame_size;
   pending_device_pixel_ratio_ = device_pixel_ratio;
@@ -616,7 +676,7 @@ class Layer {
 
   /// Renders this layer Flutter contents to the render target previously
   /// assigned with SetRenderTarget.
-  void RenderFlutterContents(bool frame_boundary) {
+  void RenderFlutterContents(bool frame_boundary, int64_t flutter_view_id) {
     FML_DCHECK(has_flutter_contents());
     if (!render_target_) {
       return;
@@ -624,7 +684,7 @@ class Layer {
 
 #ifdef IMPELLER_SUPPORTS_RENDERING
     if (render_target_->GetImpellerRenderTarget()) {
-      RenderFlutterContentsImpeller(frame_boundary);
+      RenderFlutterContentsImpeller(frame_boundary, flutter_view_id);
       return;
     }
 #endif  // IMPELLER_SUPPORTS_RENDERING
@@ -632,7 +692,7 @@ class Layer {
 #if SLIMPELLER
     FML_LOG(FATAL) << "Impeller opt-out unavailable.";
 #else   // SLIMPELLER
-    RenderFlutterContentsSkia();
+    RenderFlutterContentsSkia(flutter_view_id);
 #endif  // SLIMPELLER
   }
 
@@ -679,7 +739,7 @@ class Layer {
     }
   }
 
-  void RenderFlutterContentsSkia() {
+  void RenderFlutterContentsSkia(int64_t flutter_view_id) {
     auto skia_surface = render_target_->GetSkiaSurface();
     if (!skia_surface) {
       return;
@@ -717,7 +777,7 @@ class Layer {
     for (auto c : flutter_contents_) {
       FML_DCHECK(render_target_->GetRenderTargetSize() ==
                  c->GetRenderSurfaceSize());
-      c->Render(dl_canvas, clear_surface);
+      c->Render(dl_canvas, clear_surface, flutter_view_id);
       clear_surface = false;
     }
     dl_canvas.Flush();
@@ -725,13 +785,14 @@ class Layer {
 #endif  //  !SLIMPELLER
 
 #ifdef IMPELLER_SUPPORTS_RENDERING
-  void RenderFlutterContentsImpeller(bool frame_boundary) {
+  void RenderFlutterContentsImpeller(bool frame_boundary,
+                                     int64_t flutter_view_id) {
     auto dl_builder = DisplayListBuilder();
     bool clear_surface = true;
     for (auto c : flutter_contents_) {
       FML_DCHECK(render_target_->GetRenderTargetSize() ==
                  c->GetRenderSurfaceSize());
-      c->Render(dl_builder, clear_surface);
+      c->Render(dl_builder, clear_surface, flutter_view_id);
       clear_surface = false;
     }
     auto display_list = dl_builder.Build();
@@ -805,7 +866,7 @@ class LayerBuilder {
 
   /// Renders all layers with Flutter contents to their respective render
   /// targets.
-  void Render() {
+  void Render(int64_t flutter_view_id) {
     // Find the last layer that has Flutter contents.  The frame boundary flag
     // will be set for this layer.
     auto last_flutter_layer_rev_iter =
@@ -819,7 +880,7 @@ class LayerBuilder {
     for (auto iter = layers_.begin(); iter != layers_.end(); iter++) {
       bool frame_boundary = iter == last_flutter_layer_iter;
       if (iter->has_flutter_contents()) {
-        iter->RenderFlutterContents(frame_boundary);
+        iter->RenderFlutterContents(frame_boundary, flutter_view_id);
       }
     }
   }
@@ -975,7 +1036,7 @@ void EmbedderExternalViewEmbedder::SubmitGenericFlutterView(
   }
 #endif  // !SLIMPELLER
 
-  builder.Render();
+  builder.Render(flutter_view_id);
 
   if (aiks_context) {
     aiks_context->GetContext()->DisposeThreadLocalCachedResources();
@@ -1002,7 +1063,12 @@ void EmbedderExternalViewEmbedder::SubmitGenericFlutterView(
           pending_surface_transformation_, pending_device_pixel_ratio_);
   presented_layers.InvokePresentCallback(
       flutter_view_id, nullptr, compositor_materials,
-      submit_info.avio_compositor_materials_invalid, present_callback_);
+      submit_info.avio_compositor_materials_invalid,
+      [this, &submit_info](auto view_id, const auto& layers,
+                           const auto& materials, bool invalid) {
+        return present_callback_(view_id, layers, materials, invalid,
+                                 submit_info.avio_frame_facts);
+      });
 
   deferred_cleanup_render_targets.clear();
   for (auto& [descriptor, render_target] :
@@ -1044,6 +1110,7 @@ void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
     GrDirectContext* context,
     const std::shared_ptr<impeller::AiksContext>& aiks_context,
     std::unique_ptr<SurfaceFrame> frame) {
+  pending_frame_facts_ = frame->submit_info().avio_frame_facts;
   // The unordered_map render_target_cache creates a new entry if the view ID is
   // unrecognized.
   EmbedderRenderTargetCache& render_target_cache =
@@ -1215,7 +1282,8 @@ void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
   // the embedder -- has to describe the raster that happened.
   std::optional<DlRegion> rastered_damage = submit_info.buffer_damage;
   const auto render_bounds = DlRect::MakeSize(descriptor.surface_size);
-  switch (root_view->Render(*render_target, render_bounds, rastered_damage)) {
+  switch (root_view->Render(*render_target, render_bounds, rastered_damage,
+                            true, flutter_view_id)) {
     case EmbedderExternalView::RenderResult::kAllocationFailedBeforeSubmit:
       deferred_cleanup_render_targets.clear();
       CompleteRootRenderTarget(
@@ -1305,6 +1373,19 @@ void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
   };
 
   auto render_complete_sync_fd = render_target->TakeRenderCompleteSyncFD();
+  if (selected_target_damage_ &&
+      render_target->RequiresRenderCompleteSyncFD() &&
+      !render_complete_sync_fd.is_valid()) {
+    // Rendering may already be submitted. RasterFailed preserves the exact
+    // backing-store identity so the host quarantines it rather than treating
+    // fd=-1 as a synchronously complete Produced revision.
+    CompleteRootRenderTarget(flutter_view_id,
+                             kFlutterPresentRenderTargetStatusRasterFailed,
+                             render_target->GetBackingStore());
+    deferred_cleanup_render_targets.clear();
+    frame->Submit();
+    return;
+  }
   FlutterBackingStorePresentInfo present_info = {
       .struct_size = sizeof(FlutterBackingStorePresentInfo),
       .paint_region = &paint_region,
@@ -1362,12 +1443,17 @@ bool EmbedderExternalViewEmbedder::CompleteRootRenderTarget(
       status, backing_store, backing_store_present_info,
       compositor_materials ? *compositor_materials : kNoMaterials,
       compositor_materials_invalid,
-      window_previews ? *window_previews : kNoPreviews,
-      window_previews_invalid);
+      window_previews ? *window_previews : kNoPreviews, window_previews_invalid,
+      status == kFlutterPresentRenderTargetStatusPresented ||
+              status == kFlutterPresentRenderTargetStatusNoVisualChange ||
+              status == kFlutterPresentRenderTargetStatusEmptyContent
+          ? pending_frame_facts_
+          : AvioFrameFacts{});
   RootRenderTargetResult result = RootRenderTargetResult::kRejected;
   if (accepted) {
     switch (status) {
       case kFlutterPresentRenderTargetStatusPresented:
+      case kFlutterPresentRenderTargetStatusEmptyContent:
         result = RootRenderTargetResult::kPresented;
         break;
       case kFlutterPresentRenderTargetStatusNoVisualChange:

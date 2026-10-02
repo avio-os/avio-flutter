@@ -7,6 +7,7 @@
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/texture.h"
+#include "impeller/renderer/render_resource_scope.h"
 
 namespace impeller {
 
@@ -38,6 +39,8 @@ std::shared_ptr<Texture> EntityPassTarget::Flip(
   }
 
   if (!secondary_color_texture_) {
+    const AvioResourceAllocationScope allocation_scope(
+        AvioRenderResourceKind::kFlipTargets);
     // The second texture is allocated lazily to avoid unused allocations.
     const TextureDescriptor resolve_descriptor =
         color0.resolve_texture->GetTextureDescriptor();

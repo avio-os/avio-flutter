@@ -79,6 +79,7 @@ std::optional<Entity> RuntimeEffectFilterContents::RenderFilter(
     });
     TextureContents texture_contents;
     texture_contents.SetTexture(input_snapshot->texture);
+    texture_contents.SetResourceOwner(input_snapshot->resource_owner);
     std::optional<Rect> bounds =
         Rect::MakePointBounds(quad.begin(), quad.end());
     if (bounds.has_value()) {
@@ -117,8 +118,12 @@ std::optional<Entity> RuntimeEffectFilterContents::RenderFilter(
       Entity entity;
       // In order to maintain precise coordinates in the fragment shader we need
       // to eliminate the padding typically given to RenderToSnapshot results.
-      input_snapshot = anonymous_contents->RenderToSnapshot(
-          renderer, entity, {.coverage_expansion = 0});
+      input_snapshot =
+          anonymous_contents->RenderToSnapshot(renderer, entity,
+                                               {.msaa_enabled = false,
+                                                .coverage_expansion = 0,
+                                                .depth_stencil_enabled = false,
+                                                .exact_texture_extent = true});
       if (!input_snapshot.has_value()) {
         return std::nullopt;
       }
@@ -160,6 +165,7 @@ std::optional<Entity> RuntimeEffectFilterContents::RenderFilter(
     contents.SetTextureInputs(texture_inputs);
     Entity offset_entity = entity.Clone();
     offset_entity.SetTransform(entity.GetTransform() * snapshot_transform);
+    pass.RetainResource(input_snapshot->resource_owner);
     return contents.Render(renderer, offset_entity, pass);
   };
 

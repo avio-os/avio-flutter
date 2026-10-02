@@ -13,6 +13,7 @@
 #include "impeller/renderer/backend/vulkan/capabilities_vk.h"
 #include "impeller/renderer/backend/vulkan/context_vk.h"
 #include "impeller/renderer/backend/vulkan/formats_vk.h"
+#include "impeller/renderer/backend/vulkan/pipeline_library_vk.h"
 #include "impeller/renderer/backend/vulkan/render_pass_builder_vk.h"
 #include "impeller/renderer/backend/vulkan/sampler_vk.h"
 #include "impeller/renderer/backend/vulkan/shader_function_vk.h"
@@ -469,7 +470,8 @@ std::unique_ptr<PipelineVK> PipelineVK::Create(
     const std::shared_ptr<DeviceHolderVK>& device_holder,
     const std::weak_ptr<PipelineLibrary>& weak_library,
     PipelineKey pipeline_key,
-    std::shared_ptr<SamplerVK> immutable_sampler) {
+    std::shared_ptr<SamplerVK> immutable_sampler,
+    AvioPipelineCreationOrigin origin) {
   TRACE_EVENT1("flutter", "PipelineVK::Create", "Name", desc.GetLabel().data());
 
   auto library = weak_library.lock();
@@ -516,7 +518,8 @@ std::unique_ptr<PipelineVK> PipelineVK::Create(
       std::move(pipeline_layout.value()),  //
       std::move(descs_layout.value()),     //
       pipeline_key,                        //
-      std::move(immutable_sampler)         //
+      std::move(immutable_sampler),        //
+      origin                               //
       ));
   if (!pipeline_vk->IsValid()) {
     VALIDATION_LOG << "Could not create a valid pipeline.";
@@ -533,7 +536,8 @@ PipelineVK::PipelineVK(std::weak_ptr<DeviceHolderVK> device_holder,
                        vk::UniquePipelineLayout layout,
                        vk::UniqueDescriptorSetLayout descriptor_set_layout,
                        PipelineKey pipeline_key,
-                       std::shared_ptr<SamplerVK> immutable_sampler)
+                       std::shared_ptr<SamplerVK> immutable_sampler,
+                       AvioPipelineCreationOrigin origin)
     : Pipeline(std::move(library), desc),
       device_holder_(std::move(device_holder)),
       pipeline_(std::move(pipeline)),
@@ -543,6 +547,12 @@ PipelineVK::PipelineVK(std::weak_ptr<DeviceHolderVK> device_holder,
       immutable_sampler_(std::move(immutable_sampler)),
       pipeline_key_(pipeline_key) {
   is_valid_ = pipeline_ && render_pass_ && layout_ && descriptor_set_layout_;
+  if (is_valid_) {
+    if (const auto library = library_.lock()) {
+      resource_registration_ = PipelineResourceLedger::Registration(
+          PipelineLibraryVK::Cast(*library).GetResourceLedger(), origin);
+    }
+  }
 }
 
 PipelineVK::~PipelineVK() {

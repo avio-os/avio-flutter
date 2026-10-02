@@ -128,6 +128,7 @@ std::optional<Entity> DirectionalMorphologyFilterContents::RenderFilter(
     VS::BindFrameInfo(pass, data_host_buffer.EmplaceUniform(frame_info));
     FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
 
+    pass.RetainResource(input_snapshot->resource_owner);
     return pass.Draw().ok();
   };
   std::shared_ptr<CommandBuffer> command_buffer =
@@ -157,10 +158,9 @@ std::optional<Entity> DirectionalMorphologyFilterContents::RenderFilter(
   sampler_desc.mag_filter = MinMagFilter::kLinear;
 
   return Entity::FromSnapshot(
-      Snapshot{.texture = render_target.value().GetRenderTargetTexture(),
-               .transform = Matrix::MakeTranslation(coverage.GetOrigin()),
-               .sampler_descriptor = sampler_desc,
-               .opacity = input_snapshot->opacity},
+      Snapshot::FromRenderTarget(render_target.value(),
+                                 Matrix::MakeTranslation(coverage.GetOrigin()),
+                                 sampler_desc, input_snapshot->opacity),
       entity.GetBlendMode());
 }
 

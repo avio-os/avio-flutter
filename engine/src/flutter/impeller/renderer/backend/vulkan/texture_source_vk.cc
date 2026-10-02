@@ -12,6 +12,14 @@ TextureSourceVK::TextureSourceVK(TextureDescriptor desc) : desc_(desc) {}
 
 TextureSourceVK::~TextureSourceVK() = default;
 
+void TextureSourceVK::ReleaseCachedFrameData() {
+  frame_data_.clear();
+  // A failed submission can return the exact producer wait to this source.
+  // Release that native handle before a foreign collection callback may drop
+  // its device owner; the OS render-completion FD has no such dependency.
+  returned_acquire_semaphore_.reset();
+}
+
 const TextureDescriptor& TextureSourceVK::GetTextureDescriptor() const {
   return desc_;
 }
@@ -22,6 +30,24 @@ std::shared_ptr<YUVConversionVK> TextureSourceVK::GetYUVConversion() const {
 
 std::optional<WaitSemaphore> TextureSourceVK::ConsumeAcquireSemaphore() const {
   return std::nullopt;
+}
+
+std::optional<WaitSemaphore> TextureSourceVK::TakeAcquireSemaphoreForSubmit()
+    const {
+  if (returned_acquire_semaphore_) {
+    WaitSemaphore wait;
+    wait.semaphore = std::move(returned_acquire_semaphore_);
+    wait.wait_stage = returned_acquire_stage_;
+    return wait;
+  }
+  return ConsumeAcquireSemaphore();
+}
+
+void TextureSourceVK::ReturnAcquireSemaphoreFromFailedSubmit(
+    WaitSemaphore wait) const {
+  FML_DCHECK(!returned_acquire_semaphore_);
+  returned_acquire_semaphore_ = std::move(wait.semaphore);
+  returned_acquire_stage_ = wait.wait_stage;
 }
 
 std::shared_ptr<ExternalSemaphoreVK>
@@ -44,6 +70,8 @@ TextureSourceVK::GetExternalImageOwnership() const {
 size_t TextureSourceVK::GetAllocatedByteSize() const {
   return 0u;
 }
+
+void TextureSourceVK::RecordAvioImageUpload(bool raster_frame) const {}
 
 vk::ImageLayout TextureSourceVK::GetLayout() const {
   return layout_;

@@ -20,6 +20,7 @@
 #include "flutter/fml/task_queue_id.h"
 #include "flutter/fml/time/time_point.h"
 #include "flutter/fml/unique_fd.h"
+#include "impeller/core/antialiasing_policy.h"
 
 namespace flutter {
 
@@ -362,6 +363,9 @@ struct Settings {
   // Stock embedders leave this zero. Keeping the value instance-local lets
   // extension entry points reject calls that were not negotiated.
   uint64_t avio_extension_features = 0;
+
+  // Copied exact opt-in policy. Absence preserves legacy msaa4 behavior.
+  std::optional<impeller::AvioAntialiasingConfig> avio_antialiasing_config;
 
   // This data will be available to the isolate immediately on launch via the
   // PlatformDispatcher.getPersistentIsolateData callback. This is meant for

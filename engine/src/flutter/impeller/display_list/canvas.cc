@@ -25,16 +25,20 @@
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/display_list/color_filter.h"
+#include "impeller/display_list/coverage_classifier.h"
 #include "impeller/display_list/dl_image_impeller.h"
 #include "impeller/display_list/dl_vertices_geometry.h"
 #include "impeller/display_list/image_filter.h"
+#include "impeller/display_list/legacy_analytic_source.h"
 #include "impeller/display_list/skia_conversions.h"
+#include "impeller/entity/avio_coverage_region.h"
 #include "impeller/entity/contents/atlas_contents.h"
 #include "impeller/entity/contents/circle_contents.h"
 #include "impeller/entity/contents/clip_contents.h"
 #include "impeller/entity/contents/color_source_contents.h"
 #include "impeller/entity/contents/complex_rse_contents.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/contents/coverage_mask_contents.h"
 #include "impeller/entity/contents/external_coverage_contents.h"
 #include "impeller/entity/contents/filters/filter_contents.h"
 #include "impeller/entity/contents/framebuffer_blend_contents.h"
@@ -52,6 +56,7 @@
 #include "impeller/entity/geometry/arc_geometry.h"
 #include "impeller/entity/geometry/circle_geometry.h"
 #include "impeller/entity/geometry/cover_geometry.h"
+#include "impeller/entity/geometry/coverage_geometry.h"
 #include "impeller/entity/geometry/ellipse_geometry.h"
 #include "impeller/entity/geometry/fill_path_geometry.h"
 #include "impeller/entity/geometry/geometry.h"
@@ -78,6 +83,24 @@ namespace {
 
 constexpr Scalar kAntialiasPadding = 1.0f;
 
+void RecordCoverageDraw(const ContentContext& renderer,
+                        const Entity& entity,
+                        const RenderPass& pass) {
+  if (!renderer.UsesAvioCoverage() ||
+      pass.GetSampleCount() != SampleCount::kCount4) {
+    return;
+  }
+  const Rect bounds = Rect::MakeSize(pass.GetRenderTargetSize());
+  const Rect coverage =
+      entity.GetCoverage().value_or(bounds).IntersectionOrEmpty(bounds);
+  const auto size = IRect::RoundOut(coverage).GetSize();
+  const uint64_t area = size.IsEmpty() ? 0u
+                                       : static_cast<uint64_t>(size.width) *
+                                             static_cast<uint64_t>(size.height);
+  renderer.GetContext()->RecordAvioCoverageDraw(
+      AvioCoverageReason::kNativeColourIsland, area);
+}
+
 bool IsPipelineBlendOrMatrixFilter(const flutter::DlColorFilter* filter) {
   return filter->type() == flutter::DlColorFilterType::kMatrix ||
          (filter->type() == flutter::DlColorFilterType::kBlend &&
@@ -101,6 +124,8 @@ static bool UseColorSourceContents(
 static void SetClipScissor(std::optional<Rect> clip_coverage,
                            RenderPass& pass,
                            Point global_pass_position) {
+  // Clip cover/depth writes may affect the complement of the shape.
+  pass.SetDrawCoverage(std::nullopt);
   // Set the scissor to the clip coverage area. We do this prior to rendering
   // the clip itself and all its contents.
   IRect32 scissor;
@@ -129,12 +154,15 @@ static void ApplyFramebufferBlend(Entity& entity) {
 static std::shared_ptr<Contents> CreateContentsForSubpassTarget(
     const ContentContext& renderer,
     const Paint& paint,
-    const std::shared_ptr<Texture>& target,
+    const RenderTarget& target,
     const Matrix& effect_transform) {
-  auto contents = TextureContents::MakeRect(Rect::MakeSize(target->GetSize()));
-  contents->SetTexture(target);
+  const auto snapshot = Snapshot::FromRenderTarget(target, Matrix{});
+  const Rect source = snapshot.GetTextureRect();
+  auto contents = TextureContents::MakeRect(source);
+  contents->SetTexture(snapshot.texture);
+  contents->SetResourceOwner(snapshot.resource_owner);
   contents->SetLabel("Subpass");
-  contents->SetSourceRect(Rect::MakeSize(target->GetSize()));
+  contents->SetSourceRect(source);
   contents->SetOpacity(paint.color.alpha);
   contents->SetDeferApplyingOpacity(true);
 
@@ -176,7 +204,20 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
   /// everywhere except the root pass over the caller's own render target.
 
   RenderTarget target;
-  if (context->GetCapabilities()->SupportsOffscreenMSAA()) {
+  if (renderer.UsesAvioCoverage()) {
+    const auto allocation =
+        renderer.GetAvioCoverageRegion()->AcquireLayer(size);
+    if (allocation.lease) {
+      target = allocation.lease->GetRenderTarget();
+      target.SetContentRect(allocation.lease->GetContentRect());
+      target.SetResourceOwner(allocation.lease);
+      auto color = target.GetColorAttachment(0u);
+      color.clear_color = clear_color;
+      color.load_action = LoadAction::kClear;
+      color.store_action = StoreAction::kStore;
+      target.SetColorAttachment(color, 0u);
+    }
+  } else if (context->GetCapabilities()->SupportsOffscreenMSAA()) {
     target = renderer.GetRenderTargetCache()->CreateOffscreenMSAA(
         /*context=*/*context,
         /*size=*/size,
@@ -211,6 +252,77 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
       renderer.GetDeviceCapabilities().SupportsReadFromResolve(),       //
       renderer.GetDeviceCapabilities().SupportsImplicitResolvingMSAA()  //
   );
+}
+
+// A shared backdrop keeps the exact completed prefix before the first card,
+// rather than a pointer to the parent that will be painted again. The region
+// bank owns physical storage; this immutable snapshot owns logical custody.
+static std::optional<Snapshot> CaptureCoverageBackdrop(
+    const ContentContext& renderer,
+    const RenderTarget& source,
+    Rect required_input,
+    const std::optional<Rect>& opaque_prefix) {
+  const auto texture = source.GetRenderTargetTexture();
+  if (!texture) {
+    return std::nullopt;
+  }
+  const auto bounds = source.GetContentRect().value_or(
+      IRect::MakeSize(source.GetRenderTargetSize()));
+  const auto roi =
+      IRect::RoundOut(required_input.Expand(1)).Intersection(bounds);
+  if (!roi || roi->IsEmpty()) {
+    return std::nullopt;
+  }
+  const auto allocation =
+      renderer.GetAvioCoverageRegion()->AcquireLayer(roi->GetSize());
+  if (!allocation.lease) {
+    return std::nullopt;
+  }
+  const auto leased = allocation.lease->GetRenderTarget();
+  RenderTarget destination;
+  destination.SetColorAttachment(leased.GetColorAttachment(0), 0);
+  destination.SetContentRect(allocation.lease->GetContentRect());
+  destination.SetResourceOwner(allocation.lease);
+  const auto commands = renderer.GetContext()->CreateCommandBuffer();
+  const auto prepare = commands ? commands->CreateBlitPass() : nullptr;
+  if (!prepare || !prepare->ConvertTextureToShaderRead(texture) ||
+      !prepare->EncodeCommands()) {
+    return std::nullopt;
+  }
+  const auto pass = commands->CreateRenderPass(destination);
+  if (!pass) {
+    return std::nullopt;
+  }
+  auto contents = TextureContents::MakeRect(Rect::MakeSize(roi->GetSize()));
+  contents->SetTexture(texture);
+  contents->SetResourceOwner(source.GetResourceOwner());
+  contents->SetSourceRect(Rect::Make(*roi));
+  contents->SetStencilEnabled(false);
+  SamplerDescriptor sampler;
+  sampler.min_filter = MinMagFilter::kNearest;
+  sampler.mag_filter = MinMagFilter::kNearest;
+  sampler.mip_filter = MipFilter::kBase;
+  contents->SetSamplerDescriptor(sampler);
+  Entity entity;
+  entity.SetBlendMode(BlendMode::kSrc);
+  entity.SetContents(contents);
+  if (!contents->Render(renderer, entity, *pass) || !pass->EncodeCommands() ||
+      !renderer.GetContext()->EnqueueCommandBuffer(commands)) {
+    return std::nullopt;
+  }
+  auto snapshot = Snapshot::FromRenderTarget(
+      destination, Matrix::MakeTranslation(Vector3(Point(roi->GetOrigin()))),
+      sampler);
+  snapshot.is_immutable_captured_backdrop = true;
+  if (opaque_prefix) {
+    const auto opaque = opaque_prefix->Intersection(Rect::Make(*roi));
+    if (opaque) {
+      snapshot.captured_opaque_texels =
+          opaque->Shift(Point(allocation.lease->GetContentRect().GetOrigin()) -
+                        Point(roi->GetOrigin()));
+    }
+  }
+  return snapshot;
 }
 
 /// @brief  Expands the rectangle to satisfy a 1-device-pixel minimum size using
@@ -492,6 +604,102 @@ Canvas::~Canvas() {
   if (render_target_scope_.has_value()) {
     renderer_.GetRenderTargetCache()->EndScope(*render_target_scope_);
   }
+  if (avio_raster_frame_open_) {
+    // A failed replay may still own recorded packets; release them before
+    // ending logical region custody, without submitting a partial new pass.
+    render_passes_.clear();
+    renderer_.EndAvioRasterFrame();
+  }
+}
+
+void Canvas::SetCoverageDisplayListPlan(
+    std::shared_ptr<const CoverageDisplayListPlan> plan) {
+  coverage_display_list_plan_ = std::move(plan);
+  if (!renderer_.UsesAvioCoverage() || render_passes_.size() != 1) {
+    return;
+  }
+  // Install the complete replay proof before the first pipeline observes the
+  // pass's physical sample count. An individual image never splits a mixed
+  // native4 painter-order segment into independently resolved edges.
+  const bool direct = HasAvioDirect1xScopeProof();
+  if (!render_passes_.front().GetInlinePassContext()->SetAvioDirect1xProof(
+          direct)) {
+    rendering_failed_ = true;
+  }
+}
+
+bool Canvas::HasAvioDirect1xScopeProof() const {
+  return !rendering_failed_ && renderer_.UsesAvioCoverage() &&
+         render_passes_.size() == 1 && coverage_display_list_plan_ &&
+         coverage_display_list_plan_->GetRoot().can_render_direct_1x &&
+         (!coverage_display_list_plan_->GetRoot().requires_legacy_sdf ||
+          renderer_.GetContext()->GetFlags().use_sdfs) &&
+         renderer_.GetContext()
+                 ->GetAvioAntialiasingConfig()
+                 .continuous_requested_classes == 0 &&
+         !transform_stack_.back().continuous_clip;
+}
+
+bool Canvas::UseLegacySdfSource(const Paint& paint) const {
+  return SelectLegacyAnalyticSourceRoute(
+             renderer_.GetContext()->GetAvioAntialiasingConfig(),
+             renderer_.GetContext()->GetFlags().use_sdfs,
+             IsCompatibleWithSDFRendering(paint),
+             HasAvioDirect1xScopeProof()) !=
+         LegacyAnalyticSourceRoute::kGeometry;
+}
+
+void Canvas::RetainSample4Clip(AvioSample4ClipNode node,
+                               const CoverageClipDecision* decision,
+                               RenderPass& pass) {
+  auto& state = transform_stack_.back();
+  auto descriptor = state.sample4_clip_complete
+                        ? renderer_.AcquireAvioSample4Clip(state.sample4_clip)
+                        : nullptr;
+  const bool appended =
+      descriptor &&
+      (node.quad   ? descriptor->AppendQuad(*node.quad, node.operation)
+       : node.mask ? descriptor->AppendMask(*node.mask, node.operation)
+                   : node.geometry &&
+                         descriptor->AppendGeometry(
+                             *node.geometry, node.GetBounds(), node.operation));
+  if (appended) {
+    descriptor->logical_pass_size = pass.GetRenderTargetSize();
+    auto& retained = descriptor->nodes[descriptor->count - 1];
+    retained.clip_depth = node.clip_depth;
+    if (node.coverage_proof_valid) {
+      retained.SetCoverageProof(
+          node.GetBounds(),
+          std::span(node.full_coverage_pixels).first(node.full_coverage_count));
+    }
+    const auto segment_token = decision ? decision->segment_token : 0;
+    descriptor->nodes[descriptor->count - 1].declaration_token = segment_token;
+    bool exact_stack = decision &&
+                       decision->stack_depth == descriptor->GetDepth() &&
+                       decision->stack_depth <= decision->stack_tokens.size();
+    size_t stack_index = 0;
+    exact_stack =
+        exact_stack && descriptor->ForEachNode([&](const auto& entry) {
+          return entry.declaration_token ==
+                 decision->stack_tokens[stack_index++];
+        });
+    descriptor->segment_token = segment_token;
+    descriptor->strategy = decision ? decision->GetStrategy()
+                                    : ClipCoverageStrategy::kFringeIsland;
+    descriptor->no_external_fringe_correlation =
+        exact_stack && decision->no_external_fringe_correlation;
+    descriptor->all_draws_full_clip_geometry =
+        exact_stack && decision->all_draws_full_clip_geometry;
+    descriptor->all_sources_opaque =
+        exact_stack && decision->all_sources_opaque;
+    state.sample4_clip = std::move(descriptor);
+  } else {
+    // Keep the exact native clip-depth packets. Incomplete descriptors never
+    // replace an unrepresented parent or a deeper logical clip stack.
+    state.sample4_clip.reset();
+    state.sample4_clip_complete = false;
+  }
+  pass.SetAvioSample4Clip(state.sample4_clip, state.sample4_clip_complete);
 }
 
 void Canvas::Initialize(std::optional<Rect> cull_rect) {
@@ -689,8 +897,15 @@ bool Canvas::AttemptColorFilterOptimization(
 bool Canvas::AttemptDrawAntialiasedCircle(const Point& center,
                                           Scalar radius,
                                           const Paint& paint) {
-  if (paint.HasColorFilter() || paint.image_filter || paint.invert_colors ||
-      paint.color_source || paint.mask_blur_descriptor.has_value()) {
+  // The original source is retained in native4 replay. The opt-in continuous
+  // wrapper exports its raw distance before combining shape and clip coverage.
+  const bool compatible = !paint.HasColorFilter() && !paint.image_filter &&
+                          !paint.invert_colors && !paint.color_source &&
+                          !paint.mask_blur_descriptor.has_value();
+  if (SelectLegacyAnalyticSourceRoute(
+          renderer_.GetContext()->GetAvioAntialiasingConfig(),
+          /*source_enabled=*/true, compatible, HasAvioDirect1xScopeProof()) ==
+      LegacyAnalyticSourceRoute::kGeometry) {
     return false;
   }
 
@@ -943,8 +1158,7 @@ bool Canvas::AttemptDrawLineSDF(const Point& p0,
                                 const Point& p1,
                                 const Paint& paint,
                                 bool reuse_depth) {
-  if (!renderer_.GetContext()->GetFlags().use_sdfs ||
-      !IsCompatibleWithSDFRendering(paint)) {
+  if (!UseLegacySdfSource(paint)) {
     return false;
   }
   // Draw the line as a filled rectangle with width=line_length and
@@ -1082,8 +1296,7 @@ void Canvas::DrawRect(const Rect& rect, const Paint& paint) {
     }
   }
 
-  if (renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint)) {
+  if (UseLegacySdfSource(paint)) {
     Rect effective_rect = rect;
     Color effective_color = paint.color;
 
@@ -1155,8 +1368,7 @@ void Canvas::DrawOval(const Rect& rect, const Paint& paint) {
   entity.SetTransform(GetCurrentTransform());
   entity.SetBlendMode(paint.blend_mode);
 
-  if (renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint)) {
+  if (UseLegacySdfSource(paint)) {
     UberSDFParameters params;
 
     if (paint.style == Paint::Style::kStroke) {
@@ -1179,6 +1391,16 @@ void Canvas::DrawOval(const Rect& rect, const Paint& paint) {
 }
 
 void Canvas::DrawArc(const Arc& arc, const Paint& paint) {
+  if (arc.GetOvalBounds().IsEmpty() || arc.GetSweep().degrees == 0) {
+    return;
+  }
+  if (renderer_.GetContext()->GetAvioAntialiasingConfig().RequestsContinuous(
+          AvioContinuousClass::kArc) &&
+      paint.anti_alias && !paint.mask_blur_descriptor) {
+    AddRenderSDFEntityToCurrentPass(
+        paint, UberSDFParameters::MakeArc(paint.color, arc, paint.GetStroke()));
+    return;
+  }
   Entity entity;
   entity.SetTransform(GetCurrentTransform());
   entity.SetBlendMode(paint.blend_mode);
@@ -1243,8 +1465,7 @@ void Canvas::DrawRoundRect(const RoundRect& round_rect, const Paint& paint) {
 
   const RoundingRadii& radii = round_rect.GetRadii();
 
-  if (renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint) && radii.AreAllCornersCircular()) {
+  if (UseLegacySdfSource(paint) && radii.AreAllCornersCircular()) {
     Color effective_color = paint.color;
     Rect bounds = round_rect.GetBounds();
 
@@ -1302,6 +1523,18 @@ void Canvas::DrawRoundRect(const RoundRect& round_rect, const Paint& paint) {
 void Canvas::DrawDiffRoundRect(const RoundRect& outer,
                                const RoundRect& inner,
                                const Paint& paint) {
+  if (outer.IsEmpty()) {
+    return;
+  }
+  if (renderer_.GetContext()->GetAvioAntialiasingConfig().RequestsContinuous(
+          AvioContinuousClass::kBorderedRoundedRect) &&
+      paint.anti_alias && !paint.mask_blur_descriptor) {
+    auto params =
+        UberSDFParameters::MakeBorderedRoundedRect(paint.color, outer, inner);
+    params.stroke = paint.GetStroke();
+    AddRenderSDFEntityToCurrentPass(paint, params);
+    return;
+  }
   Entity entity;
   entity.SetTransform(GetCurrentTransform());
   entity.SetBlendMode(paint.blend_mode);
@@ -1327,8 +1560,7 @@ void Canvas::DrawRoundSuperellipse(const RoundSuperellipse& round_superellipse,
   entity.SetTransform(GetCurrentTransform());
   entity.SetBlendMode(paint.blend_mode);
 
-  if (renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint)) {
+  if (UseLegacySdfSource(paint)) {
     auto round_superellipse_params = RoundSuperellipseParam::MakeBoundsRadii(
         round_superellipse.GetBounds(), round_superellipse.GetRadii());
 
@@ -1395,8 +1627,7 @@ void Canvas::DrawCircle(const Point& center,
     }
   }
 
-  if (renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint)) {
+  if (UseLegacySdfSource(paint)) {
     auto params = UberSDFParameters::MakeCircle(
         /*color=*/paint.color, /*center=*/center, /*radius=*/radius,
         /*stroke=*/paint.GetStroke());
@@ -1423,7 +1654,8 @@ void Canvas::DrawCircle(const Point& center,
 
 void Canvas::ClipGeometry(const Geometry& geometry,
                           Entity::ClipOperation clip_op,
-                          bool is_aa) {
+                          bool is_aa,
+                          std::optional<AvioContinuousClip> continuous) {
   if (IsSkipping()) {
     return;
   }
@@ -1450,12 +1682,81 @@ void Canvas::ClipGeometry(const Geometry& geometry,
   if (!clip_coverage.has_value()) {
     return;
   }
+  if (clip_op == Entity::ClipOperation::kDifference &&
+      clip_coverage->IsEmpty()) {
+    return;
+  }
 
+  // A frozen declaration token and the whole physical clip stack authorize a
+  // correlated specialized route. A missing identity retains native replay.
+  bool classified_scissor = false;
+  std::optional<CoverageClipDecision> clip_decision;
+  if (coverage_display_list_plan_) {
+    std::array<uint64_t, AvioSample4ClipDescriptor::kMaxDepth> parent_tokens{};
+    size_t parent_count = 0;
+    const auto& parent = transform_stack_.back().sample4_clip;
+    if (transform_stack_.back().sample4_clip_complete && parent) {
+      if (!parent->ForEachNode([&](const auto& entry) {
+            if (parent_count == parent_tokens.size()) {
+              return false;
+            }
+            parent_tokens[parent_count++] = entry.declaration_token;
+            return true;
+          })) {
+        parent_count = 0;
+      }
+    }
+    const Rect physical = clip_coverage->Shift(GetGlobalPassPosition());
+    clip_decision = coverage_display_list_plan_->FindClipDecision(
+        physical, GetCurrentTransform(), clip_op, geometry.IsAxisAlignedRect(),
+        is_aa, std::span(parent_tokens).first(parent_count));
+    classified_scissor =
+        geometry.IsAxisAlignedRect() && clip_decision &&
+        clip_decision->GetStrategy() == ClipCoverageStrategy::kScissorOnly &&
+        GetCurrentTransform().IsAligned2D() &&
+        CanUseRectClipScissor4(physical, clip_op);
+  }
+
+  if (!continuous && geometry.IsAxisAlignedRect()) {
+    if (const auto bounds = geometry.GetCoverage(Matrix{})) {
+      continuous = AvioContinuousClip::RectClip(*bounds);
+    }
+  }
+  const auto& aa_config = renderer_.GetContext()->GetAvioAntialiasingConfig();
+  const bool analytic_clip =
+      is_aa && continuous &&
+      aa_config.RequestsContinuous(continuous->shape_class);
+  std::shared_ptr<const AvioContinuousClipExpression> next_expression;
+  if (analytic_clip) {
+    auto primitive = continuous->Transform(clip_transform);
+    auto expression = renderer_.AcquireAvioContinuousClipExpression(
+        transform_stack_.back().continuous_clip);
+    if (!primitive || !expression ||
+        !expression->Append(*primitive,
+                            clip_op == Entity::ClipOperation::kDifference)) {
+      VALIDATION_LOG << "Continuous clip state admission failed.";
+      rendering_failed_ = true;
+      return;
+    }
+    next_expression = std::move(expression);
+    transform_stack_.back().continuous_clip = next_expression;
+    // Scissor is only a conservative bound. Retain the analytic fringe and
+    // final distance expression instead of clipping at the unexpanded edge.
+    if (!clip_coverage->IsEmpty()) {
+      clip_coverage = clip_coverage->Expand(1.f);
+    }
+  }
   ClipContents clip_contents(
       clip_coverage.value(),
-      /*is_axis_aligned_rect=*/geometry.IsAxisAlignedRect() &&
-          GetCurrentTransform().IsTranslationScaleOnly());
+      /*is_axis_aligned_rect=*/!analytic_clip && geometry.IsAxisAlignedRect() &&
+          (classified_scissor ||
+           GetCurrentTransform().IsTranslationScaleOnly()));
   clip_contents.SetClipOperation(clip_op);
+  if (next_expression) {
+    transform_stack_.back().sample4_clip.reset();
+    transform_stack_.back().sample4_clip_complete = false;
+    clip_contents.SetContinuousClip(next_expression);
+  }
 
   EntityPassClipStack::ClipStateResult clip_state_result =
       clip_coverage_stack_.RecordClip(
@@ -1468,7 +1769,8 @@ void Canvas::ClipGeometry(const Geometry& geometry,
 
   ++transform_stack_.back().clip_height;
   ++transform_stack_.back().num_clips;
-  if (!clip_state_result.clip_did_change && !clip_state_result.should_render) {
+  if (!clip_state_result.clip_did_change && !clip_state_result.should_render &&
+      !renderer_.UsesAvioCoverage()) {
     return;
   }
   auto clip_pass = GetCurrentRenderPass();
@@ -1482,6 +1784,22 @@ void Canvas::ClipGeometry(const Geometry& geometry,
   }
 
   if (!clip_state_result.should_render) {
+    if (renderer_.UsesAvioCoverage()) {
+      // Preserve an exact declaration token even when native clipping needed
+      // only the rounded/intersected scissor. The flattened recipe must carry
+      // this restriction through a deeper saved stack.
+      const auto coverage = clip_coverage_stack_.CurrentClipCoverage();
+      if (coverage) {
+        if (auto quad = CoverageConvexQuad4::Make(
+                coverage->Shift(-GetGlobalPassPosition()).GetPoints())) {
+          RetainSample4Clip({.quad = *quad,
+                             .clip_depth = clip_depth,
+                             .operation = ClipOperation::kIntersect},
+                            clip_decision ? &*clip_decision : nullptr,
+                            *clip_pass);
+        }
+      }
+    }
     return;
   }
 
@@ -1493,10 +1811,100 @@ void Canvas::ClipGeometry(const Geometry& geometry,
   entity.SetTransform(clip_transform);
   entity.SetClipDepth(clip_depth);
 
+  if (next_expression) {
+    if (!clip_contents.Render(renderer_, *clip_pass, clip_depth)) {
+      rendering_failed_ = true;
+    }
+    return;
+  }
+  if (renderer_.UsesAvioCoverage() && is_aa) {
+    if (renderer_.GetCoveragePathAtlas() && geometry.IsAxisAlignedRect() &&
+        clip_transform.IsAffine()) {
+      const auto rectangle = geometry.GetCoverage(Matrix{});
+      if (rectangle) {
+        auto points = rectangle->GetPoints();
+        for (auto& point : points) {
+          point = clip_transform * point;
+        }
+        if (auto quad = CoverageConvexQuad4::Make(points)) {
+          RetainSample4Clip(
+              {.quad = *quad, .clip_depth = clip_depth, .operation = clip_op},
+              clip_decision ? &*clip_decision : nullptr, *clip_pass);
+          clip_contents.SetCoverageQuad(*quad);
+          clip_coverage_stack_.GetLastReplayResult()
+              .clip_contents.SetCoverageQuad(*quad);
+          if (!clip_contents.Render(renderer_, *clip_pass, clip_depth)) {
+            rendering_failed_ = true;
+          }
+          return;
+        }
+      }
+    }
+    renderer_.ReclaimUnusedAvioSample4Clips();
+    const auto acquired = CoverageMaskContents::TryAcquireClipPathMask(
+        renderer_, clip_transform, clip_pass->GetRenderTargetSize(), geometry);
+    if (acquired.status == PreparedFillMaskStatus::kFailed) {
+      rendering_failed_ = true;
+      return;
+    }
+    if (acquired.status == PreparedFillMaskStatus::kPrepared ||
+        acquired.status == PreparedFillMaskStatus::kEmpty) {
+      std::vector<CoverageMaskTile> masks;
+      if (acquired.mask) {
+        masks.push_back(*acquired.mask);
+        AvioSample4ClipNode node = {.mask = *acquired.mask,
+                                    .clip_depth = clip_depth,
+                                    .operation = clip_op};
+        PopulateSample4CoverageProof(
+            node, clip_transform, continuous,
+            {.geometry = &geometry,
+             .covers_area = [](const void* value, const Matrix& transform,
+                               IRect box) {
+               return static_cast<const Geometry*>(value)->CoversArea(transform,
+                                                                      box);
+             }});
+        RetainSample4Clip(std::move(node),
+                          clip_decision ? &*clip_decision : nullptr,
+                          *clip_pass);
+      } else {
+        transform_stack_.back().sample4_clip.reset();
+        transform_stack_.back().sample4_clip_complete = false;
+        clip_pass->SetAvioSample4Clip(nullptr, false);
+      }
+      clip_contents.SetCoverageMasks(masks);
+      clip_coverage_stack_.GetLastReplayResult().clip_contents.SetCoverageMasks(
+          std::move(masks));
+      if (!clip_contents.Render(renderer_, *clip_pass, clip_depth)) {
+        rendering_failed_ = true;
+      }
+      return;
+    }
+  }
+
   GeometryResult geometry_result = geometry.GetPositionBuffer(renderer_,  //
                                                               entity,     //
                                                               *clip_pass  //
   );
+  if (renderer_.UsesAvioCoverage() && geometry_result.vertex_buffer) {
+    AvioSample4ClipNode node = {.geometry = geometry_result,
+                                .physical_bounds = *clip_coverage,
+                                .clip_depth = clip_depth,
+                                .operation = clip_op};
+    PopulateSample4CoverageProof(
+        node, clip_transform, continuous,
+        {.geometry = &geometry,
+         .covers_area = [](const void* value, const Matrix& transform,
+                           IRect box) {
+           return static_cast<const Geometry*>(value)->CoversArea(transform,
+                                                                  box);
+         }});
+    RetainSample4Clip(std::move(node),
+                      clip_decision ? &*clip_decision : nullptr, *clip_pass);
+  } else {
+    transform_stack_.back().sample4_clip.reset();
+    transform_stack_.back().sample4_clip_complete = false;
+    clip_pass->SetAvioSample4Clip(nullptr, false);
+  }
   clip_contents.SetGeometry(geometry_result);
   clip_coverage_stack_.GetLastReplayResult().clip_contents.SetGeometry(
       geometry_result);
@@ -1559,7 +1967,37 @@ void Canvas::DrawImageRect(const std::shared_ptr<Texture>& image,
     return;
   }
 
-  if (AttemptColorFilterOptimization(image, source, dest, paint, sampler,
+  const bool continuous_image_edge =
+      paint.anti_alias &&
+      renderer_.GetContext()->GetAvioAntialiasingConfig().RequestsContinuous(
+          AvioContinuousClass::kImageEdge);
+  const auto image_decision =
+      coverage_display_list_plan_
+          ? coverage_display_list_plan_->FindImageDecision(
+                dest, GetCurrentTransform(), paint.anti_alias, paint.blend_mode)
+          : std::nullopt;
+  const bool direct_image =
+      image_decision &&
+      image_decision->route ==
+          CoverageImageDecision::Route::kDirectWithoutCoverage &&
+      image_decision->fully_joint_mask && !continuous_image_edge &&
+      !transform_stack_.back().continuous_clip;
+  const bool analytic_image_1x =
+      image_decision &&
+      image_decision->route ==
+          CoverageImageDecision::Route::kAnalyticJointMask1x &&
+      image_decision->fully_joint_mask &&
+      image_decision->no_external_fringe_correlation &&
+      HasAvioDirect1xScopeProof() && !continuous_image_edge &&
+      !transform_stack_.back().sample4_clip;
+  if (analytic_image_1x && *clipped_source != source) {
+    // The frozen source-bound proof must agree with actual texture cropping.
+    // A changed destination could introduce an unclassified correlated edge.
+    rendering_failed_ = true;
+    return;
+  }
+  if (!continuous_image_edge &&
+      AttemptColorFilterOptimization(image, source, dest, paint, sampler,
                                      src_rect_constraint)) {
     return;
   }
@@ -1575,6 +2013,20 @@ void Canvas::DrawImageRect(const std::shared_ptr<Texture>& image,
 
   auto texture_contents = TextureContents::MakeRect(dest);
   texture_contents->SetTexture(image);
+  texture_contents->SetContinuousImageEdge(continuous_image_edge);
+  texture_contents->SetSample4ImageCoverage(!direct_image);
+  texture_contents->SetAnalyticSample4Image1x(analytic_image_1x);
+  const bool defer_geometry =
+      continuous_image_edge && !paint.image_filter &&
+      !paint.mask_blur_descriptor &&
+      (paint.HasColorFilter() ||
+       paint.blend_mode > Entity::kLastPipelineBlendMode);
+  texture_contents->SetDeferGeometryCoverage(defer_geometry);
+  std::optional<AvioContinuousClip> own_geometry;
+  if (defer_geometry) {
+    own_geometry = AvioContinuousClip::RectClip(dest);
+    own_geometry->shape_class = AvioContinuousClass::kImageEdge;
+  }
   texture_contents->SetSourceRect(*clipped_source);
   texture_contents->SetStrictSourceRect(src_rect_constraint ==
                                         SourceRectConstraint::kStrict);
@@ -1593,7 +2045,7 @@ void Canvas::DrawImageRect(const std::shared_ptr<Texture>& image,
   if (!paint.mask_blur_descriptor.has_value()) {
     entity.SetContents(
         paint.WithFilters(renderer_, std::move(texture_contents)));
-    AddRenderEntityToCurrentPass(entity);
+    AddRenderEntityToCurrentPass(entity, false, own_geometry);
     return;
   }
 
@@ -1712,13 +2164,17 @@ void Canvas::DrawVertices(const std::shared_ptr<VerticesGeometry>& vertices,
   contents->SetLazyTextureCoverage(src_coverage);
   contents->SetLazyTexture(
       [src_contents, src_coverage](
-          const ContentContext& renderer) -> std::shared_ptr<Texture> {
+          const ContentContext& renderer) -> std::optional<Snapshot> {
         // Applying the src coverage as the coverage limit prevents the 1px
         // coverage pad from adding a border that is picked up by developer
         // specified UVs.
-        auto snapshot = src_contents->RenderToSnapshot(
-            renderer, {}, {.coverage_limit = Rect::Round(src_coverage)});
-        return snapshot.has_value() ? snapshot->texture : nullptr;
+        return src_contents->RenderToSnapshot(
+            renderer, {},
+            {.coverage_limit = Rect::Round(src_coverage),
+             .msaa_enabled = false,
+             .coverage_expansion = 0,
+             .depth_stencil_enabled = false,
+             .exact_texture_extent = true});
       });
   entity.SetContents(paint.WithFilters(renderer_, std::move(contents)));
   AddRenderEntityToCurrentPass(entity);
@@ -1740,6 +2196,16 @@ void Canvas::DrawAtlas(const std::shared_ptr<AtlasContents>& atlas_contents,
 /////////////////////////////////////////
 
 void Canvas::SetupRenderPass() {
+  if (renderer_.UsesAvioCoverage()) {
+    if (!renderer_.BeginAvioRasterFrame()) {
+      rendering_failed_ = true;
+      return;
+    }
+    avio_raster_frame_open_ = true;
+    // Vulkan coverage targets can sample their completed 1x prefix directly.
+    // Destination reads still end the current pass before any sampling.
+    requires_readback_ = false;
+  }
   // One lease scope per replay. The cache ages once per raster frame (its
   // owner calls End), never per Canvas.
   FML_DCHECK(!render_target_scope_.has_value());
@@ -1748,7 +2214,8 @@ void Canvas::SetupRenderPass() {
 
   auto& stencil_attachment = render_target_.GetStencilAttachment();
   auto& depth_attachment = render_target_.GetDepthAttachment();
-  if (!stencil_attachment.has_value() || !depth_attachment.has_value()) {
+  if (!renderer_.UsesAvioCoverage() &&
+      (!stencil_attachment.has_value() || !depth_attachment.has_value())) {
     // Setup a new root stencil with an optimal configuration if one wasn't
     // provided by the caller.
     render_target_.SetupDepthStencilAttachments(
@@ -1807,6 +2274,9 @@ void Canvas::Save(uint32_t total_content_depth) {
 
   auto entry = CanvasStackEntry{};
   entry.transform = transform_stack_.back().transform;
+  entry.continuous_clip = transform_stack_.back().continuous_clip;
+  entry.sample4_clip = transform_stack_.back().sample4_clip;
+  entry.sample4_clip_complete = transform_stack_.back().sample4_clip_complete;
   entry.clip_depth = current_depth_ + total_content_depth;
   entry.distributed_opacity = transform_stack_.back().distributed_opacity;
   entry.raw_coverage = transform_stack_.back().raw_coverage;
@@ -1845,8 +2315,13 @@ std::optional<Rect> Canvas::GetLocalCoverageLimit() {
   // The maximum coverage of the subpass. Subpasses textures should never
   // extend outside the parent pass texture or the current clip coverage.
   std::optional<Rect> maybe_coverage_limit =
-      Rect::MakeOriginSize(GetGlobalPassPosition(),
-                           Size(back_texture->GetSize()))
+      Rect::MakeOriginSize(
+          GetGlobalPassPosition(),
+          Size(back_render_pass.GetEntityPassTarget()
+                   ->GetRenderTarget()
+                   .GetContentRect()
+                   .value_or(IRect::MakeSize(back_texture->GetSize()))
+                   .GetSize()))
           .Intersection(current_clip_coverage);
 
   if (!maybe_coverage_limit.has_value() || maybe_coverage_limit->IsEmpty()) {
@@ -1986,7 +2461,11 @@ void Canvas::SaveLayer(const Paint& requested_paint,
       }
     }
 
-    if (!will_cache_backdrop_texture || !backdrop_data->texture_slot) {
+    const bool has_cached_prefix =
+        will_cache_backdrop_texture &&
+        (renderer_.UsesAvioCoverage() ? backdrop_data->frozen_prefix.has_value()
+                                      : backdrop_data->texture_slot != nullptr);
+    if (!has_cached_prefix) {
       backdrop_count_ -= backdrop_count;
 
       // The onscreen texture can be flipped to if:
@@ -2009,15 +2488,44 @@ void Canvas::SaveLayer(const Paint& requested_paint,
       }
 
       if (will_cache_backdrop_texture) {
-        backdrop_data->texture_slot = input_texture;
+        if (renderer_.UsesAvioCoverage()) {
+          const auto& source =
+              render_passes_.back().GetEntityPassTarget()->GetRenderTarget();
+          const Rect needed =
+              !backdrop_data->requires_full_backdrop &&
+                      backdrop_data->required_input_coverage
+                  ? backdrop_data->required_input_coverage->Shift(
+                        -GetGlobalPassPosition())
+                  : Rect::MakeSize(source.GetRenderTargetSize());
+          backdrop_data->frozen_prefix = CaptureCoverageBackdrop(
+              renderer_, source, needed,
+              render_passes_.back().GetOpaqueCoverage().GetOpaqueRect());
+          if (!backdrop_data->frozen_prefix) {
+            rendering_failed_ = true;
+            SkipUntilMatchingRestore(total_content_depth);
+            return;
+          }
+          input_texture = backdrop_data->frozen_prefix->texture;
+        } else {
+          backdrop_data->texture_slot = input_texture;
+        }
       }
     } else {
-      input_texture = backdrop_data->texture_slot;
+      input_texture = renderer_.UsesAvioCoverage()
+                          ? backdrop_data->frozen_prefix->texture
+                          : backdrop_data->texture_slot;
     }
 
+    auto input = renderer_.UsesAvioCoverage()
+                     ? FilterInput::Make(will_cache_backdrop_texture
+                                             ? *backdrop_data->frozen_prefix
+                                             : Snapshot::FromRenderTarget(
+                                                   render_passes_.back()
+                                                       .GetEntityPassTarget()
+                                                       ->GetRenderTarget()))
+                     : FilterInput::Make(std::move(input_texture));
     backdrop_filter_contents =
-        WrapInput(renderer_, backdrop_filter,
-                  FilterInput::Make(std::move(input_texture)));
+        WrapInput(renderer_, backdrop_filter, std::move(input));
     backdrop_filter_contents->SetEffectTransform(
         transform_stack_.back().transform.Basis());
     backdrop_filter_contents->SetRenderingMode(
@@ -2045,6 +2553,10 @@ void Canvas::SaveLayer(const Paint& requested_paint,
         auto scaled =
             subpass_coverage.TransformBounds(snapshot.transform.Invert());
         contents->SetTexture(snapshot.texture);
+        contents->SetResourceOwner(snapshot.resource_owner);
+        contents->SetCapturedOpaqueTexels(snapshot.GetCapturedOpaqueRect());
+        contents->SetImmutableCapturedBackdrop(
+            snapshot.IsImmutableCapturedBackdrop());
         contents->SetSourceRect(scaled);
         contents->SetSamplerDescriptor(snapshot.sampler_descriptor);
 
@@ -2058,8 +2570,11 @@ void Canvas::SaveLayer(const Paint& requested_paint,
         auto pass = GetCurrentRenderPass();
         if (pass && !backdrop_entity.Render(renderer_, *pass)) {
           rendering_failed_ = true;
+        } else if (pass) {
+          render_passes_.back().GetOpaqueCoverage().RecordDraw(
+              backdrop_entity.GetBlendMode());
         }
-        Save(0);
+        Save(total_content_depth);
         return;
       }
     }
@@ -2163,6 +2678,8 @@ bool Canvas::Restore() {
 
     auto subpass_texture =
         lazy_render_pass.GetInlinePassContext()->GetTexture();
+    const RenderTarget subpass_target =
+        lazy_render_pass.GetEntityPassTarget()->GetRenderTarget();
     const bool ended = lazy_render_pass.GetInlinePassContext()->EndPass();
     if (!subpass_texture || !ended) {
       rendering_failed_ = true;
@@ -2170,8 +2687,9 @@ bool Canvas::Restore() {
       transform_stack_.pop_back();
       return true;
     }
+    clip_coverage_stack_.PopSubpass();
     std::shared_ptr<Contents> contents = CreateContentsForSubpassTarget(
-        renderer_, save_layer_state.paint, subpass_texture,
+        renderer_, save_layer_state.paint, subpass_target,
         Matrix::MakeTranslation(Vector3{-global_pass_position}) *
             transform_stack_.back().transform);
 
@@ -2217,14 +2735,19 @@ bool Canvas::Restore() {
         auto input_texture = FlipBackdrop(GetGlobalPassPosition());
         if (!input_texture) {
           rendering_failed_ = true;
-          clip_coverage_stack_.PopSubpass();
           transform_stack_.pop_back();
           return true;
         }
 
         FilterInput::Vector inputs = {
-            FilterInput::Make(input_texture,
-                              element_entity.GetTransform().Invert()),
+            renderer_.UsesAvioCoverage()
+                ? FilterInput::Make(Snapshot::FromRenderTarget(
+                      render_passes_.back()
+                          .GetEntityPassTarget()
+                          ->GetRenderTarget(),
+                      element_entity.GetTransform().Invert()))
+                : FilterInput::Make(input_texture,
+                                    element_entity.GetTransform().Invert()),
             FilterInput::Make(element_entity.GetContents())};
         auto contents = ColorFilterContents::MakeBlend(
             element_entity.GetBlendMode(), inputs);
@@ -2235,10 +2758,24 @@ bool Canvas::Restore() {
     }
 
     auto pass = GetCurrentRenderPass();
-    if (pass && !element_entity.Render(renderer_, *pass)) {
-      rendering_failed_ = true;
+    if (pass) {
+      pass->SetAvioContinuousClip(
+          transform_stack_[transform_stack_.size() - 2].continuous_clip);
+      pass->SetAvioSample4Clip(
+          transform_stack_[transform_stack_.size() - 2].sample4_clip,
+          transform_stack_[transform_stack_.size() - 2].sample4_clip_complete);
+      pass->SetDrawCoverage(element_entity.GetCoverage());
+      RecordCoverageDraw(renderer_, element_entity, *pass);
+      if (!element_entity.Render(renderer_, *pass)) {
+        rendering_failed_ = true;
+      } else {
+        // Filtered layer alpha is unknown unless its owning source explicitly
+        // supplies a certificate. SrcOver preserves an opaque parent; other
+        // unknown layer operators must discard the certificate.
+        render_passes_.back().GetOpaqueCoverage().RecordDraw(
+            save_layer_state.paint.blend_mode);
+      }
     }
-    clip_coverage_stack_.PopSubpass();
     transform_stack_.pop_back();
 
     // We don't need to restore clips if a saveLayer was performed, as the clip
@@ -2407,8 +2944,20 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
     // correct color from the color_source.
     params.color = Color::White();
   }
+  auto deferred_geometry = AvioContinuousClip::Geometry(params);
+  const bool defer_geometry =
+      deferred_geometry &&
+      renderer_.GetContext()->GetAvioAntialiasingConfig().RequestsContinuous(
+          deferred_geometry->shape_class) &&
+      !paint.image_filter && !paint.mask_blur_descriptor &&
+      (blend_color_source || paint.color_filter || paint.invert_colors ||
+       paint.blend_mode > Entity::kLastPipelineBlendMode);
+  if (!defer_geometry) {
+    deferred_geometry.reset();
+  }
   auto geometry = std::make_unique<UberSDFGeometry>(params);
   auto contents = UberSDFContents::Make(params, std::move(geometry));
+  contents->SetDeferGeometryCoverage(defer_geometry);
   const bool raw_coverage = transform_stack_.back().raw_coverage;
   const auto coverage_mode =
       raw_coverage ? flutter::DlCoverageMode::kExternalLinearBackdrop
@@ -2445,10 +2994,10 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
 
     Paint new_paint = paint;
     new_paint.color_source = nullptr;
-    AddRenderEntityWithFiltersToCurrentPass(entity, geom, new_paint,
-                                            reuse_depth,
-                                            /*override_contents=*/
-                                            std::move(final_contents));
+    AddRenderEntityWithFiltersToCurrentPass(
+        entity, geom, new_paint, reuse_depth,
+        /*override_contents=*/
+        std::move(final_contents), deferred_geometry);
   } else {
     Paint final_paint = paint;
     if (!defer_coverage) {
@@ -2456,10 +3005,10 @@ void Canvas::AddRenderSDFEntityToCurrentPass(
       // transfer directly. Never wrap it in a second conversion.
       final_paint.coverage_mode = flutter::DlCoverageMode::kPlatformDefault;
     }
-    AddRenderEntityWithFiltersToCurrentPass(entity, geom, final_paint,
-                                            reuse_depth,
-                                            /*override_contents=*/
-                                            std::move(contents));
+    AddRenderEntityWithFiltersToCurrentPass(
+        entity, geom, final_paint, reuse_depth,
+        /*override_contents=*/
+        std::move(contents), deferred_geometry);
   }
 }
 
@@ -2468,7 +3017,8 @@ void Canvas::AddRenderEntityWithFiltersToCurrentPass(
     const Geometry* geometry,
     const Paint& requested_paint,
     bool reuse_depth,
-    std::shared_ptr<Contents> override_contents) {
+    std::shared_ptr<Contents> override_contents,
+    std::optional<AvioContinuousClip> continuous_geometry) {
   const bool resolve_coverage =
       !transform_stack_.back().raw_coverage &&
       requested_paint.blend_mode == BlendMode::kSrcOver &&
@@ -2482,7 +3032,7 @@ void Canvas::AddRenderEntityWithFiltersToCurrentPass(
       entity.SetContents(
           std::make_shared<ExternalCoverageContents>(entity.GetContents()));
     }
-    AddRenderEntityToCurrentPass(entity, reuse_depth);
+    AddRenderEntityToCurrentPass(entity, reuse_depth, continuous_geometry);
   };
   std::shared_ptr<ColorSourceContents> color_source_contents;
   std::shared_ptr<Contents> contents;
@@ -2567,7 +3117,10 @@ void Canvas::AddRenderEntityWithFiltersToCurrentPass(
   submit();
 }
 
-void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
+void Canvas::AddRenderEntityToCurrentPass(
+    Entity& entity,
+    bool reuse_depth,
+    std::optional<AvioContinuousClip> continuous_geometry) {
   if (IsSkipping()) {
     return;
   }
@@ -2576,7 +3129,24 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
       Matrix::MakeTranslation(Vector3(-GetGlobalPassPosition())) *
       entity.GetTransform());
   entity.SetInheritedOpacity(transform_stack_.back().distributed_opacity);
+  const auto alpha_blend = entity.GetBlendMode();
+  const auto& alpha_target =
+      render_passes_.back().GetEntityPassTarget()->GetRenderTarget();
+  const auto alpha_bounds = Rect::Make(alpha_target.GetContentRect().value_or(
+      IRect::MakeSize(alpha_target.GetRenderTargetSize())));
+  std::optional<Rect> opaque_overwrite;
+  if (!continuous_geometry && !transform_stack_.back().continuous_clip &&
+      !transform_stack_.back().sample4_clip &&
+      transform_stack_.back().sample4_clip_complete &&
+      transform_stack_.back().num_clips == 0u) {
+    const auto background =
+        entity.AsBackgroundColor(ISize(alpha_bounds.GetSize()));
+    if (background && background->alpha == 1.f) {
+      opaque_overwrite = alpha_bounds;
+    }
+  }
   if (entity.GetBlendMode() == BlendMode::kSrcOver &&
+      !HasAvioDirect1xScopeProof() &&
       entity.GetContents()->IsOpaque(entity.GetTransform())) {
     entity.SetBlendMode(BlendMode::kSrc);
   }
@@ -2584,14 +3154,20 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
   // If the entity covers the current render target and is a solid color, then
   // conditionally update the backdrop color to its solid color value blended
   // with the current backdrop.
-  if (render_passes_.back().IsApplyingClearColor()) {
+  if (render_passes_.back().IsApplyingClearColor() && !continuous_geometry &&
+      !transform_stack_.back().continuous_clip &&
+      !transform_stack_.back().sample4_clip) {
     auto texture = render_passes_.back().GetInlinePassContext()->GetTexture();
     if (!texture) {
       rendering_failed_ = true;
       return;
     }
-    std::optional<Color> maybe_color =
-        entity.AsBackgroundColor(texture->GetSize());
+    const auto& target =
+        render_passes_.back().GetEntityPassTarget()->GetRenderTarget();
+    std::optional<Color> maybe_color = entity.AsBackgroundColor(
+        target.GetContentRect()
+            .value_or(IRect::MakeSize(texture->GetSize()))
+            .GetSize());
     if (maybe_color.has_value()) {
       Color color = maybe_color.value();
       RenderTarget& render_target = render_passes_.back()
@@ -2605,6 +3181,8 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
                                    .Blend(color, entity.GetBlendMode())
                                    .Premultiply();
       render_target.SetColorAttachment(attachment, 0u);
+      render_passes_.back().GetOpaqueCoverage().RecordClear(
+          LoadAction::kClear, attachment.clear_color.alpha, alpha_bounds);
       return;
     }
   }
@@ -2649,7 +3227,14 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
           element_coverage_hint, clip_coverage_stack_.CurrentClipCoverage()));
 
       FilterInput::Vector inputs = {
-          FilterInput::Make(input_texture, entity.GetTransform().Invert()),
+          renderer_.UsesAvioCoverage()
+              ? FilterInput::Make(
+                    Snapshot::FromRenderTarget(render_passes_.back()
+                                                   .GetEntityPassTarget()
+                                                   ->GetRenderTarget(),
+                                               entity.GetTransform().Invert()))
+              : FilterInput::Make(input_texture,
+                                  entity.GetTransform().Invert()),
           FilterInput::Make(entity.GetContents())};
       auto contents =
           ColorFilterContents::MakeBlend(entity.GetBlendMode(), inputs);
@@ -2666,8 +3251,23 @@ void Canvas::AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth) {
     return;
   }
 
+  std::optional<AvioContinuousPrimitive> own_primitive;
+  if (continuous_geometry) {
+    own_primitive = continuous_geometry->Transform(entity.GetTransform());
+    if (!own_primitive) {
+      rendering_failed_ = true;
+      return;
+    }
+  }
+  result->SetAvioContinuousGeometryPrimitive(std::move(own_primitive));
+  result->SetDrawCoverage(entity.GetCoverage());
+  RecordCoverageDraw(renderer_, entity, *result);
   if (!entity.Render(renderer_, *result)) {
     rendering_failed_ = true;
+  } else {
+    render_passes_.back().GetOpaqueCoverage().RecordDraw(
+        alpha_blend, opaque_overwrite,
+        entity.GetContents()->IsOpaque(entity.GetTransform()));
   }
 }
 
@@ -2675,6 +3275,11 @@ std::shared_ptr<RenderPass> Canvas::GetCurrentRenderPass() {
   auto pass = render_passes_.back().GetInlinePassContext()->GetRenderPass();
   if (!pass) {
     rendering_failed_ = true;
+  }
+  if (pass) {
+    pass->SetAvioContinuousClip(transform_stack_.back().continuous_clip);
+    pass->SetAvioSample4Clip(transform_stack_.back().sample4_clip,
+                             transform_stack_.back().sample4_clip_complete);
   }
   return pass;
 }
@@ -2691,6 +3296,7 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
                                               bool should_use_onscreen,
                                               bool post_depth_increment) {
   LazyRenderingConfig rendering_config = std::move(render_passes_.back());
+  const auto previous_opaque = rendering_config.GetOpaqueCoverage();
   render_passes_.pop_back();
 
   // If the very first thing we render in this EntityPass is a subpass that
@@ -2766,30 +3372,57 @@ std::shared_ptr<Texture> Canvas::FlipBackdrop(Point global_pass_position,
   }
   RenderPass& current_render_pass = *pass;
 
-  // Eagerly restore the BDF contents.
+  // A single-sample pass loads its previous contents in place. Restoring that
+  // texture with a draw would sample the attached color texture, an undefined
+  // feedback loop. The MSAA pass still needs its resolved backdrop drawn back.
+  const ColorAttachment color0 =
+      (renderer_.UsesAvioCoverage()
+           ? render_passes_.back().GetEntityPassTarget()->GetRenderTarget()
+           : current_render_pass.GetRenderTarget())
+          .GetColorAttachment(0);
+  const bool contents_already_present = color0.texture == input_texture;
+  FML_DCHECK(!contents_already_present ||
+             color0.load_action == LoadAction::kLoad)
+      << "A pass writing to the backdrop texture must load it.";
 
-  // If the pass context returns a backdrop texture, we need to draw it to the
-  // current pass. We do this because it's faster and takes significantly less
-  // memory than storing/loading large MSAA textures. Also, it's not possible
-  // to blit the non-MSAA resolve texture of the previous pass to MSAA
-  // textures (let alone a transient one).
-  Rect size_rect = Rect::MakeSize(input_texture->GetSize());
-  auto msaa_backdrop_contents = TextureContents::MakeRect(size_rect);
-  msaa_backdrop_contents->SetStencilEnabled(false);
-  msaa_backdrop_contents->SetLabel("MSAA backdrop");
-  msaa_backdrop_contents->SetSourceRect(size_rect);
-  msaa_backdrop_contents->SetTexture(input_texture);
+  if (!contents_already_present) {
+    // This copy restores an already composited prefix; applying a fractional
+    // clip to it again would dim the same edge twice.
+    current_render_pass.SetAvioContinuousClip(nullptr);
+    current_render_pass.SetAvioSample4Clip(nullptr, true);
+    // Eagerly restore the BDF contents.
 
-  Entity msaa_backdrop_entity;
-  msaa_backdrop_entity.SetContents(std::move(msaa_backdrop_contents));
-  msaa_backdrop_entity.SetBlendMode(BlendMode::kSrc);
-  msaa_backdrop_entity.SetClipDepth(std::numeric_limits<uint32_t>::max());
-  if (!msaa_backdrop_entity.Render(renderer_, current_render_pass)) {
-    rendering_failed_ = true;
-    VALIDATION_LOG << "Failed to render MSAA backdrop entity.";
-    return nullptr;
+    // If the pass context returns a backdrop texture, we need to draw it to the
+    // current pass. We do this because it's faster and takes significantly less
+    // memory than storing/loading large MSAA textures. Also, it's not possible
+    // to blit the non-MSAA resolve texture of the previous pass to MSAA
+    // textures (let alone a transient one).
+    Rect size_rect = Rect::MakeSize(input_texture->GetSize());
+    auto msaa_backdrop_contents = TextureContents::MakeRect(size_rect);
+    msaa_backdrop_contents->SetStencilEnabled(false);
+    msaa_backdrop_contents->SetLabel("MSAA backdrop");
+    msaa_backdrop_contents->SetSourceRect(size_rect);
+    msaa_backdrop_contents->SetTexture(input_texture);
+
+    Entity msaa_backdrop_entity;
+    msaa_backdrop_entity.SetContents(std::move(msaa_backdrop_contents));
+    msaa_backdrop_entity.SetBlendMode(BlendMode::kSrc);
+    msaa_backdrop_entity.SetClipDepth(std::numeric_limits<uint32_t>::max());
+    if (!msaa_backdrop_entity.Render(renderer_, current_render_pass)) {
+      rendering_failed_ = true;
+      VALIDATION_LOG << "Failed to render MSAA backdrop entity.";
+      return nullptr;
+    }
   }
+  // This is an explicit copy of the exact completed prefix (or the same
+  // owning target loading in place), not evidence inferred from a Load.
+  render_passes_.back().GetOpaqueCoverage() = previous_opaque;
 
+  current_render_pass.SetAvioContinuousClip(
+      transform_stack_.back().continuous_clip);
+  current_render_pass.SetAvioSample4Clip(
+      transform_stack_.back().sample4_clip,
+      transform_stack_.back().sample4_clip_complete);
   // Restore any clips that were recorded before the backdrop filter was
   // applied.
   auto& replay_entities = clip_coverage_stack_.GetReplayEntities();
@@ -2930,6 +3563,10 @@ bool Canvas::EndReplay() {
     render_target_scope_.reset();
   }
   clip_geometry_.clear();
+  if (avio_raster_frame_open_) {
+    renderer_.EndAvioRasterFrame();
+    avio_raster_frame_open_ = false;
+  }
 
   Reset();
   Initialize(initial_cull_rect_);
@@ -3026,10 +3663,20 @@ LazyRenderingConfig::LazyRenderingConfig(
     : entity_pass_target_(std::move(p_entity_pass_target)) {
   inline_pass_context_ = std::make_unique<InlinePassContext>(
       renderer, *entity_pass_target_, honor_declared_load_action);
+  const auto& target = entity_pass_target_->GetRenderTarget();
+  const auto& color = target.GetColorAttachment(0);
+  const auto action =
+      honor_declared_load_action ? color.load_action : LoadAction::kClear;
+  clear_on_first_pass_ = action == LoadAction::kClear;
+  opaque_coverage_.RecordClear(
+      action, color.clear_color.alpha,
+      Rect::Make(target.GetContentRect().value_or(
+          IRect::MakeSize(target.GetRenderTargetSize()))));
 }
 
 bool LazyRenderingConfig::IsApplyingClearColor() const {
-  return !inline_pass_context_->IsActive();
+  return clear_on_first_pass_ &&
+         inline_pass_context_->CanUpdateFirstPassClearColor();
 }
 
 EntityPassTarget* LazyRenderingConfig::GetEntityPassTarget() const {

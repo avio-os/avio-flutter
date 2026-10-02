@@ -62,6 +62,12 @@ render.
 | Xor |
 | Plus |
 | Modulate |
+| Screen |
+
+Screen uses premultiplied `src + dst * (1 - src)`. Its migration from
+framebuffer fetch to pipeline blending changes the operator at multisampled
+edges; see the [Avio Screen design note](avio-screen-coefficient-design.md)
+for the comparison fixtures and required visual validation.
 
 ## Advanced blends
 
@@ -100,7 +106,6 @@ simulator, Adreno 630 and below, PowerVR):
 
 | Advanced blend |
 | --- |
-| kScreen |
 | Overlay |
 | Darken |
 | Lighten |

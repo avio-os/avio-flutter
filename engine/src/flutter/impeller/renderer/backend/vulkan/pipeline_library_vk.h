@@ -18,6 +18,7 @@
 #include "impeller/renderer/backend/vulkan/vk.h"
 #include "impeller/renderer/pipeline.h"
 #include "impeller/renderer/pipeline_library.h"
+#include "impeller/renderer/pipeline_resource_ledger.h"
 
 namespace impeller {
 
@@ -36,10 +37,17 @@ class PipelineLibraryVK final
 
   const std::shared_ptr<fml::ConcurrentTaskRunner>& GetWorkerTaskRunner() const;
 
+  const std::shared_ptr<PipelineResourceLedger>& GetResourceLedger() const;
+
+  AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool start_new_interval) const;
+
  private:
   friend ContextVK;
 
   std::weak_ptr<DeviceHolderVK> device_holder_;
+  const std::shared_ptr<PipelineResourceLedger> resource_ledger_ =
+      std::make_shared<PipelineResourceLedger>();
   std::shared_ptr<PipelineCacheVK> pso_cache_;
   std::shared_ptr<fml::ConcurrentTaskRunner> worker_task_runner_;
   Mutex pipelines_mutex_;
@@ -85,7 +93,8 @@ class PipelineLibraryVK final
 
   std::unique_ptr<ComputePipelineVK> CreateComputePipeline(
       const ComputePipelineDescriptor& desc,
-      PipelineKey pipeline_key);
+      PipelineKey pipeline_key,
+      AvioPipelineCreationOrigin origin);
 
   void PersistPipelineCacheToDisk();
 

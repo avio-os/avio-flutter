@@ -72,11 +72,11 @@ enum class BlendMode : uint8_t {
   kXor,
   kPlus,
   kModulate,
+  kScreen,
 
   // The following blend modes use equations that are not available for
   // pipelines on most graphics devices without extensions, and so they are
   // only able to be used via `BlendFilterContents`.
-  kScreen,
   kOverlay,
   kDarken,
   kLighten,
@@ -95,6 +95,11 @@ enum class BlendMode : uint8_t {
   kLastMode = kLuminosity,
   kDefaultMode = kSrcOver,
 };
+
+// Shared by pipeline selection, shader coefficients, atlas/vertex routing,
+// and Flow's Impeller root-readback classification. Modes after this boundary
+// require a sampled destination or framebuffer fetch.
+inline constexpr BlendMode kLastCoefficientBlendMode = BlendMode::kScreen;
 
 const char* BlendModeToString(BlendMode blend_mode);
 

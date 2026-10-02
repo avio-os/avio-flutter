@@ -11,6 +11,11 @@ if (is_fuchsia) {
   import("//flutter/tools/fuchsia/gn-sdk/src/gn_configs.gni")
 }
 
+source_set("avio_frame_facts") {
+  sources = [ "avio_frame_facts.h" ]
+  public_configs = [ "//flutter:config" ]
+}
+
 source_set("flow") {
   sources = [
     "avio_compositor_material.h",
@@ -25,6 +30,8 @@ source_set("flow") {
     "frame_timings.h",
     "layers/avio_compositor_material_layer.cc",
     "layers/avio_compositor_material_layer.h",
+    "layers/avio_frame_metadata_layer.cc",
+    "layers/avio_frame_metadata_layer.h",
     "layers/avio_window_preview_layer.cc",
     "layers/avio_window_preview_layer.h",
     "layers/backdrop_filter_layer.cc",
@@ -99,6 +106,7 @@ source_set("flow") {
   public_configs = [ "//flutter:config" ]
 
   public_deps = [
+    ":avio_frame_facts",
     "//flutter/common",
     "//flutter/common/graphics",
     "//flutter/display_list",
@@ -164,6 +172,7 @@ if (enable_unittests) {
       "frame_timings_recorder_unittests.cc",
       "gl_context_switch_unittests.cc",
       "layers/avio_compositor_material_layer_unittests.cc",
+      "layers/avio_frame_metadata_layer_unittests.cc",
       "layers/avio_window_preview_layer_unittests.cc",
       "layers/backdrop_filter_layer_unittests.cc",
       "layers/clip_path_layer_unittests.cc",

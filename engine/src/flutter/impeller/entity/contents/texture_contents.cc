@@ -11,7 +11,9 @@
 #include "fml/logging.h"
 #include "impeller/core/formats.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/contents/sample4_clip.h"
 #include "impeller/entity/entity.h"
+#include "impeller/entity/geometry/coverage_geometry.h"
 #include "impeller/entity/texture_fill.frag.h"
 #include "impeller/entity/texture_fill.vert.h"
 #include "impeller/entity/texture_fill_strict_src.frag.h"
@@ -42,6 +44,14 @@ void TextureContents::SetDestinationRect(Rect rect) {
 
 void TextureContents::SetTexture(std::shared_ptr<Texture> texture) {
   texture_ = std::move(texture);
+  captured_opaque_texels_.reset();
+  immutable_captured_backdrop_ = false;
+}
+
+void TextureContents::SetResourceOwner(std::shared_ptr<void> owner) {
+  resource_owner_ = std::move(owner);
+  captured_opaque_texels_.reset();
+  immutable_captured_backdrop_ = false;
 }
 
 std::shared_ptr<Texture> TextureContents::GetTexture() const {
@@ -54,6 +64,10 @@ void TextureContents::SetOpacity(Scalar opacity) {
 
 void TextureContents::SetCoverageMode(flutter::DlCoverageMode mode) {
   coverage_mode_ = mode;
+}
+
+void TextureContents::SetContinuousImageEdge(bool enabled) {
+  continuous_image_edge_ = enabled;
 }
 
 void TextureContents::SetStencilEnabled(bool enabled) {
@@ -72,40 +86,59 @@ std::optional<Rect> TextureContents::GetCoverage(const Entity& entity) const {
   if (GetOpacity() == 0) {
     return std::nullopt;
   }
-  return destination_rect_.TransformBounds(entity.GetTransform());
+  const auto bounds = destination_rect_.TransformBounds(entity.GetTransform());
+  return continuous_image_edge_ ? bounds.Expand(1.f) : bounds;
 };
 
 std::optional<Snapshot> TextureContents::RenderToSnapshot(
     const ContentContext& renderer,
     const Entity& entity,
     const SnapshotOptions& options) const {
-  // Passthrough textures that have simple rectangle paths and complete source
-  // rects.
+  // A rectangle snapshot retains its exact source view and physical texture.
   auto bounds = destination_rect_;
   auto opacity = GetOpacity();
-  if (coverage_mode_ == flutter::DlCoverageMode::kPlatformDefault &&
-      source_rect_ == Rect::MakeSize(texture_->GetSize()) &&
+  if (!continuous_image_edge_ && !analytic_sample4_image_1x_ &&
+      coverage_mode_ == flutter::DlCoverageMode::kPlatformDefault &&
+      !options.exact_texture_extent && texture_ && !source_rect_.IsEmpty() &&
+      Rect::MakeSize(texture_->GetSize()).Contains(source_rect_) &&
+      (resource_owner_ ||
+       source_rect_ == Rect::MakeSize(texture_->GetSize())) &&
       (opacity >= 1 - kEhCloseEnough || defer_applying_opacity_)) {
-    auto scale = Vector2(bounds.GetSize() / Size(texture_->GetSize()));
-    return Snapshot{.texture = texture_,
-                    .transform = entity.GetTransform() *
-                                 Matrix::MakeTranslation(bounds.GetOrigin()) *
-                                 Matrix::MakeScale(scale),
-                    .sampler_descriptor = options.sampler_descriptor.value_or(
-                        sampler_descriptor_),
-                    .opacity = opacity,
-                    .needs_rasterization_for_runtime_effects =
-                        snapshots_need_rasterization_for_runtime_effects_};
+    auto scale = Vector2(bounds.GetSize() / source_rect_.GetSize());
+    return Snapshot{
+        .texture = texture_,
+        .transform = entity.GetTransform() *
+                     Matrix::MakeTranslation(bounds.GetOrigin()) *
+                     Matrix::MakeScale(scale) *
+                     Matrix::MakeTranslation(-source_rect_.GetOrigin()),
+        .sampler_descriptor =
+            options.sampler_descriptor.value_or(sampler_descriptor_),
+        .opacity = opacity,
+        .needs_rasterization_for_runtime_effects =
+            snapshots_need_rasterization_for_runtime_effects_,
+        .texture_rect = source_rect_ == Rect::MakeSize(texture_->GetSize())
+                            ? std::nullopt
+                            : std::optional<Rect>(source_rect_),
+        .resource_owner = resource_owner_,
+        .is_immutable_captured_backdrop = immutable_captured_backdrop_,
+        .captured_opaque_texels =
+            captured_opaque_texels_
+                ? captured_opaque_texels_->Intersection(source_rect_)
+                : std::nullopt};
   }
   return Contents::RenderToSnapshot(
       renderer, entity,
       {.coverage_limit = std::nullopt,
        .sampler_descriptor =
            options.sampler_descriptor.value_or(sampler_descriptor_),
-       .msaa_enabled = true,
+       .msaa_enabled = !analytic_sample4_image_1x_,
        .mip_count = options.mip_count,
        .label = options.label,
-       .coverage_expansion = options.coverage_expansion});
+       .coverage_expansion = options.coverage_expansion,
+       .pixel_aligned = options.pixel_aligned,
+       .depth_stencil_enabled =
+           analytic_sample4_image_1x_ ? false : options.depth_stencil_enabled,
+       .exact_texture_extent = options.exact_texture_extent});
 }
 
 bool TextureContents::Render(const ContentContext& renderer,
@@ -120,6 +153,17 @@ bool TextureContents::Render(const ContentContext& renderer,
     return true;  // Nothing to render.
   }
 
+  if (analytic_sample4_image_1x_ &&
+      (!renderer.UsesAvioCoverage() || continuous_image_edge_ ||
+       renderer.GetContext()->GetBackendType() !=
+           Context::BackendType::kVulkan ||
+       pass.GetRenderTarget().GetSampleCount() != SampleCount::kCount1 ||
+       entity.GetBlendMode() != BlendMode::kSrcOver ||
+       !entity.GetTransform().IsFinite() || !entity.GetTransform().IsAffine() ||
+       !entity.GetTransform().IsInvertible())) {
+    return false;
+  }
+
 #if defined(IMPELLER_ENABLE_OPENGLES) && !defined(FML_OS_EMSCRIPTEN)
   using FSExternal = TiledTextureFillExternalFragmentShader;
   bool is_external_texture =
@@ -130,20 +174,89 @@ bool TextureContents::Render(const ContentContext& renderer,
       Rect::MakeSize(texture_->GetSize()).Project(source_rect_);
   auto& data_host_buffer = renderer.GetTransientsDataBuffer();
 
+  std::optional<AvioSample4SourceProof> captured_proof;
+  const auto* captured_clip = pass.GetAvioSample4Clip();
+  if (renderer.UsesAvioCoverage() &&
+      renderer.GetContext()
+              ->GetAvioAntialiasingConfig()
+              .continuous_requested_classes == 0u &&
+      renderer.GetContext()->GetBackendType() ==
+          Context::BackendType::kVulkan &&
+      immutable_captured_backdrop_ && captured_clip &&
+      texture_->GetMipCount() == 1u && !continuous_image_edge_ &&
+      sampler_descriptor_.max_anisotropy <= 1u && !analytic_sample4_image_1x_ &&
+      coverage_mode_ == flutter::DlCoverageMode::kPlatformDefault) {
+    const auto bounds = captured_clip->GetSourceProofBounds();
+    const auto raster = captured_clip->GetSourceProofRasterBounds();
+    if (bounds && raster) {
+      captured_proof = MakeCapturedSample4SourceProof(
+          destination_rect_, source_rect_, entity.GetTransform(),
+          captured_opaque_texels_, *bounds, *raster,
+          captured_clip->segment_token, GetOpacity(),
+          resource_owner_ != nullptr);
+    }
+  }
+
+  Rect raster_rect = destination_rect_;
+  Rect raster_uv = texture_coords;
+  if (continuous_image_edge_ || analytic_sample4_image_1x_ || captured_proof) {
+    if (!entity.GetTransform().IsAffine() ||
+        !entity.GetTransform().IsInvertible()) {
+      return false;
+    }
+    const auto inverse = entity.GetTransform().Invert();
+    const Point o = inverse * Point(0, 0), x = inverse * Point(1, 0),
+                y = inverse * Point(0, 1);
+    const Size fringe(std::abs(x.x - o.x) + std::abs(y.x - o.x),
+                      std::abs(x.y - o.y) + std::abs(y.y - o.y));
+    raster_rect = destination_rect_.Expand(fringe);
+    const Point uv_per_local =
+        Point(texture_coords.GetSize() / destination_rect_.GetSize());
+    raster_uv = Rect::MakeLTRB(
+        texture_coords.GetLeft() +
+            (raster_rect.GetLeft() - destination_rect_.GetLeft()) *
+                uv_per_local.x,
+        texture_coords.GetTop() +
+            (raster_rect.GetTop() - destination_rect_.GetTop()) *
+                uv_per_local.y,
+        texture_coords.GetRight() +
+            (raster_rect.GetRight() - destination_rect_.GetRight()) *
+                uv_per_local.x,
+        texture_coords.GetBottom() +
+            (raster_rect.GetBottom() - destination_rect_.GetBottom()) *
+                uv_per_local.y);
+  }
   std::array<VS::PerVertexData, 4> vertices = {
-      VS::PerVertexData{destination_rect_.GetLeftTop(),
-                        texture_coords.GetLeftTop()},
-      VS::PerVertexData{destination_rect_.GetRightTop(),
-                        texture_coords.GetRightTop()},
-      VS::PerVertexData{destination_rect_.GetLeftBottom(),
-                        texture_coords.GetLeftBottom()},
-      VS::PerVertexData{destination_rect_.GetRightBottom(),
-                        texture_coords.GetRightBottom()},
+      VS::PerVertexData{raster_rect.GetLeftTop(), raster_uv.GetLeftTop()},
+      VS::PerVertexData{raster_rect.GetRightTop(), raster_uv.GetRightTop()},
+      VS::PerVertexData{raster_rect.GetLeftBottom(), raster_uv.GetLeftBottom()},
+      VS::PerVertexData{raster_rect.GetRightBottom(),
+                        raster_uv.GetRightBottom()},
   };
   auto vertex_buffer = CreateVertexBuffer(vertices, data_host_buffer);
 
   VS::FrameInfo frame_info;
   frame_info.mvp = entity.GetShaderTransform(pass);
+  frame_info.parent_size = Point(pass.GetRenderTargetSize());
+  std::optional<CoverageConvexQuad4> analytic_quad;
+  if (renderer.UsesAvioCoverage() && sample4_image_coverage_ &&
+      !captured_proof && !continuous_image_edge_ &&
+      renderer.GetContext()->GetBackendType() ==
+          Context::BackendType::kVulkan &&
+      (pass.GetRenderTarget().GetSampleCount() == SampleCount::kCount4 ||
+       analytic_sample4_image_1x_) &&
+      entity.GetTransform().IsAffine()) {
+    auto points = destination_rect_.GetPoints();
+    for (auto& point : points) {
+      point = entity.GetTransform() * point;
+    }
+    analytic_quad = CoverageConvexQuad4::Make(points);
+  }
+  if (analytic_sample4_image_1x_ && !analytic_quad) {
+    return false;
+  }
+  const Scalar analytic_quad_mode =
+      analytic_quad ? (analytic_sample4_image_1x_ ? 2.f : 1.f) : 0.f;
 
 #ifdef IMPELLER_DEBUG
   if (label_.empty()) {
@@ -186,10 +299,16 @@ bool TextureContents::Render(const ContentContext& renderer,
     // texel to ensure that linear filtering does not sample anything outside
     // the source rect bounds.
     auto strict_texture_coords =
-        Rect::MakeSize(texture_->GetSize()).Project(source_rect_.Expand(-0.5));
+        Rect::MakeSize(texture_->GetSize())
+            .Project(GetSourceSamplingBounds(source_rect_));
 
     FSStrict::FragInfo frag_info;
+    frag_info.analytic_quad = analytic_quad_mode;
+    frag_info.quad_lines =
+        analytic_quad ? analytic_quad->GetLineParameters() : Matrix{};
     frag_info.source_rect = Vector4(strict_texture_coords.GetLTRB());
+    frag_info.image_edge_rect = Vector4(texture_coords.GetLTRB());
+    frag_info.continuous_image_edge = continuous_image_edge_ ? 1.f : 0.f;
     frag_info.alpha = GetOpacity();
     frag_info.external_linear_backdrop =
         coverage_mode_ == flutter::DlCoverageMode::kExternalLinearBackdrop
@@ -230,6 +349,15 @@ bool TextureContents::Render(const ContentContext& renderer,
 #endif  //  IMPELLER_ENABLE_OPENGLES
   } else {
     FS::FragInfo frag_info;
+    frag_info.analytic_quad = analytic_quad_mode;
+    frag_info.quad_lines =
+        analytic_quad ? analytic_quad->GetLineParameters() : Matrix{};
+    frag_info.image_edge_rect = Vector4(texture_coords.GetLTRB());
+    frag_info.image_sample_rect =
+        Vector4(Rect::MakeSize(texture_->GetSize())
+                    .Project(GetSourceSamplingBounds(source_rect_))
+                    .GetLTRB());
+    frag_info.continuous_image_edge = continuous_image_edge_ ? 1.f : 0.f;
     frag_info.alpha = GetOpacity();
     frag_info.external_linear_backdrop =
         coverage_mode_ == flutter::DlCoverageMode::kExternalLinearBackdrop
@@ -241,6 +369,10 @@ bool TextureContents::Render(const ContentContext& renderer,
         renderer.GetContext()->GetSamplerLibrary()->GetSampler(
             sampler_descriptor_));
   }
+  pass.RetainResource(resource_owner_);
+  pass.SetAvioContinuousGeometry(continuous_image_edge_ &&
+                                 !defer_geometry_coverage_);
+  pass.SetAvioSample4SourceProof(captured_proof);
   return pass.Draw().ok();
 }
 

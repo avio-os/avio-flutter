@@ -37,14 +37,17 @@ TrackedObjectsVK::TrackedObjectsVK(
 }
 
 TrackedObjectsVK::~TrackedObjectsVK() {
-  if (!buffer_) {
-    return;
+  if (buffer_) {
+    pool_->CollectCommandBuffer(std::move(buffer_));
   }
-  pool_->CollectCommandBuffer(std::move(buffer_));
+  // Native framebuffers/render passes reference the external source's views.
+  // Release those refs before a final source/BO owner can destroy its image.
+  tracked_objects_.clear();
 }
 
 bool TrackedObjectsVK::IsValid() const {
-  return is_valid_;
+  return is_valid_ && tracked_pipelines_.IsValid() &&
+         retained_resources_.IsValid();
 }
 
 void TrackedObjectsVK::Track(const std::shared_ptr<SharedObjectVK>& object) {
@@ -78,14 +81,21 @@ void TrackedObjectsVK::Track(
                    texture.get() == tracked_textures_.back().get())) {
     return;
   }
-  if (auto sem = texture->ConsumeAcquireSemaphore()) {
-    wait_semaphores_.push_back(std::move(*sem));
-  }
   tracked_textures_.emplace_back(texture);
 }
 
 std::vector<WaitSemaphore> TrackedObjectsVK::TakeWaitSemaphores() {
-  return std::move(wait_semaphores_);
+  std::vector<WaitSemaphore> waits;
+  for (const auto& texture : tracked_textures_) {
+    if (auto wait = texture->TakeAcquireSemaphoreForSubmit()) {
+      // One source may first be used as a transfer input, sampled seed, or
+      // colour attachment. Its producer wait covers every access in the batch.
+      wait->wait_stage = vk::PipelineStageFlagBits::eAllCommands;
+      wait->source = texture;
+      waits.push_back(std::move(*wait));
+    }
+  }
+  return waits;
 }
 
 std::vector<TrackedObjectsVK::PendingSignalSemaphoreVK>

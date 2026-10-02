@@ -5,6 +5,7 @@
 #ifndef FLUTTER_FML_CONCURRENT_MESSAGE_LOOP_H_
 #define FLUTTER_FML_CONCURRENT_MESSAGE_LOOP_H_
 
+#include <atomic>
 #include <condition_variable>
 #include <map>
 #include <queue>
@@ -32,6 +33,10 @@ class ConcurrentMessageLoop
 
   void Terminate();
 
+  // Cold teardown only. A worker cannot join itself; false leaves ownership
+  // with the caller until another thread can join it.
+  bool TerminateAndJoin();
+
   void PostTaskToAllWorkers(const fml::closure& task);
 
   bool RunsTasksOnCurrentThread();
@@ -46,6 +51,8 @@ class ConcurrentMessageLoop
   size_t worker_count_ = 0;
   std::vector<std::thread> workers_;
   std::mutex tasks_mutex_;
+  std::mutex join_mutex_;
+  std::atomic_bool joined_ = false;
   std::condition_variable tasks_condition_;
   std::queue<fml::closure> tasks_;
   std::vector<std::thread::id> worker_thread_ids_;

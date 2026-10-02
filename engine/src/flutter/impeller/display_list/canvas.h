@@ -18,6 +18,8 @@
 #include "impeller/display_list/paint.h"
 #include "impeller/entity/contents/atlas_contents.h"
 #include "impeller/entity/contents/clip_contents.h"
+#include "impeller/entity/contents/continuous_clip.h"
+#include "impeller/entity/contents/sample4_clip.h"
 #include "impeller/entity/contents/solid_rrect_like_blur_contents.h"
 #include "impeller/entity/contents/text_contents.h"
 #include "impeller/entity/contents/uber_sdf_parameters.h"
@@ -33,15 +35,29 @@
 #include "impeller/geometry/point.h"
 #include "impeller/geometry/round_rect.h"
 #include "impeller/geometry/vector.h"
+#include "impeller/renderer/opaque_coverage.h"
 #include "impeller/renderer/snapshot.h"
 #include "impeller/typographer/text_frame.h"
 
 namespace impeller {
 
+class CoverageDisplayListPlan;
+struct CoverageClipDecision;
+
+namespace testing {
+class CanvasBlendTestPeer;
+}  // namespace testing
+
 struct BackdropData {
   size_t backdrop_count = 0;
   bool all_filters_equal = true;
   std::shared_ptr<Texture> texture_slot;
+  // The complete group's source footprint, including filter support, in
+  // global device coordinates. Unknown mappings conservatively capture the
+  // current pass. Coverage freezes this prefix before its first glass draw.
+  std::optional<Rect> required_input_coverage;
+  bool requires_full_backdrop = false;
+  std::optional<Snapshot> frozen_prefix;
   // A single snapshot of the backdrop filter that is used when there are
   // multiple backdrops that share an identical filter.
   std::optional<Snapshot> shared_filter_snapshot;
@@ -50,6 +66,9 @@ struct BackdropData {
 
 struct CanvasStackEntry {
   Matrix transform;
+  std::shared_ptr<const AvioContinuousClipExpression> continuous_clip;
+  std::shared_ptr<const AvioSample4ClipDescriptor> sample4_clip;
+  bool sample4_clip_complete = true;
   uint32_t clip_depth = 0u;
   size_t clip_height = 0u;
   // The number of clips tracked for this canvas stack entry.
@@ -119,9 +138,13 @@ class LazyRenderingConfig {
 
   InlinePassContext* GetInlinePassContext() const;
 
+  OpaqueCoverageState& GetOpaqueCoverage() { return opaque_coverage_; }
+
  private:
   std::unique_ptr<EntityPassTarget> entity_pass_target_;
   std::unique_ptr<InlinePassContext> inline_pass_context_;
+  OpaqueCoverageState opaque_coverage_;
+  bool clear_on_first_pass_ = false;
 };
 
 class Canvas {
@@ -174,6 +197,9 @@ class Canvas {
   void RestoreToCount(size_t count);
 
   const Matrix& GetCurrentTransform() const;
+
+  void SetCoverageDisplayListPlan(
+      std::shared_ptr<const CoverageDisplayListPlan> plan);
 
   void ResetTransform();
 
@@ -254,9 +280,11 @@ class Canvas {
   void DrawAtlas(const std::shared_ptr<AtlasContents>& atlas_contents,
                  const Paint& paint);
 
-  void ClipGeometry(const Geometry& geometry,
-                    Entity::ClipOperation clip_op,
-                    bool is_aa = true);
+  void ClipGeometry(
+      const Geometry& geometry,
+      Entity::ClipOperation clip_op,
+      bool is_aa = true,
+      std::optional<AvioContinuousClip> continuous = std::nullopt);
 
   bool EndReplay();
 
@@ -301,6 +329,9 @@ class Canvas {
                                       Point global_pass_position);
 
  private:
+  // Pixel regressions can explicitly replay the previous framebuffer-fetch
+  // contents under real Canvas clips without a production routing override.
+  friend class testing::CanvasBlendTestPeer;
   class BlurShape {
    public:
     virtual ~BlurShape() = default;
@@ -314,6 +345,7 @@ class Canvas {
   class PathBlurShape;
 
   ContentContext& renderer_;
+  std::shared_ptr<const CoverageDisplayListPlan> coverage_display_list_plan_;
   RenderTarget render_target_;
   const bool is_onscreen_;
   bool requires_readback_;
@@ -322,6 +354,7 @@ class Canvas {
   // This replay's render-target lease scope, open from SetupRenderPass until
   // EndReplay (or destruction).
   std::optional<uint64_t> render_target_scope_;
+  bool avio_raster_frame_open_ = false;
   EntityPassClipStack clip_coverage_stack_;
 
   std::deque<CanvasStackEntry> transform_stack_;
@@ -367,6 +400,14 @@ class Canvas {
 
   void SetupRenderPass();
 
+  bool HasAvioDirect1xScopeProof() const;
+
+  bool UseLegacySdfSource(const Paint& paint) const;
+
+  void RetainSample4Clip(AvioSample4ClipNode node,
+                         const CoverageClipDecision* decision,
+                         RenderPass& pass);
+
   /// @brief  Ends the current render pass, saving the result as a texture, and
   ///         thenrestart it with the backdrop cleared to the previous contents.
   ///
@@ -402,7 +443,8 @@ class Canvas {
       const Geometry* geometry,
       const Paint& paint,
       bool reuse_depth = false,
-      std::shared_ptr<Contents> override_contents = nullptr);
+      std::shared_ptr<Contents> override_contents = nullptr,
+      std::optional<AvioContinuousClip> continuous_geometry = std::nullopt);
 
   /// @brief  Adds a rendering entity using the UberSDF pipeline
   ///         to the current render pass.
@@ -425,7 +467,10 @@ class Canvas {
   bool SDFFillRectContainsVisibleClip(const UberSDFParameters& params,
                                       const Matrix& transform) const;
 
-  void AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth = false);
+  void AddRenderEntityToCurrentPass(
+      Entity& entity,
+      bool reuse_depth = false,
+      std::optional<AvioContinuousClip> continuous_geometry = std::nullopt);
 
   /// Returns true if this operation is consistent with a DrawShadow-like
   /// operation.

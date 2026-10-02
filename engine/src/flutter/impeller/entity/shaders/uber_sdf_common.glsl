@@ -19,6 +19,7 @@ precision mediump float;
 
 #include "sdf_functions.glsl"
 #include "sdf_utils.glsl"
+#include "continuous_clip.glsl"
 
 uniform FragInfo {
   /// The RGBA color of the shape; for a gradient, color.a is the paint's
@@ -28,6 +29,7 @@ uniform FragInfo {
   vec2 size;
   float stroke_width;
   float stroke_join;
+  float stroke_miter_limit;
   float aa_pixels;
   float stroked;
   float type;
@@ -39,8 +41,15 @@ uniform FragInfo {
   vec2 circle_center_right;
   vec2 superellipse_scale;
   vec4 radii;
+  vec2 inner_center;
+  vec2 inner_size;
+  vec4 inner_radii;
+  vec4 bordered_radii_y;
+  vec4 inner_radii_y;
+  vec4 arc;
   float external_linear_backdrop;
   float defer_coverage_transform;
+  float defer_geometry_coverage;
 
   // --- Gradient color source ---
   /// Linear: the start point. Radial: the center. Local coordinates.
@@ -72,7 +81,11 @@ frag_info;
 
 out vec4 frag_color;
 
+#ifdef AVIO_CONTINUOUS_COVERAGE
+sample in highp vec2 v_position;
+#else
 highp in vec2 v_position;
+#endif
 
 // Looks up the unpremultiplied gradient color at the untiled gradient
 // position `t`; implementations apply frag_info.tile_mode.
@@ -133,6 +146,8 @@ float distanceFromRoundedRect(in vec2 p, in vec2 b, in vec4 r) {
   vec2 q = abs(p) - b + r.x;
   return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r.x;
 }
+
+#include "analytic_arc.glsl"
 
 float distanceFromChamferRect(vec2 p, vec2 half_size, float chamfer_size) {
   p = abs(p);
@@ -282,12 +297,22 @@ vec2 filledSDF(vec2 p) {
     sdf = distanceFromRoundedRect(p, frag_info.size, frag_info.radii);
     // RoundRect has its own separate logic for calculating pixel size.
     pixel_size = roundRectPixelSize(p);
-  } else {  // Symmetric Rounded Superellipse
+  } else if (frag_info.type < 4.5) {  // Symmetric Rounded Superellipse
     sdf = distanceFromRoundedSuperellipse(
         p, frag_info.superellipse_degree, frag_info.superellipse_semi_axis,
         frag_info.radii.xy, frag_info.angle_span, frag_info.circle_center_top,
         frag_info.circle_center_right, frag_info.octant_offset_c,
         frag_info.superellipse_scale);
+    pixel_size = pixelSize(sdf);
+  } else if (frag_info.type < 5.5) {  // Bordered rounded rectangle
+    float outer = avioRoundedRectDistance(p,frag_info.size,frag_info.radii,frag_info.bordered_radii_y);
+    float inner = min(frag_info.inner_size.x,frag_info.inner_size.y)>0.0 ? avioRoundedRectDistance(
+        p + frag_info.center - frag_info.inner_center,
+        frag_info.inner_size,frag_info.inner_radii,frag_info.inner_radii_y) : 1e20;
+    sdf = max(outer,-inner);
+    pixel_size = pixelSize(sdf);
+  } else {  // Filled ellipse arc / sector / chord segment
+    sdf = avioArcFillDistance(p,frag_info.size,frag_info.arc);
     pixel_size = pixelSize(sdf);
   }
   return vec2(sdf, pixel_size);
@@ -296,6 +321,10 @@ vec2 filledSDF(vec2 p) {
 // Evaluates the stroked SDF for the shape selected by frag_info.type.
 // Returns vec2(sdf, pixel_size).
 vec2 strokedSDF(vec2 p) {
+  if (frag_info.type > 5.5) {
+    float sdf = avioArcStrokeDistance(p,frag_info.size,frag_info.arc,vec3(max(frag_info.stroke_width,pixelSize(distanceFromOval(p,frag_info.size))),frag_info.stroke_join,frag_info.stroke_miter_limit));
+    return vec2(sdf,pixelSize(sdf));
+  }
   vec2 base_sdf_and_pixel_size = filledSDF(p);
   float base_sdf = base_sdf_and_pixel_size.x;
   float base_pixel_size = base_sdf_and_pixel_size.y;
@@ -355,10 +384,22 @@ void main() {
   float sdf = sdf_and_pixel_size.x;
   float pixel_size = sdf_and_pixel_size.y;
 
-  float alpha = SDFAlpha(sdf, pixel_size, frag_info.aa_pixels);
+#ifdef AVIO_CONTINUOUS_COVERAGE
+  // The Vulkan destination-aware wrapper combines this raw geometry distance
+  // with the retained analytic clip expression before evaluating coverage.
+  if (frag_info.defer_geometry_coverage < .5) {
+    avio_geometry_distance = sdf / max(pixel_size, 0.00001);
+    avio_has_geometry_distance = true;
+  }
+  avio_external_linear_backdrop = frag_info.external_linear_backdrop;
+  float alpha = 1.0;
+#else
+  float alpha = frag_info.defer_geometry_coverage > .5 ? 1.0 : SDFAlpha(sdf, pixel_size, frag_info.aa_pixels);
+#endif
   // Clamp alpha in case floating point precision errors cause it to be outside
   // [0.0, 1.0].
   alpha = clamp(alpha, 0.0, 1.0);
+#ifndef AVIO_CONTINUOUS_COVERAGE
   if (frag_info.external_linear_backdrop < 0.5) {
     // A gradient keeps the edge response of the mask it used to be blended
     // through: a white UberSDF mask, i.e. the light-foreground correction.
@@ -368,6 +409,7 @@ void main() {
         frag_info.color_source_type < 0.5 ? color.rgb : vec3(1.0);
     alpha = gammaCorrectedAlpha(alpha, coverage_rgb);
   }
+#endif
 
   if (frag_info.color_source_type < 0.5) {
     frag_color = vec4(color.rgb, color.a * alpha);
@@ -380,10 +422,12 @@ void main() {
     // shape, and srcOver would add it to whatever lies underneath.
     frag_color = finishGradientColor(IPPremultiply(color)) * alpha;
   }
+  #ifndef AVIO_CONTINUOUS_COVERAGE
   if (frag_info.defer_coverage_transform < 0.5) {
     frag_color = IPApplyExternalLinearBackdropCoverage(
         frag_color, frag_info.external_linear_backdrop);
   }
+  #endif
 }
 
 #endif  // UBER_SDF_COMMON_GLSL_

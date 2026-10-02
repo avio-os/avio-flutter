@@ -7,6 +7,7 @@
 #include "impeller/renderer/backend/vulkan/barrier_vk.h"
 #include "impeller/renderer/backend/vulkan/command_buffer_vk.h"
 #include "impeller/renderer/backend/vulkan/texture_vk.h"
+#include "impeller/renderer/render_resource_scope.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/vulkan_enums.hpp"
 #include "vulkan/vulkan_structs.hpp"
@@ -77,33 +78,37 @@ bool BlitPassVK::OnCopyTextureToTextureCommand(
   if (!command_buffer_->Track(source) || !command_buffer_->Track(destination)) {
     return false;
   }
+  if (!command_buffer_->PrepareExternalImage(src.GetTextureSource()) ||
+      !command_buffer_->PrepareExternalImage(dst.GetTextureSource())) {
+    return false;
+  }
 
   BarrierVK src_barrier;
   src_barrier.cmd_buffer = cmd_buffer;
   src_barrier.new_layout = vk::ImageLayout::eTransferSrcOptimal;
-  src_barrier.src_access = vk::AccessFlagBits::eTransferWrite |
-                           vk::AccessFlagBits::eShaderWrite |
-                           vk::AccessFlagBits::eColorAttachmentWrite;
-  src_barrier.src_stage = vk::PipelineStageFlagBits::eTransfer |
-                          vk::PipelineStageFlagBits::eFragmentShader |
-                          vk::PipelineStageFlagBits::eColorAttachmentOutput;
+  src_barrier.src_access = vk::AccessFlagBits::eMemoryWrite;
+  src_barrier.src_stage = vk::PipelineStageFlagBits::eAllCommands;
   src_barrier.dst_access = vk::AccessFlagBits::eTransferRead;
   src_barrier.dst_stage = vk::PipelineStageFlagBits::eTransfer;
 
   BarrierVK dst_barrier;
   dst_barrier.cmd_buffer = cmd_buffer;
   dst_barrier.new_layout = vk::ImageLayout::eTransferDstOptimal;
-  dst_barrier.src_access = {};
-  dst_barrier.src_stage = vk::PipelineStageFlagBits::eTopOfPipe;
-  dst_barrier.dst_access =
-      vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eTransferWrite;
-  dst_barrier.dst_stage = vk::PipelineStageFlagBits::eFragmentShader |
-                          vk::PipelineStageFlagBits::eTransfer;
+  // The destination may have just been sampled to seed the 4x island. The
+  // shader read must finish before copying the resolved tile back into it.
+  dst_barrier.src_access =
+      vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+  dst_barrier.src_stage = vk::PipelineStageFlagBits::eAllCommands;
+  dst_barrier.dst_access = vk::AccessFlagBits::eTransferWrite;
+  dst_barrier.dst_stage = vk::PipelineStageFlagBits::eTransfer;
 
   if (!src.SetLayout(src_barrier) || !dst.SetLayout(dst_barrier)) {
     VALIDATION_LOG << "Could not complete layout transitions.";
     return false;
   }
+
+  command_buffer_->RecordExternalImageLayout(*src.GetTextureSource());
+  command_buffer_->RecordExternalImageLayout(*dst.GetTextureSource());
 
   vk::ImageCopy image_copy;
 
@@ -137,12 +142,14 @@ bool BlitPassVK::OnCopyTextureToTextureCommand(
   BarrierVK barrier;
   barrier.cmd_buffer = cmd_buffer;
   barrier.new_layout = vk::ImageLayout::eShaderReadOnlyOptimal;
-  barrier.src_access = {};
-  barrier.src_stage = vk::PipelineStageFlagBits::eTopOfPipe;
+  barrier.src_access = vk::AccessFlagBits::eTransferWrite;
+  barrier.src_stage = vk::PipelineStageFlagBits::eTransfer;
   barrier.dst_access = vk::AccessFlagBits::eShaderRead;
   barrier.dst_stage = vk::PipelineStageFlagBits::eFragmentShader;
 
-  return dst.SetLayout(barrier);
+  const bool transitioned = dst.SetLayout(barrier);
+  command_buffer_->RecordExternalImageLayout(*dst.GetTextureSource());
+  return transitioned;
 }
 
 // |BlitPass|
@@ -161,18 +168,17 @@ bool BlitPassVK::OnCopyTextureToBufferCommand(
     return false;
   }
 
+  if (!command_buffer_->PrepareExternalImage(src.GetTextureSource())) {
+    return false;
+  }
+
   BarrierVK barrier;
   barrier.cmd_buffer = cmd_buffer;
   barrier.new_layout = vk::ImageLayout::eTransferSrcOptimal;
-  barrier.src_access = vk::AccessFlagBits::eShaderWrite |
-                       vk::AccessFlagBits::eTransferWrite |
-                       vk::AccessFlagBits::eColorAttachmentWrite;
-  barrier.src_stage = vk::PipelineStageFlagBits::eFragmentShader |
-                      vk::PipelineStageFlagBits::eTransfer |
-                      vk::PipelineStageFlagBits::eColorAttachmentOutput;
-  barrier.dst_access = vk::AccessFlagBits::eShaderRead;
-  barrier.dst_stage = vk::PipelineStageFlagBits::eVertexShader |
-                      vk::PipelineStageFlagBits::eFragmentShader;
+  barrier.src_access = vk::AccessFlagBits::eMemoryWrite;
+  barrier.src_stage = vk::PipelineStageFlagBits::eAllCommands;
+  barrier.dst_access = vk::AccessFlagBits::eTransferRead;
+  barrier.dst_stage = vk::PipelineStageFlagBits::eTransfer;
 
   const auto& dst = DeviceBufferVK::Cast(*destination);
 
@@ -192,6 +198,7 @@ bool BlitPassVK::OnCopyTextureToBufferCommand(
     return false;
   }
 
+  command_buffer_->RecordExternalImageLayout(*src.GetTextureSource());
   cmd_buffer.copyImageToBuffer(src.GetImage(),      //
                                barrier.new_layout,  //
                                dst.GetBuffer(),     //
@@ -219,8 +226,8 @@ bool BlitPassVK::ConvertTextureToShaderRead(
 
   BarrierVK barrier;
   barrier.cmd_buffer = cmd_buffer;
-  barrier.src_access = vk::AccessFlagBits::eTransferWrite;
-  barrier.src_stage = vk::PipelineStageFlagBits::eTransfer;
+  barrier.src_access = vk::AccessFlagBits::eMemoryWrite;
+  barrier.src_stage = vk::PipelineStageFlagBits::eAllCommands;
   barrier.dst_access = vk::AccessFlagBits::eShaderRead;
   barrier.dst_stage = vk::PipelineStageFlagBits::eFragmentShader;
 
@@ -231,8 +238,13 @@ bool BlitPassVK::ConvertTextureToShaderRead(
   if (!command_buffer_->Track(texture)) {
     return false;
   }
+  if (!command_buffer_->PrepareExternalImage(texture_vk.GetTextureSource())) {
+    return false;
+  }
 
-  return texture_vk.SetLayout(barrier);
+  const bool transitioned = texture_vk.SetLayout(barrier);
+  command_buffer_->RecordExternalImageLayout(*texture_vk.GetTextureSource());
+  return transitioned;
 }
 
 // |BlitPass|
@@ -256,15 +268,18 @@ bool BlitPassVK::OnCopyBufferToTextureCommand(
     return false;
   }
 
+  if (!command_buffer_->PrepareExternalImage(dst.GetTextureSource())) {
+    return false;
+  }
+
   BarrierVK dst_barrier;
   dst_barrier.cmd_buffer = cmd_buffer;
   dst_barrier.new_layout = vk::ImageLayout::eTransferDstOptimal;
-  dst_barrier.src_access = {};
-  dst_barrier.src_stage = vk::PipelineStageFlagBits::eTopOfPipe;
-  dst_barrier.dst_access =
-      vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eTransferWrite;
-  dst_barrier.dst_stage = vk::PipelineStageFlagBits::eFragmentShader |
-                          vk::PipelineStageFlagBits::eTransfer;
+  dst_barrier.src_access =
+      vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+  dst_barrier.src_stage = vk::PipelineStageFlagBits::eAllCommands;
+  dst_barrier.dst_access = vk::AccessFlagBits::eTransferWrite;
+  dst_barrier.dst_stage = vk::PipelineStageFlagBits::eTransfer;
 
   vk::BufferImageCopy image_copy;
   image_copy.setBufferOffset(source.GetRange().offset);
@@ -287,6 +302,7 @@ bool BlitPassVK::OnCopyBufferToTextureCommand(
     return false;
   }
 
+  command_buffer_->RecordExternalImageLayout(*dst.GetTextureSource());
   cmd_buffer.copyBufferToImage(src.GetBuffer(),         //
                                dst.GetImage(),          //
                                dst_barrier.new_layout,  //
@@ -307,8 +323,12 @@ bool BlitPassVK::OnCopyBufferToTextureCommand(
     if (!dst.SetLayout(barrier)) {
       return false;
     }
+    command_buffer_->RecordExternalImageLayout(*dst.GetTextureSource());
   }
 
+  // The source's actual allocated-image registration carries its owner kind;
+  // imported and render-target textures do not count as decoded-image uploads.
+  dst.GetTextureSource()->RecordAvioImageUpload(IsAvioRasterFrameActive());
   return true;
 }
 
@@ -324,32 +344,35 @@ bool BlitPassVK::ResizeTexture(const std::shared_ptr<Texture>& source,
     return false;
   }
 
+  if (!command_buffer_->PrepareExternalImage(src.GetTextureSource()) ||
+      !command_buffer_->PrepareExternalImage(dst.GetTextureSource())) {
+    return false;
+  }
+
   BarrierVK src_barrier;
   src_barrier.cmd_buffer = cmd_buffer;
   src_barrier.new_layout = vk::ImageLayout::eTransferSrcOptimal;
-  src_barrier.src_access = vk::AccessFlagBits::eTransferWrite |
-                           vk::AccessFlagBits::eShaderWrite |
-                           vk::AccessFlagBits::eColorAttachmentWrite;
-  src_barrier.src_stage = vk::PipelineStageFlagBits::eTransfer |
-                          vk::PipelineStageFlagBits::eFragmentShader |
-                          vk::PipelineStageFlagBits::eColorAttachmentOutput;
+  src_barrier.src_access = vk::AccessFlagBits::eMemoryWrite;
+  src_barrier.src_stage = vk::PipelineStageFlagBits::eAllCommands;
   src_barrier.dst_access = vk::AccessFlagBits::eTransferRead;
   src_barrier.dst_stage = vk::PipelineStageFlagBits::eTransfer;
 
   BarrierVK dst_barrier;
   dst_barrier.cmd_buffer = cmd_buffer;
   dst_barrier.new_layout = vk::ImageLayout::eTransferDstOptimal;
-  dst_barrier.src_access = {};
-  dst_barrier.src_stage = vk::PipelineStageFlagBits::eTopOfPipe;
-  dst_barrier.dst_access =
-      vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eTransferWrite;
-  dst_barrier.dst_stage = vk::PipelineStageFlagBits::eFragmentShader |
-                          vk::PipelineStageFlagBits::eTransfer;
+  dst_barrier.src_access =
+      vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+  dst_barrier.src_stage = vk::PipelineStageFlagBits::eAllCommands;
+  dst_barrier.dst_access = vk::AccessFlagBits::eTransferWrite;
+  dst_barrier.dst_stage = vk::PipelineStageFlagBits::eTransfer;
 
   if (!src.SetLayout(src_barrier) || !dst.SetLayout(dst_barrier)) {
     VALIDATION_LOG << "Could not complete layout transitions.";
     return false;
   }
+
+  command_buffer_->RecordExternalImageLayout(*src.GetTextureSource());
+  command_buffer_->RecordExternalImageLayout(*dst.GetTextureSource());
 
   vk::ImageBlit blit;
   blit.srcSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
@@ -387,12 +410,14 @@ bool BlitPassVK::ResizeTexture(const std::shared_ptr<Texture>& source,
   BarrierVK barrier;
   barrier.cmd_buffer = cmd_buffer;
   barrier.new_layout = vk::ImageLayout::eShaderReadOnlyOptimal;
-  barrier.src_access = {};
-  barrier.src_stage = vk::PipelineStageFlagBits::eTopOfPipe;
+  barrier.src_access = vk::AccessFlagBits::eTransferWrite;
+  barrier.src_stage = vk::PipelineStageFlagBits::eTransfer;
   barrier.dst_access = vk::AccessFlagBits::eShaderRead;
   barrier.dst_stage = vk::PipelineStageFlagBits::eFragmentShader;
 
-  return dst.SetLayout(barrier);
+  const bool transitioned = dst.SetLayout(barrier);
+  command_buffer_->RecordExternalImageLayout(*dst.GetTextureSource());
+  return transitioned;
 }
 
 // |BlitPass|
@@ -411,6 +436,10 @@ bool BlitPassVK::OnGenerateMipmapCommand(std::shared_ptr<Texture> texture,
   const auto& cmd = command_buffer_->GetCommandBuffer();
 
   if (!command_buffer_->Track(texture)) {
+    return false;
+  }
+
+  if (!command_buffer_->PrepareExternalImage(src.GetTextureSource())) {
     return false;
   }
 
@@ -526,6 +555,7 @@ bool BlitPassVK::OnGenerateMipmapCommand(std::shared_ptr<Texture> texture,
   // We modified the layouts of this image from underneath it. Tell it its new
   // state so it doesn't try to perform redundant transitions under the hood.
   src.SetLayoutWithoutEncoding(vk::ImageLayout::eShaderReadOnlyOptimal);
+  command_buffer_->RecordExternalImageLayout(*src.GetTextureSource());
   src.SetMipMapGenerated();
 
   return true;

@@ -30,6 +30,7 @@ struct MockCommandBuffer {
       : called_functions_(std::move(called_functions)) {}
   std::shared_ptr<std::vector<std::string>> called_functions_;
   std::vector<VkImageMemoryBarrier> image_memory_barriers_;
+  std::vector<RecordedImageBarrier> recorded_image_barriers_;
   std::vector<VkViewport> recorded_viewports_;
   std::vector<VkRect2D> recorded_render_areas_;
   std::vector<VkRect2D> recorded_scissors_;
@@ -202,6 +203,11 @@ struct MockVulkanState {
   std::function<void(VkPhysicalDevice physicalDevice,
                      VkPhysicalDeviceProperties* pProperties)>
       physical_device_properties_callback;
+  std::function<VkResult(VkPhysicalDevice,
+                         const VkPhysicalDeviceImageFormatInfo2*,
+                         VkImageFormatProperties2*)>
+      image_format_properties_callback;
+  std::function<VkResult()> queue_submit_callback;
   std::function<std::remove_pointer_t<PFN_vkWaitForFences>>
       wait_for_fences_callback;
   std::function<std::remove_pointer_t<PFN_vkAcquireNextImageKHR>>
@@ -328,6 +334,11 @@ void vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice,
   pProperties->limits.framebufferColorSampleCounts =
       static_cast<VkSampleCountFlags>(VK_SAMPLE_COUNT_1_BIT |
                                       VK_SAMPLE_COUNT_4_BIT);
+  pProperties->limits.framebufferStencilSampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+  pProperties->limits.sampledImageColorSampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+  pProperties->limits.standardSampleLocations = VK_TRUE;
   pProperties->limits.maxImageDimension2D = 4096;
   pProperties->limits.timestampPeriod = 1;
   if (GetMockVulkanState().physical_device_properties_callback) {
@@ -360,6 +371,12 @@ VkResult vkGetPhysicalDeviceImageFormatProperties2(
     VkPhysicalDevice physicalDevice,
     const VkPhysicalDeviceImageFormatInfo2* pImageFormatInfo,
     VkImageFormatProperties2* pImageFormatProperties) {
+  if (GetMockVulkanState().image_format_properties_callback) {
+    return GetMockVulkanState().image_format_properties_callback(
+        physicalDevice, pImageFormatInfo, pImageFormatProperties);
+  }
+  pImageFormatProperties->imageFormatProperties.sampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
   // Report fixed-rate compression support when it is queried (i.e. the input
   // carries a VkImageCompressionControlEXT and the output a
   // VkImageCompressionPropertiesEXT).
@@ -742,6 +759,8 @@ void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer,
     for (uint32_t i = 0; i < imageMemoryBarrierCount; ++i) {
       mock_command_buffer->image_memory_barriers_.push_back(
           pImageMemoryBarriers[i]);
+      mock_command_buffer->recorded_image_barriers_.push_back(
+          {pImageMemoryBarriers[i], srcStageMask, dstStageMask});
     }
   }
 }
@@ -881,6 +900,12 @@ VkResult vkQueueSubmit(VkQueue queue,
         std::move(signal_counts));
     GetMockVulkanState().queue_submit_signal_values.push_back(
         std::move(signal_values));
+  }
+  if (GetMockVulkanState().queue_submit_callback) {
+    const auto result = GetMockVulkanState().queue_submit_callback();
+    if (result != VK_SUCCESS) {
+      return result;
+    }
   }
   for (uint32_t submit_index = 0; submit_index < submitCount; submit_index++) {
     const VkTimelineSemaphoreSubmitInfo* timeline_info = nullptr;
@@ -1482,6 +1507,9 @@ std::shared_ptr<ContextVK> MockVulkanContextBuilder::Build() {
   g_mock_vulkan_state->format_properties_callback = format_properties_callback_;
   g_mock_vulkan_state->physical_device_properties_callback =
       physical_properties_callback_;
+  g_mock_vulkan_state->image_format_properties_callback =
+      image_format_properties_callback_;
+  g_mock_vulkan_state->queue_submit_callback = queue_submit_callback_;
   g_mock_vulkan_state->acquire_next_image_callback =
       acquire_next_image_callback_;
   g_mock_vulkan_state->wait_for_fences_callback = wait_for_fences_callback_;
@@ -1540,6 +1568,11 @@ std::vector<VkImageMemoryBarrier>& GetImageMemoryBarriers(
   MockCommandBuffer* mock_command_buffer =
       reinterpret_cast<MockCommandBuffer*>(buffer);
   return mock_command_buffer->image_memory_barriers_;
+}
+
+const std::vector<RecordedImageBarrier>& GetRecordedImageBarriers(
+    VkCommandBuffer buffer) {
+  return reinterpret_cast<MockCommandBuffer*>(buffer)->recorded_image_barriers_;
 }
 
 const std::vector<VkViewport>& GetRecordedViewports(VkCommandBuffer buffer) {

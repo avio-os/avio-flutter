@@ -64,6 +64,13 @@ FlFramebuffer* fl_framebuffer_new_multisampled(GLint format,
                                                gboolean shareable,
                                                GLsizei samples);
 
+// Negotiated Coverage backing store: exactly one colour sample, no full-size
+// depth/stencil storage. Returns null if the colour-only FBO is incomplete.
+FlFramebuffer* fl_framebuffer_new_color_only(GLint format,
+                                             size_t width,
+                                             size_t height,
+                                             gboolean shareable);
+
 /**
  * fl_framebuffer_resolve:
  * @framebuffer: an #FlFramebuffer.

@@ -29,11 +29,9 @@ class TextureFilterInput final : public FilterInput {
   Matrix GetLocalTransform(const Entity& entity) const override;
 
  private:
-  explicit TextureFilterInput(std::shared_ptr<Texture> texture,
-                              Matrix local_transform = Matrix());
+  explicit TextureFilterInput(Snapshot snapshot);
 
-  std::shared_ptr<Texture> texture_;
-  Matrix local_transform_;
+  Snapshot snapshot_;
 
   friend FilterInput;
 };

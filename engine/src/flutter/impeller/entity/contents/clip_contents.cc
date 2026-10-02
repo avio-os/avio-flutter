@@ -9,6 +9,7 @@
 #include "impeller/core/formats.h"
 #include "impeller/core/vertex_buffer.h"
 #include "impeller/entity/contents/clip_contents.h"
+#include "impeller/entity/contents/clip_operation_scope.h"
 #include "impeller/entity/contents/content_context.h"
 #include "impeller/entity/contents/pipelines.h"
 #include "impeller/entity/entity.h"
@@ -36,6 +37,23 @@ ClipContents::~ClipContents() = default;
 
 void ClipContents::SetGeometry(GeometryResult clip_geometry) {
   clip_geometry_ = std::move(clip_geometry);
+}
+
+void ClipContents::SetCoverageMasks(std::vector<CoverageMaskTile> masks) {
+  coverage_quad_.reset();
+  coverage_masks_ = std::move(masks);
+}
+
+void ClipContents::SetCoverageQuad(CoverageConvexQuad4 quad) {
+  coverage_masks_.reset();
+  coverage_quad_ = std::move(quad);
+}
+
+void ClipContents::SetContinuousClip(
+    std::shared_ptr<const AvioContinuousClipExpression> expression) {
+  continuous_clip_ = std::move(expression);
+  coverage_masks_.reset();
+  coverage_quad_.reset();
 }
 
 void ClipContents::SetClipOperation(Entity::ClipOperation clip_op) {
@@ -70,6 +88,22 @@ ClipCoverage ClipContents::GetClipCoverage(
 bool ClipContents::Render(const ContentContext& renderer,
                           RenderPass& pass,
                           uint32_t clip_depth) const {
+  AvioClipOperationScope clip_operation(pass);
+  if (continuous_clip_) {
+    pass.SetAvioContinuousClip(continuous_clip_);
+    return true;
+  }
+  if (coverage_quad_) {
+    return CoverageMaskContents::RenderQuadClip(renderer, pass, *coverage_quad_,
+                                                clip_depth, clip_op_);
+  }
+  if (coverage_masks_) {
+    // Stencil carries native sample identity and the existing clip-depth test
+    // intersects it with the parent. Never resolve alpha, AND tile rectangles,
+    // or fall back after a failed cached-mask draw has mutated stencil/depth.
+    return CoverageMaskContents::RenderClip(renderer, pass, *coverage_masks_,
+                                            clip_depth, clip_op_);
+  }
   if (!clip_geometry_.vertex_buffer) {
     return true;
   }

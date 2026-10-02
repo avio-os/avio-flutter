@@ -4,6 +4,8 @@
 
 #include "flutter/shell/platform/embedder/embedder_external_view.h"
 
+#include <charconv>
+
 #include <cmath>
 
 #include "flutter/display_list/dl_builder.h"
@@ -89,8 +91,13 @@ const EmbeddedViewParams* EmbedderExternalView::GetEmbeddedViewParams() const {
   return embedded_view_params_.get();
 }
 
-void EmbedderExternalView::Render(DlCanvas& dl_canvas, bool clear_surface) {
-  TRACE_EVENT0("flutter", "EmbedderExternalView::Render");
+void EmbedderExternalView::Render(DlCanvas& dl_canvas,
+                                  bool clear_surface,
+                                  int64_t flutter_view_id) {
+  char view_id_string[32] = {};
+  std::to_chars(view_id_string, view_id_string + 31, flutter_view_id);
+  TRACE_EVENT1("flutter", "EmbedderExternalView::Render", "view_id",
+               view_id_string);
   TryEndRecording();
   FML_DCHECK(HasEngineRenderedContents())
       << "Unnecessarily asked to render into a render target when there was "
@@ -130,8 +137,12 @@ EmbedderExternalView::RenderResult EmbedderExternalView::Render(
     const EmbedderRenderTarget& render_target,
     const DlRect& render_target_bounds,
     const std::optional<DlRegion>& buffer_damage,
-    bool clear_surface) {
-  TRACE_EVENT0("flutter", "EmbedderExternalView::Render");
+    bool clear_surface,
+    int64_t flutter_view_id) {
+  char view_id_string[32] = {};
+  std::to_chars(view_id_string, view_id_string + 31, flutter_view_id);
+  TRACE_EVENT1("flutter", "EmbedderExternalView::Render", "view_id",
+               view_id_string);
   TryEndRecording();
   // A selected retained target can require a clear-only render when the current
   // display list is empty but buffer damage removes pixels from the prior

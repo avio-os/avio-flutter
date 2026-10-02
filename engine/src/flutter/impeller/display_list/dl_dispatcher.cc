@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 #include "impeller/display_list/dl_dispatcher.h"
+#include "impeller/display_list/coverage_classifier.h"
+#include "impeller/renderer/render_resource_scope.h"
 
 #include <algorithm>
 #include <cstring>
@@ -39,6 +41,19 @@
 #include "impeller/typographer/font_glyph_pair.h"
 
 namespace impeller {
+
+namespace {
+bool CanClassifyAnalyticSample4Image1x(const ContentContext& context) {
+  const auto& config = context.GetContext()->GetAvioAntialiasingConfig();
+  // The initialized native-mask atlas establishes canonical standard4 sample
+  // locations on this Vulkan device. GLES/image-nine/filtered sources do not
+  // inherit an unmeasured native sample-pattern or source-shader contract.
+  return context.GetContext()->GetBackendType() ==
+             Context::BackendType::kVulkan &&
+         config.continuous_requested_classes == 0 &&
+         config.coverage_sample_count == 4 && context.GetCoveragePathAtlas();
+}
+}  // namespace
 
 #if !defined(NDEBUG)
 #define USE_DEPTH_WATCHER true
@@ -435,7 +450,8 @@ void DlDispatcherBase::clipRect(const DlRect& rect,
   AUTO_DEPTH_WATCHER(0u);
 
   FillRectGeometry geom(rect);
-  GetCanvas().ClipGeometry(geom, ToClipOperation(clip_op), /*is_aa=*/is_aa);
+  GetCanvas().ClipGeometry(geom, ToClipOperation(clip_op), is_aa,
+                           AvioContinuousClip::RectClip(rect));
 }
 
 // |flutter::DlOpReceiver|
@@ -445,7 +461,8 @@ void DlDispatcherBase::clipOval(const DlRect& bounds,
   AUTO_DEPTH_WATCHER(0u);
 
   EllipseGeometry geom(bounds);
-  GetCanvas().ClipGeometry(geom, ToClipOperation(clip_op));
+  GetCanvas().ClipGeometry(geom, ToClipOperation(clip_op), is_aa,
+                           AvioContinuousClip::OvalClip(bounds));
 }
 
 // |flutter::DlOpReceiver|
@@ -457,16 +474,20 @@ void DlDispatcherBase::clipRoundRect(const DlRoundRect& rrect,
   auto clip_op = ToClipOperation(sk_op);
   if (rrect.IsRect()) {
     FillRectGeometry geom(rrect.GetBounds());
-    GetCanvas().ClipGeometry(geom, clip_op, /*is_aa=*/is_aa);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::RectClip(rrect.GetBounds()));
   } else if (rrect.IsOval()) {
     EllipseGeometry geom(rrect.GetBounds());
-    GetCanvas().ClipGeometry(geom, clip_op);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::OvalClip(rrect.GetBounds()));
   } else if (rrect.GetRadii().AreAllCornersSame()) {
     RoundRectGeometry geom(rrect.GetBounds(), rrect.GetRadii().top_left);
-    GetCanvas().ClipGeometry(geom, clip_op);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::RoundRectClip(rrect));
   } else {
     FillRoundRectGeometry geom(rrect);
-    GetCanvas().ClipGeometry(geom, clip_op);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::RoundRectClip(rrect));
   }
 }
 
@@ -479,13 +500,16 @@ void DlDispatcherBase::clipRoundSuperellipse(const DlRoundSuperellipse& rse,
   auto clip_op = ToClipOperation(sk_op);
   if (rse.IsRect()) {
     FillRectGeometry geom(rse.GetBounds());
-    GetCanvas().ClipGeometry(geom, clip_op, /*is_aa=*/is_aa);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::RectClip(rse.GetBounds()));
   } else if (rse.IsOval()) {
     EllipseGeometry geom(rse.GetBounds());
-    GetCanvas().ClipGeometry(geom, clip_op);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::OvalClip(rse.GetBounds()));
   } else {
     RoundSuperellipseGeometry geom(rse.GetBounds(), rse.GetRadii());
-    GetCanvas().ClipGeometry(geom, clip_op);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::SuperellipseClip(rse));
   }
 }
 
@@ -500,18 +524,21 @@ void DlDispatcherBase::clipPath(const DlPath& path,
   DlRect rect;
   if (path.IsRect(&rect)) {
     FillRectGeometry geom(rect);
-    GetCanvas().ClipGeometry(geom, clip_op, /*is_aa=*/is_aa);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::RectClip(rect));
   } else if (path.IsOval(&rect)) {
     EllipseGeometry geom(rect);
-    GetCanvas().ClipGeometry(geom, clip_op);
+    GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                             AvioContinuousClip::OvalClip(rect));
   } else {
     DlRoundRect rrect;
     if (path.IsRoundRect(&rrect) && rrect.GetRadii().AreAllCornersSame()) {
       RoundRectGeometry geom(rrect.GetBounds(), rrect.GetRadii().top_left);
-      GetCanvas().ClipGeometry(geom, clip_op);
+      GetCanvas().ClipGeometry(geom, clip_op, is_aa,
+                               AvioContinuousClip::RoundRectClip(rrect));
     } else {
       FillPathGeometry geom(path);
-      GetCanvas().ClipGeometry(geom, clip_op);
+      GetCanvas().ClipGeometry(geom, clip_op, is_aa);
     }
   }
 }
@@ -1023,6 +1050,26 @@ void FirstPassDispatcher::saveLayer(const DlRect& bounds,
         data.last_backdrop = shared_backdrop;
       }
     }
+    if (renderer_.UsesAvioCoverage()) {
+      auto& data = backdrop_data_[backdrop_id.value()];
+      const Rect output = bounds.TransformBounds(matrix_).IntersectionOrEmpty(
+          cull_rect_state_.back());
+      flutter::DlIRect input;
+      // The first pass cannot infer the affected bounds through an enclosing
+      // image filter. Freeze the complete prefix rather than omit its input.
+      if (has_image_filter_ || output.IsMaximum() || !output.IsFinite() ||
+          !backdrop->get_input_device_bounds(flutter::DlIRect::RoundOut(output),
+                                             matrix_, input)) {
+        data.requires_full_backdrop = true;
+      } else if (!input.IsEmpty()) {
+        const Rect needed = Rect::MakeLTRB(input.GetLeft(), input.GetTop(),
+                                           input.GetRight(), input.GetBottom());
+        data.required_input_coverage =
+            data.required_input_coverage
+                ? data.required_input_coverage->Union(needed)
+                : needed;
+      }
+    }
   }
 
   // This dispatcher does not track enough state to accurately compute
@@ -1239,6 +1286,11 @@ std::shared_ptr<Texture> DisplayListToTexture(
     bool reset_host_buffer,
     bool generate_mips,
     std::optional<PixelFormat> target_pixel_format) {
+  // toImage/screenshot raster work may run between onscreen frames. Capture
+  // its native creation provenance before deferred GPU jobs leave this turn.
+  const AvioRasterFrameScope snapshot_raster_work;
+  const AvioRasterAllocationCauseScope snapshot_operation(
+      AvioRasterAllocationCause::kSnapshot);
   int mip_count = 1;
   if (generate_mips) {
     mip_count = size.MipCount();
@@ -1249,7 +1301,8 @@ std::shared_ptr<Texture> DisplayListToTexture(
       impeller::RenderTargetAllocator(
           context.GetContext()->GetResourceAllocator());
   impeller::RenderTarget target;
-  if (context.GetContext()->GetCapabilities()->SupportsOffscreenMSAA() &&
+  if (!context.GetContentContext().UsesAvioCoverage() &&
+      context.GetContext()->GetCapabilities()->SupportsOffscreenMSAA() &&
       PixelFormatSupportsMSAA(target_pixel_format)) {
     target = render_target_allocator.CreateOffscreenMSAA(
         *context.GetContext(),  // context
@@ -1296,6 +1349,27 @@ std::shared_ptr<Texture> DisplayListToTexture(
   );
   const auto& [data, count] = collector.TakeBackdropData();
   impeller_dispatcher.SetBackdropData(data, count);
+  if (context.GetContentContext().UsesAvioCoverage()) {
+    auto plan = ClassifyCoverageDisplayList(
+        display_list,
+        context.GetContentContext().GetCoverageClassifierStorage(),
+        Rect::MakeSize(size),
+        BytesPerPixelForPixelFormat(target.GetColorAttachment(0)
+                                        .texture->GetTextureDescriptor()
+                                        .format),
+        context.GetContext()->GetFlags().use_sdfs &&
+            context.GetContext()
+                    ->GetAvioAntialiasingConfig()
+                    .continuous_requested_classes == 0,
+        CanClassifyAnalyticSample4Image1x(context.GetContentContext()));
+    if (plan) {
+      plan->Report(*context.GetContext());
+    } else {
+      context.GetContext()->RecordAvioCoverageClassification(
+          AvioCoverageReason::kClassStorageUnavailable, 1, 0);
+    }
+    impeller_dispatcher.SetCoverageDisplayListPlan(std::move(plan));
+  }
   context.GetContentContext().GetTextShadowCache().MarkFrameStart();
   fml::ScopedCleanupClosure cleanup([&] {
     if (reset_host_buffer) {
@@ -1334,6 +1408,26 @@ bool RenderToTarget(ContentContext& context,
   );
   const auto& [data, count] = collector.TakeBackdropData();
   impeller_dispatcher.SetBackdropData(data, count);
+  if (context.UsesAvioCoverage()) {
+    auto plan = ClassifyCoverageDisplayList(
+        display_list, context.GetCoverageClassifierStorage(),
+        Rect::MakeSize(render_target.GetRenderTargetSize()),
+        BytesPerPixelForPixelFormat(render_target.GetColorAttachment(0)
+                                        .texture->GetTextureDescriptor()
+                                        .format),
+        context.GetContext()->GetFlags().use_sdfs &&
+            context.GetContext()
+                    ->GetAvioAntialiasingConfig()
+                    .continuous_requested_classes == 0,
+        CanClassifyAnalyticSample4Image1x(context));
+    if (plan) {
+      plan->Report(*context.GetContext());
+    } else {
+      context.GetContext()->RecordAvioCoverageClassification(
+          AvioCoverageReason::kClassStorageUnavailable, 1, 0);
+    }
+    impeller_dispatcher.SetCoverageDisplayListPlan(std::move(plan));
+  }
   context.GetTextShadowCache().MarkFrameStart();
   fml::ScopedCleanupClosure cleanup([&] {
     if (reset_host_buffer) {
