@@ -203,6 +203,64 @@ struct AvioCoverageRegion::State {
   std::atomic_bool colour_initialized = false;
   AvioCoverageRegionUsage interval;
 
+  // Final lease owners may leave on the native completion thread. They only
+  // publish a serial to these fixed mailboxes; all packing, textures and census
+  // state remain confined to the raster owner. Serial-max publication also
+  // prevents a delayed old colour generation from hiding a newer return.
+  using Returns =
+      std::array<std::atomic_uint64_t, AvioRegionPacking::kMaximumAllocations>;
+  Returns mask_returns{};
+  Returns colour_returns{};
+  Returns layer_returns{};
+  std::atomic_uint64_t clip_mask_return{0};
+  std::array<AvioRegionPacking::Token, AvioRegionPacking::kMaximumAllocations>
+      mask_tokens{};
+  std::array<AvioRegionPacking::Token, AvioRegionPacking::kMaximumAllocations>
+      colour_tokens{};
+
+  static void PublishReturn(std::atomic_uint64_t& mailbox, uint64_t serial) {
+    auto previous = mailbox.load(std::memory_order_relaxed);
+    while (previous < serial && !mailbox.compare_exchange_weak(
+                                    previous, serial, std::memory_order_release,
+                                    std::memory_order_relaxed)) {
+    }
+  }
+
+  void Return(Kind kind, AvioRegionPacking::Token token, bool scratch) {
+    if (scratch) {
+      PublishReturn(clip_mask_return, token.serial);
+    } else if (token.index < AvioRegionPacking::kMaximumAllocations) {
+      auto& returns = kind == Kind::kMask     ? mask_returns
+                      : kind == Kind::kColour ? colour_returns
+                                              : layer_returns;
+      PublishReturn(returns[token.index], token.serial);
+    }
+  }
+
+  void DrainReturns() {
+    for (size_t i = 0; i < AvioRegionPacking::kMaximumAllocations; ++i) {
+      const auto mask = mask_returns[i].exchange(0, std::memory_order_acquire);
+      if (mask != 0 && mask == mask_tokens[i].serial) {
+        Release(Kind::kMask, 0, mask_tokens[i]);
+      }
+      const auto colour =
+          colour_returns[i].exchange(0, std::memory_order_acquire);
+      if (colour != 0 && colour == colour_tokens[i].serial) {
+        Release(Kind::kColour, frame, colour_tokens[i]);
+      }
+      const auto layer =
+          layer_returns[i].exchange(0, std::memory_order_acquire);
+      if (layer != 0 && i < layer_count && layer == layers[i].serial) {
+        Release(Kind::kLayer, layers[i].epoch, {0, i, layer});
+      }
+    }
+    const auto scratch =
+        clip_mask_return.exchange(0, std::memory_order_acquire);
+    if (scratch != 0 && scratch == clip_mask_serial) {
+      clip_mask_live = false;
+    }
+  }
+
   std::optional<LeaseReservation> ReserveLease() {
     auto index = lease_storage->Reserve();
     if (!index)
@@ -582,30 +640,23 @@ AvioCoverageRegion::Lease::Lease(std::shared_ptr<State> state,
       clip_mask_scratch_(clip_mask_scratch) {}
 
 AvioCoverageRegion::Lease::~Lease() {
-  Release();
+  // Unlike explicit invalidation, final destruction proves that no cached
+  // snapshot, recorder or native submission still owns this logical claim.
+  // Never read or mutate the raster owner's plain state from this thread.
+  if (const auto state = state_.lock()) {
+    state->Return(kind_, token_, clip_mask_scratch_);
+  }
 }
 
 bool AvioCoverageRegion::Lease::IsValid() const {
   const auto state = state_.lock();
-  return !released_ && state &&
+  return !released_.load(std::memory_order_acquire) && state &&
          (clip_mask_scratch_ ? state->IsClipMaskLive(frame_, token_)
                              : state->IsLive(kind_, frame_, token_));
 }
 
 void AvioCoverageRegion::Lease::Release() {
-  if (released_) {
-    return;
-  }
-  if (const auto state = state_.lock()) {
-    if (clip_mask_scratch_) {
-      if (state->IsClipMaskLive(frame_, token_)) {
-        state->clip_mask_live = false;
-      }
-    } else {
-      state->Release(kind_, frame_, token_);
-    }
-  }
-  released_ = true;
+  released_.store(true, std::memory_order_release);
 }
 
 RenderTarget AvioCoverageRegion::Lease::GetRenderTarget() const {
@@ -681,6 +732,7 @@ std::shared_ptr<AvioCoverageRegion> AvioCoverageRegion::Create(
 }
 
 bool AvioCoverageRegion::BeginRasterFrame(uint64_t frame_epoch) {
+  state_->DrainReturns();
   if (state_->frame_open || frame_epoch == 0u ||
       frame_epoch <= state_->last_frame) {
     return false;
@@ -730,6 +782,7 @@ bool AvioCoverageRegion::IsColourInitialized() const {
 }
 
 void AvioCoverageRegion::EndRasterFrame() {
+  state_->DrainReturns();
   if (!state_->frame_open) {
     return;
   }
@@ -753,6 +806,7 @@ void AvioCoverageRegion::EndRasterFrame() {
 AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireCoverage(
     Kind kind,
     ISize size) {
+  state_->DrainReturns();
   if (!state_->frame_open) {
     return {Status::kFrameNotOpen, nullptr};
   }
@@ -781,12 +835,16 @@ AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireCoverage(
   }
   auto lease =
       reservation->Create(state_, kind, state_->frame, *result.allocation);
+  auto& tokens =
+      kind == Kind::kMask ? state_->mask_tokens : state_->colour_tokens;
+  tokens[result.allocation->token.index] = result.allocation->token;
   state_->UpdatePeak();
   return {Status::kSuccess, std::move(lease)};
 }
 
 AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireClipMaskScratch(
     ISize size) {
+  state_->DrainReturns();
   if (!state_->frame_open) {
     return {Status::kFrameNotOpen, nullptr};
   }
@@ -827,6 +885,7 @@ AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireLayer(
     ISize size,
     int32_t mip_count,
     bool exact_extent) {
+  state_->DrainReturns();
   if (!state_->frame_open) {
     return {Status::kFrameNotOpen, nullptr};
   }
@@ -903,9 +962,13 @@ AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireLayer(
 
 bool AvioCoverageRegion::FlushCoverageBatch(
     const std::function<bool()>& encode_and_composite) {
+  state_->DrainReturns();
   if (!state_->frame_open || !encode_and_composite || !encode_and_composite()) {
     return false;
   }
+  // Encoding can relinquish the final logical readers. Consume their exact
+  // notifications before deciding whether this batch's packing can reset.
+  state_->DrainReturns();
   if (state_->mask_packing.LiveCount() != 0u ||
       state_->colour_packing.LiveCount() != 0u) {
     return false;
@@ -961,6 +1024,7 @@ const AvioCoverageRegionConfig& AvioCoverageRegion::GetConfig() const {
 
 AvioCoverageRegionUsage AvioCoverageRegion::ReportUsage(
     bool start_new_interval) {
+  state_->DrainReturns();
   const auto result = state_->CurrentUsage();
   if (start_new_interval) {
     state_->interval = {};
@@ -995,6 +1059,7 @@ std::array<RenderTarget, 5> AvioCoverageRegion::GetWarmLayerTargets() const {
 
 AvioRenderResourceReport AvioCoverageRegion::GetDescriptorResourceReport(
     bool start_new_interval) const {
+  state_->DrainReturns();
   AvioRenderResourceReport report;
   report.available = true;
   // Lifecycle counts belong to the observed region inventory as a whole,

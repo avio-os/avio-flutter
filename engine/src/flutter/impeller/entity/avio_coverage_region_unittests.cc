@@ -340,11 +340,22 @@ TEST(AvioCoverageRegionTest, NestedLayersUseIndependentPhysicalImages) {
   EXPECT_EQ(allocator->creations, 11u);
   auto stale = leases.back();
   stale->Release();
+  EXPECT_FALSE(stale->IsValid());
+  // Explicit invalidation cannot evict another snapshot/native reader of the
+  // same logical allocation. Only final shared destruction returns the slot.
+  auto submitted_reader = stale;
+  leases.pop_back();
+  stale.reset();
+  auto held = region->AcquireLayer({100, 100});
+  ASSERT_TRUE(held.lease);
+  EXPECT_TRUE(held.lease->IsOverflow());
+  held.lease.reset();
+  submitted_reader.reset();
   auto replacement = region->AcquireLayer({100, 100});
   ASSERT_TRUE(replacement.lease);
-  EXPECT_FALSE(stale->IsValid());
+  EXPECT_FALSE(replacement.lease->IsOverflow());
   EXPECT_TRUE(replacement.lease->IsValid());
-  EXPECT_EQ(allocator->creations, 11u);
+  EXPECT_EQ(allocator->creations, 12u);
 }
 
 TEST(AvioCoverageRegionTest, ExpiredWeakLeaseNeverObservesReplacement) {
@@ -741,16 +752,109 @@ TEST(AvioCoverageRegionTest,
             AvioCoverageRegion::Status::kNeedsTiling);
   auto old = region->AcquireClipMaskScratch({256, 256});
   ASSERT_TRUE(old.lease);
+  auto submitted_reader = old.lease;
   old.lease->Release();
-  auto current = region->AcquireClipMaskScratch({16, 16});
-  ASSERT_TRUE(current.lease);
   EXPECT_FALSE(old.lease->IsValid());
+  EXPECT_EQ(region->AcquireClipMaskScratch({16, 16}).status,
+            AvioCoverageRegion::Status::kNeedsFlush);
   old.lease->Release();
   old.lease.reset();
+  EXPECT_EQ(region->AcquireClipMaskScratch({16, 16}).status,
+            AvioCoverageRegion::Status::kNeedsFlush);
+  submitted_reader.reset();
+  auto current = region->AcquireClipMaskScratch({16, 16});
+  ASSERT_TRUE(current.lease);
   EXPECT_TRUE(current.lease->IsValid());
   EXPECT_EQ(region->AcquireClipMaskScratch({8, 8}).status,
             AvioCoverageRegion::Status::kNeedsFlush);
   EXPECT_EQ(allocator->creations, creations);
+}
+
+TEST(AvioCoverageRegionTest, NativeThreadReturnsOnlyOwnerReclaimsAllocations) {
+  auto allocator = std::make_shared<RegionTestAllocator>();
+  auto region = CreateInitializedRegion(allocator);
+  ASSERT_TRUE(region);
+  ASSERT_TRUE(region->BeginRasterFrame(1));
+  auto mask = region->AcquireCoverage(AvioCoverageRegion::Kind::kMask, {8, 8});
+  auto colour =
+      region->AcquireCoverage(AvioCoverageRegion::Kind::kColour, {8, 8});
+  auto layer = region->AcquireLayer({128, 128});
+  auto overflow = region->AcquireLayer({1000, 900});
+  auto scratch = region->AcquireClipMaskScratch({16, 16});
+  ASSERT_TRUE(mask.lease && colour.lease && layer.lease && overflow.lease &&
+              scratch.lease);
+  ASSERT_TRUE(overflow.lease->IsOverflow());
+  const auto warm_texture =
+      layer.lease->GetRenderTarget().GetRenderTargetTexture();
+  std::atomic_bool start = false;
+  std::thread native_completion(
+      [&, mask = std::move(mask.lease), colour = std::move(colour.lease),
+       layer = std::move(layer.lease), overflow = std::move(overflow.lease),
+       scratch = std::move(scratch.lease)]() mutable {
+        while (!start.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+        mask.reset();
+        colour.reset();
+        layer.reset();
+        overflow.reset();
+        scratch.reset();
+      });
+  start.store(true, std::memory_order_release);
+  // Actual owner reads/admissions overlap final destruction on the other
+  // thread; no worker ever reads or edits packing/layer/census state. A fixed
+  // owner workload guarantees admissions even if native return is very fast;
+  // no completion acquire/join orders its returns before these owner accesses.
+  for (size_t i = 0; i < 120; ++i) {
+    auto transient =
+        region->AcquireCoverage(AvioCoverageRegion::Kind::kMask, {8, 8});
+    region->ReportUsage(false);
+  }
+  native_completion.join();
+  auto recycled = region->AcquireLayer({128, 128});
+  ASSERT_TRUE(recycled.lease);
+  EXPECT_FALSE(recycled.lease->IsOverflow());
+  EXPECT_EQ(recycled.lease->GetRenderTarget().GetRenderTargetTexture(),
+            warm_texture);
+  EXPECT_EQ(region->ReportUsage(false).layers.entries, 5u);
+  EXPECT_TRUE(region->AcquireClipMaskScratch({16, 16}).lease);
+}
+
+TEST(AvioCoverageRegionTest, DelayedOldColourReturnDoesNotReleaseNewFrame) {
+  auto allocator = std::make_shared<RegionTestAllocator>();
+  auto region = CreateInitializedRegion(allocator);
+  ASSERT_TRUE(region->BeginRasterFrame(1));
+  auto previous =
+      region->AcquireCoverage(AvioCoverageRegion::Kind::kColour, {8, 8});
+  ASSERT_TRUE(previous.lease);
+  region->EndRasterFrame();
+  ASSERT_TRUE(region->BeginRasterFrame(2));
+  auto current =
+      region->AcquireCoverage(AvioCoverageRegion::Kind::kColour, {8, 8});
+  ASSERT_TRUE(current.lease);
+  std::thread native_completion(
+      [previous = std::move(previous.lease)]() mutable { previous.reset(); });
+  native_completion.join();
+  region->ReportUsage(false);
+  EXPECT_TRUE(current.lease->IsValid());
+  EXPECT_FALSE(region->FlushCoverageBatch([] { return true; }));
+  current.lease.reset();
+  EXPECT_TRUE(region->FlushCoverageBatch([] { return true; }));
+}
+
+TEST(AvioCoverageRegionTest, LateNativeReturnAfterRegionDestructionIsSafe) {
+  auto allocator = std::make_shared<RegionTestAllocator>();
+  auto region = CreateInitializedRegion(allocator);
+  ASSERT_TRUE(region->BeginRasterFrame(1));
+  auto lease = region->AcquireLayer({128, 128}).lease;
+  ASSERT_TRUE(lease);
+  auto texture = lease->GetRenderTarget().GetRenderTargetTexture();
+  region.reset();
+  EXPECT_FALSE(lease->IsValid());
+  std::thread native_completion(
+      [lease = std::move(lease)]() mutable { lease.reset(); });
+  native_completion.join();
+  EXPECT_TRUE(texture->IsValid());
 }
 
 TEST(AvioCoverageRegionTest, ScratchAndColourLeaseAccountingRemainDistinct) {

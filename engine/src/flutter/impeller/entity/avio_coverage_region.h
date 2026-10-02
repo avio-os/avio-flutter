@@ -6,6 +6,7 @@
 #define FLUTTER_IMPELLER_ENTITY_AVIO_COVERAGE_REGION_H_
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -100,6 +101,10 @@ class AvioCoverageRegion final {
     Kind GetKind() const { return kind_; }
     bool IsValid() const;
     bool IsOverflow() const { return overflow_; }
+    // Invalidates this logical view. The allocation remains pinned until the
+    // final shared owner (including submitted command custody) drops it.
+    // Final destruction only posts a bounded return notification; region
+    // bookkeeping is changed by its raster owner on the next admission/read.
     void Release();
 
    private:
@@ -119,7 +124,7 @@ class AvioCoverageRegion final {
     IRect area_;
     IRect content_;
     bool overflow_ = false;
-    bool released_ = false;
+    std::atomic_bool released_ = false;
     bool clip_mask_scratch_ = false;
   };
 
