@@ -471,7 +471,7 @@ std::unique_ptr<PipelineVK> PipelineVK::Create(
     const std::weak_ptr<PipelineLibrary>& weak_library,
     PipelineKey pipeline_key,
     std::shared_ptr<SamplerVK> immutable_sampler,
-    bool first_use) {
+    AvioPipelineCreationOrigin origin) {
   TRACE_EVENT1("flutter", "PipelineVK::Create", "Name", desc.GetLabel().data());
 
   auto library = weak_library.lock();
@@ -519,7 +519,7 @@ std::unique_ptr<PipelineVK> PipelineVK::Create(
       std::move(descs_layout.value()),     //
       pipeline_key,                        //
       std::move(immutable_sampler),        //
-      first_use                            //
+      origin                               //
       ));
   if (!pipeline_vk->IsValid()) {
     VALIDATION_LOG << "Could not create a valid pipeline.";
@@ -537,7 +537,7 @@ PipelineVK::PipelineVK(std::weak_ptr<DeviceHolderVK> device_holder,
                        vk::UniqueDescriptorSetLayout descriptor_set_layout,
                        PipelineKey pipeline_key,
                        std::shared_ptr<SamplerVK> immutable_sampler,
-                       bool first_use)
+                       AvioPipelineCreationOrigin origin)
     : Pipeline(std::move(library), desc),
       device_holder_(std::move(device_holder)),
       pipeline_(std::move(pipeline)),
@@ -550,7 +550,7 @@ PipelineVK::PipelineVK(std::weak_ptr<DeviceHolderVK> device_holder,
   if (is_valid_) {
     if (const auto library = library_.lock()) {
       resource_registration_ = PipelineResourceLedger::Registration(
-          PipelineLibraryVK::Cast(*library).GetResourceLedger(), first_use);
+          PipelineLibraryVK::Cast(*library).GetResourceLedger(), origin);
     }
   }
 }

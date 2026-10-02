@@ -10,6 +10,7 @@
 #include <mutex>
 
 #include "impeller/renderer/render_resource_report.h"
+#include "impeller/renderer/render_resource_scope.h"
 
 namespace impeller {
 
@@ -47,7 +48,8 @@ class AllocatedImageLedger final
                  AvioAllocatedImageKey key,
                  size_t nominal_bytes,
                  size_t real_bytes,
-                 bool raster_frame);
+                 bool raster_frame,
+                 AvioRasterAllocationCause cause);
     void Reset();
     std::shared_ptr<AllocatedImageLedger> ledger_;
     AvioRenderResourceKind kind_ = AvioRenderResourceKind::kImageTextures;
@@ -58,16 +60,20 @@ class AllocatedImageLedger final
     Registration* next_ = nullptr;
   };
 
-  Registration Register(AvioRenderResourceKind kind,
-                        AvioAllocatedImageKey key,
-                        size_t nominal_bytes,
-                        size_t real_bytes,
-                        bool raster_frame);
+  Registration Register(
+      AvioRenderResourceKind kind,
+      AvioAllocatedImageKey key,
+      size_t nominal_bytes,
+      size_t real_bytes,
+      bool raster_frame,
+      AvioRasterAllocationCause cause = AvioRasterAllocationCause::kFrameWork);
   AvioRenderResourceReport Report(bool start_new_interval);
 
  private:
   static constexpr size_t kKindCount = 8u;
-  void Add(Registration& registration, bool raster_frame);
+  void Add(Registration& registration,
+           bool raster_frame,
+           AvioRasterAllocationCause cause);
   void Remove(Registration& registration);
   void Replace(Registration& from, Registration& to);
   void RecordImageUpload(AvioRenderResourceKind kind, bool raster_frame);
@@ -79,6 +85,7 @@ class AllocatedImageLedger final
   uint64_t raster_allocations_ = 0u;
   uint64_t snapshot_allocations_ = 0u;
   uint64_t image_uploads_ = 0u;
+  uint64_t glyph_atlas_growths_ = 0u;
 };
 
 }  // namespace impeller

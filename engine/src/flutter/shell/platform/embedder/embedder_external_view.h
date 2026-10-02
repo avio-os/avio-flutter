@@ -113,7 +113,9 @@ class EmbedderExternalView {
 
   DlISize GetRenderSurfaceSize() const;
 
-  void Render(DlCanvas& dl_canvas, bool clear_surface);
+  void Render(DlCanvas& dl_canvas,
+              bool clear_surface,
+              int64_t flutter_view_id = 0);
 
   /// @brief  What a render into an embedder render target actually did to that
   ///         target. Every caller must branch on this: the three successful
@@ -147,7 +149,8 @@ class EmbedderExternalView {
       const EmbedderRenderTarget& render_target,
       const DlRect& render_target_bounds,
       const std::optional<DlRegion>& buffer_damage = std::nullopt,
-      bool clear_surface = true);
+      bool clear_surface = true,
+      int64_t flutter_view_id = 0);
 
   const DlRegion& GetDlRegion() const;
 

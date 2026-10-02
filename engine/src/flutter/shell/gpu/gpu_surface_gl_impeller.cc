@@ -97,6 +97,11 @@ std::unique_ptr<SurfaceFrame> GPUSurfaceGLImpeller::AcquireFrame(
       impeller::PixelFormat::kR8G8B8A8UNormInt,  // color_format
       impeller::ISize{size.width, size.height}   // fbo_size
   );
+  if (!surface) {
+    FML_LOG(ERROR) << "Could not wrap the host GL framebuffer under the "
+                      "negotiated rendering policy.";
+    return nullptr;
+  }
 
   impeller::RenderTarget render_target = surface->GetRenderTarget();
 

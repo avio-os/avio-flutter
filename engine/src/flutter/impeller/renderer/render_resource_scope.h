@@ -8,14 +8,53 @@
 #include "impeller/renderer/render_resource_report.h"
 
 namespace impeller {
+// Causal scope is separate from physical resource census classification.
+// Expected growth/upload/snapshot allocations are reported independently of
+// forbidden allocations introduced by ordinary frame work.
+enum class AvioRasterAllocationCause {
+  kFrameWork,
+  kGlyphAtlasGrowth,
+  kImageUpload,
+  kSnapshot,
+};
 namespace avio_resource_scope_internal {
 inline constinit thread_local bool raster_frame_active = false;
 inline constinit thread_local AvioRenderResourceKind allocation_kind =
     AvioRenderResourceKind::kImageTextures;
+inline constinit thread_local AvioRasterAllocationCause allocation_cause =
+    AvioRasterAllocationCause::kFrameWork;
 }  // namespace avio_resource_scope_internal
 
-// Construct only around actual raster frame work, excluding initialization,
-// reporting, and IO uploads. Async creators capture this fact at their origin.
+inline AvioRasterAllocationCause GetAvioRasterAllocationCause() {
+  return avio_resource_scope_internal::allocation_cause;
+}
+
+class AvioRasterAllocationCauseScope final {
+ public:
+  explicit AvioRasterAllocationCauseScope(AvioRasterAllocationCause cause)
+      : previous_(GetAvioRasterAllocationCause()) {
+    // The outer authored operation owns its complete GPU work. A snapshot
+    // may create/upload glyphs; an inner helper cannot relabel those resources
+    // as a different operation or ordinary frame work.
+    if (previous_ == AvioRasterAllocationCause::kFrameWork) {
+      avio_resource_scope_internal::allocation_cause = cause;
+    }
+  }
+  ~AvioRasterAllocationCauseScope() {
+    avio_resource_scope_internal::allocation_cause = previous_;
+  }
+  AvioRasterAllocationCauseScope(const AvioRasterAllocationCauseScope&) =
+      delete;
+  AvioRasterAllocationCauseScope& operator=(
+      const AvioRasterAllocationCauseScope&) = delete;
+
+ private:
+  AvioRasterAllocationCause previous_;
+};
+
+// Construct only around actual raster work (onscreen frames or explicit
+// DisplayList snapshots), excluding initialization, reporting, and IO uploads.
+// Async creators capture this fact and its operation cause at their origin.
 inline bool IsAvioRasterFrameActive() {
   return avio_resource_scope_internal::raster_frame_active;
 }

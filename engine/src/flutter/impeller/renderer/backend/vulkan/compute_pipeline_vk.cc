@@ -16,7 +16,7 @@ ComputePipelineVK::ComputePipelineVK(
     vk::UniquePipelineLayout layout,
     vk::UniqueDescriptorSetLayout descriptor_set_layout,
     PipelineKey pipeline_key,
-    bool first_use)
+    AvioPipelineCreationOrigin origin)
     : Pipeline(std::move(library), desc),
       device_holder_(std::move(device_holder)),
       pipeline_(std::move(pipeline)),
@@ -27,7 +27,7 @@ ComputePipelineVK::ComputePipelineVK(
   if (is_valid_) {
     if (const auto library = library_.lock()) {
       resource_registration_ = PipelineResourceLedger::Registration(
-          PipelineLibraryVK::Cast(*library).GetResourceLedger(), first_use);
+          PipelineLibraryVK::Cast(*library).GetResourceLedger(), origin);
     }
   }
 }

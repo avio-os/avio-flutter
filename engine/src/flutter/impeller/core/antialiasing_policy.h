@@ -16,7 +16,26 @@ enum class AvioAntialiasingPolicy : uint32_t { kMsaa4 = 0, kCoverage = 1 };
 // ABI negotiation and validation share this implementation fact; runtime
 // device support is checked independently before resource initialization.
 inline constexpr bool kAvioCoveragePolicyImplemented = true;
-inline constexpr uint64_t kAvioContinuousSupportedClasses = 0u;
+// Stable class identities are independent of each backend's implementation.
+enum class AvioContinuousClass : uint64_t {
+  kRectClip = 1ull << 0,
+  kRoundedRectClip = 1ull << 1,
+  kSuperellipseClip = 1ull << 2,
+  kOvalClip = 1ull << 3,
+  kBorderedRoundedRect = 1ull << 4,
+  kArc = 1ull << 5,
+  kImageEdge = 1ull << 6,
+};
+inline constexpr uint64_t kAvioContinuousKnownClasses = (1ull << 7) - 1;
+enum class AvioCoverageBackend { kVulkan, kGLES, kMetal };
+// Implemented source classes do not imply physical/logical-device support or
+// changed-look approval. Backends never inherit another backend's mask.
+constexpr uint64_t AvioContinuousSupportedClasses(AvioCoverageBackend backend) {
+  return backend == AvioCoverageBackend::kVulkan ? kAvioContinuousKnownClasses
+                                                 : 0u;
+}
+inline constexpr uint64_t kAvioContinuousSupportedClasses =
+    AvioContinuousSupportedClasses(AvioCoverageBackend::kVulkan);
 
 struct AvioAntialiasingConfig {
   AvioAntialiasingPolicy policy = AvioAntialiasingPolicy::kMsaa4;
@@ -28,6 +47,10 @@ struct AvioAntialiasingConfig {
 
   constexpr bool UsesCoverage() const {
     return policy == AvioAntialiasingPolicy::kCoverage;
+  }
+  constexpr bool RequestsContinuous(AvioContinuousClass shape_class) const {
+    return UsesCoverage() && (continuous_requested_classes &
+                              static_cast<uint64_t>(shape_class)) != 0;
   }
   constexpr bool operator==(const AvioAntialiasingConfig&) const = default;
 };

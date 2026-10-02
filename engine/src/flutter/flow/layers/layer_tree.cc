@@ -7,6 +7,7 @@
 #include "flutter/display_list/skia/dl_sk_canvas.h"
 #include "flutter/flow/embedded_views.h"
 #include "flutter/flow/frame_timings.h"
+#include "flutter/flow/layers/avio_frame_metadata_layer.h"
 #include "flutter/flow/layers/layer.h"
 #include "flutter/flow/paint_utils.h"
 #include "flutter/flow/raster_cache.h"
@@ -19,7 +20,10 @@ namespace flutter {
 
 LayerTree::LayerTree(const std::shared_ptr<Layer>& root_layer,
                      const DlISize& frame_size)
-    : root_layer_(root_layer), frame_size_(frame_size) {}
+    : root_layer_(root_layer),
+      avio_frame_facts_(root_layer ? CollectAvioRootFrameFacts(*root_layer)
+                                   : AvioFrameFacts{}),
+      frame_size_(frame_size) {}
 
 inline SkColorSpace* GetColorSpace(DlCanvas* canvas) {
   return canvas ? canvas->GetImageInfo().colorSpace() : nullptr;

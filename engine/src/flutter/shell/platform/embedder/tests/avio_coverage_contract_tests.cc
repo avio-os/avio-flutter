@@ -11,10 +11,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <new>
 #include <thread>
 
 #include "flutter/shell/platform/embedder/avio_antialiasing_config.h"
+#include "flutter/shell/platform/embedder/avio_frame_facts.h"
 #include "flutter/shell/platform/embedder/avio_render_resource_report.h"
 #include "impeller/renderer/pipeline_resource_ledger.h"
 #include "impeller/renderer/render_resource_scope.h"
@@ -45,6 +47,239 @@ FlutterAvioAntialiasingConfig Coverage() {
           0,
           8u * 1024u * 1024u,
           4u * 1024u * 1024u};
+}
+
+void ContinuousClassAdmissionIsBackendSpecific() {
+  auto config = Coverage();
+  assert(config.continuous_requested_classes == 0);
+  for (auto backend : {impeller::AvioCoverageBackend::kVulkan,
+                       impeller::AvioCoverageBackend::kGLES,
+                       impeller::AvioCoverageBackend::kMetal}) {
+    assert(!flutter::ValidateAvioAntialiasingBackend(config, backend));
+    for (uint64_t shape = 1; shape <= (1u << 6); shape <<= 1) {
+      config.continuous_requested_classes = shape;
+      assert(!flutter::ValidateAvioAntialiasingConfig(&config, kAA, true));
+      const bool implemented =
+          (impeller::AvioContinuousSupportedClasses(backend) & shape) != 0;
+      assert((flutter::ValidateAvioAntialiasingBackend(config, backend) ==
+              nullptr) == implemented);
+    }
+    config.continuous_requested_classes = uint64_t{1} << 63;
+    assert(flutter::ValidateAvioAntialiasingConfig(&config, kAA, true));
+    assert(flutter::ValidateAvioAntialiasingBackend(config, backend));
+    config.continuous_requested_classes = 0;
+  }
+  config.policy = kFlutterAvioAntialiasingPolicyMsaa4;
+  config.layer_sample_count = 4;
+  config.coverage_region_max_bytes = config.layer_region_max_bytes = 0;
+  config.continuous_requested_classes = 1;
+  assert(flutter::ValidateAvioAntialiasingConfig(&config, kAA, true));
+}
+
+void CapabilityRowsHonorExactAppendBoundsWithoutAllocation() {
+  constexpr uint64_t unknown = uint64_t{1} << 63;
+  const size_t before = heap_allocations;
+  track_heap = true;
+  for (size_t size : {offsetof(FlutterAvioExtensionCapabilities,
+                               continuous_supported_classes),
+                      offsetof(FlutterAvioExtensionCapabilities,
+                               continuous_supported_classes_vulkan),
+                      offsetof(FlutterAvioExtensionCapabilities,
+                               continuous_supported_classes_gles),
+                      offsetof(FlutterAvioExtensionCapabilities,
+                               continuous_supported_classes_metal),
+                      sizeof(FlutterAvioExtensionCapabilities)}) {
+    FlutterAvioExtensionCapabilities caps = {};
+    caps.struct_size = size;
+    caps.continuous_supported_classes = unknown;
+    caps.continuous_supported_classes_vulkan = unknown;
+    caps.continuous_supported_classes_gles = unknown;
+    caps.continuous_supported_classes_metal = unknown;
+    flutter::WriteAvioContinuousCapabilities(caps, 0x7f, 0, 0);
+    const bool union_available =
+        size > offsetof(FlutterAvioExtensionCapabilities,
+                        continuous_supported_classes);
+    const bool vk_available =
+        size > offsetof(FlutterAvioExtensionCapabilities,
+                        continuous_supported_classes_vulkan);
+    const bool gl_available =
+        size > offsetof(FlutterAvioExtensionCapabilities,
+                        continuous_supported_classes_gles);
+    const bool metal_available =
+        size > offsetof(FlutterAvioExtensionCapabilities,
+                        continuous_supported_classes_metal);
+    assert(caps.continuous_supported_classes ==
+           (union_available ? 0x7f : unknown));
+    assert(caps.continuous_supported_classes_vulkan ==
+           (vk_available ? 0x7f : unknown));
+    assert(caps.continuous_supported_classes_gles ==
+           (gl_available ? 0 : unknown));
+    assert(caps.continuous_supported_classes_metal ==
+           (metal_available ? 0 : unknown));
+  }
+  FlutterAvioExtensionCapabilities future = {};
+  future.struct_size = sizeof(future);
+  flutter::WriteAvioContinuousCapabilities(future, 0x7f, unknown, 0);
+  assert(future.continuous_supported_classes == (0x7f | unknown));
+  assert(future.continuous_supported_classes_gles == unknown);
+  track_heap = false;
+  assert(heap_allocations == before);
+}
+
+void RootFrameFactsStayBorrowedValidatedAndAllocationFree() {
+  const size_t before = heap_allocations;
+  track_heap = true;
+  flutter::AvioFrameFacts facts;
+  assert(facts.IsValid() && !facts.HasMetadata());
+  flutter::EmbedderAvioFrameFacts absent(facts);
+  assert(!absent.effect() && !absent.ground());
+  facts.ready_content_revision = 17u;
+  facts.item_effect_declaration_id = 1;
+  facts.item_opacity = 0.25;
+  facts.ground_authored = true;
+  facts.ground_color_argb = 0xFF123456u;
+  flutter::EmbedderAvioFrameFacts authored(facts);
+  assert(authored.ready_content()->content_revision == 17u);
+  assert(authored.ready_content()->kind == kFlutterAvioReadyContentKindStatic);
+  facts.ready_content_kind = flutter::AvioReadyContentKind::kLive;
+  flutter::EmbedderAvioFrameFacts live(facts);
+  assert(live.ready_content()->kind == kFlutterAvioReadyContentKindLive);
+  assert(authored.ready_content()->kind == kFlutterAvioReadyContentKindStatic);
+  facts.ready_content_kind = static_cast<flutter::AvioReadyContentKind>(2u);
+  assert(!facts.IsValid());
+  flutter::EmbedderAvioFrameFacts invalid_kind(facts);
+  assert(!invalid_kind.ready_content());
+  facts.ready_content_kind = flutter::AvioReadyContentKind::kStatic;
+  assert(authored.effect()->struct_size == sizeof(FlutterAvioItemEffect));
+  assert(authored.effect()->opacity == 0.25);
+  assert(authored.effect()->declaration_id == 1u);
+  assert(authored.ground()->struct_size == sizeof(FlutterAvioOutputGround));
+  assert(authored.ground()->has_color &&
+         authored.ground()->color_argb == 0xFF123456u);
+  facts.ground_color_argb.reset();
+  flutter::EmbedderAvioFrameFacts clear(facts);
+  assert(clear.ground() && !clear.ground()->has_color);
+  assert(authored.ground()->has_color);  // Separate revision copies.
+  for (double invalid : {-0.01, 1.01, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+    facts.item_opacity = invalid;
+    assert(!facts.IsValid());
+    flutter::EmbedderAvioFrameFacts rejected(facts);
+    assert(!rejected.effect() && !rejected.ground());
+  }
+  facts = {};
+  facts.ground_color_argb = 0u;
+  assert(!facts.IsValid());
+  facts = {};
+  facts.ready_content_revision = 0u;
+  assert(!facts.IsValid());
+  facts = {};
+  facts.invalid = true;
+  assert(!facts.IsValid() && facts.HasMetadata());
+  track_heap = false;
+  assert(heap_allocations == before);
+}
+
+void SplitGroundRegionsStayBoundedExactAndFailClosed() {
+  flutter::AvioFrameFacts facts;
+  facts.ground_authored = true;
+  facts.ground_regions_count = 4;
+  for (size_t i = 0; i < 4; ++i) {
+    facts.ground_regions[i] = {double(i * 100), 0, double((i + 1) * 100), 200,
+                               uint32_t(0xFF123456u + i)};
+  }
+  assert(facts.IsValidForRoot(400, 200));
+  const size_t before = heap_allocations;
+  track_heap = true;
+  flutter::EmbedderAvioFrameFacts copy(facts);
+  assert(copy.ground()->regions_count == 4 && copy.ground()->regions);
+  assert(copy.ground()->regions[3].rect.left == 300 &&
+         copy.ground()->regions[3].rect.right == 400 &&
+         copy.ground()->regions[3].color_argb == 0xFF123459u);
+  track_heap = false;
+  assert(heap_allocations == before);
+  assert(!facts.IsValidForRoot(399, 200));
+  facts.ground_regions[1].left = 99;
+  assert(!facts.IsValid());
+  facts.ground_regions[1].left = 100;
+  facts.ground_regions[0].left = -1;
+  assert(!facts.IsValidForRoot(400, 200));
+  facts.ground_regions[0].left = 0;
+  facts.ground_regions[0].bottom = std::numeric_limits<double>::quiet_NaN();
+  assert(!facts.IsValid());
+  facts.ground_regions[0].bottom = 200;
+  facts.ground_color_argb = 0;
+  assert(!facts.IsValid());
+  facts.ground_color_argb.reset();
+  facts.ground_regions_count = 5;
+  assert(!facts.IsValid());
+  flutter::EmbedderAvioFrameFacts rejected(facts);
+  assert(!rejected.ground());
+}
+
+void PartialBackendDescriptorsPreserveAvailabilityWithoutInventingBytes() {
+  impeller::AvioRenderResourceReport source;
+  source.available = true;
+  impeller::AvioRenderResourceEntry entry;
+  entry.kind_id = 0xFEEDu;
+  entry.usage.entries = 1;
+  entry.usage.nominal_bytes = 1048576;
+  entry.fields_supported = impeller::kAvioResourceFieldCounts |
+                           impeller::kAvioResourceFieldDescriptorBytes |
+                           impeller::kAvioResourceFieldTextureDescriptor |
+                           (uint64_t{1} << 63);
+  entry.unsupported_reason_id = 0xABCDEFu;
+  entry.descriptor_width = 256;
+  entry.descriptor_height = 256;
+  entry.descriptor_sample_count = 4;
+  entry.descriptor_format_id = 0x123456u;
+  source.AddEntry(entry);
+  impeller::AvioRenderResourceReport merged;
+  merged.Merge(source);
+  assert(merged.entries[0].fields_supported == entry.fields_supported);
+  const size_t before = heap_allocations;
+  track_heap = true;
+  flutter::DeliverAvioRenderResourceReport(
+      [](const FlutterAvioRenderResourceReport* r, void*) {
+        const auto& e = r->entries[0];
+        assert(e.kind_id == 0xFEEDu && e.nominal_bytes == 1048576);
+        assert((e.fields_supported &
+                kFlutterAvioResourceFieldActualAllocatedBytes) == 0);
+        assert(e.real_bytes == 0);  // Unavailable storage, never measured zero.
+        assert(e.fields_supported == (11u | (uint64_t{1} << 63)));
+        assert(e.unsupported_reason_id == 0xABCDEFu);
+        assert(e.descriptor_width == 256 && e.descriptor_height == 256);
+        assert(e.descriptor_sample_count == 4 &&
+               e.descriptor_format_id == 0x123456u);
+      },
+      nullptr, merged, kFlutterAvioRenderResourceReportSuccess);
+  track_heap = false;
+  assert(heap_allocations == before);
+}
+
+void RootFrameFactNegotiationRequiresExactRootOpportunity() {
+  constexpr auto prerequisites =
+      kFlutterAvioExtensionFeatureRootRenderTarget |
+      kFlutterAvioExtensionFeatureFrameOpportunityOutcomes;
+  for (auto feature : {kFlutterAvioExtensionFeatureEmptyFrame,
+                       kFlutterAvioExtensionFeatureItemEffects,
+                       kFlutterAvioExtensionFeatureOutputGround,
+                       kFlutterAvioExtensionFeatureReadyContent}) {
+    assert(flutter::ValidateAvioFrameFactFeatures(feature));
+    assert(flutter::ValidateAvioFrameFactFeatures(
+        feature | kFlutterAvioExtensionFeatureRootRenderTarget));
+    assert(flutter::ValidateAvioFrameFactFeatures(
+        feature | kFlutterAvioExtensionFeatureFrameOpportunityOutcomes));
+    assert(!flutter::ValidateAvioFrameFactFeatures(feature | prerequisites));
+  }
+  assert(!flutter::ValidateAvioFrameFactFeatures(0));
+  static_assert(kFlutterPresentRenderTargetStatusEmptyContent == 8);
+  static_assert(kFlutterPresentRenderTargetStatusInvalidFrameFacts == 9);
+  static_assert(
+      offsetof(FlutterPresentRenderTargetInfo, item_effect) >
+      offsetof(FlutterPresentRenderTargetInfo, window_previews_invalid));
+  static_assert(offsetof(FlutterPresentViewInfo, item_effect) >
+                offsetof(FlutterPresentViewInfo, compositor_materials_invalid));
 }
 
 void AntialiasingValidationFailsClosed() {
@@ -382,13 +617,31 @@ void ConcurrentPipelineIntervalsLoseNoSuccessfulCreations() {
 }  // namespace
 
 int main() {
-  static_assert(FLUTTER_AVIO_EXTENSION_VERSION == 8);
-  static_assert(impeller::kAvioContinuousSupportedClasses == 0);
+  static_assert(FLUTTER_AVIO_EXTENSION_VERSION == 9);
+  static_assert(kFlutterAvioResourceFieldDescriptorMultiplicity == 16);
+  static_assert(kFlutterAvioResourceFieldLeases == 32);
+  static_assert(kFlutterAvioContinuousKnownClasses ==
+                impeller::kAvioContinuousKnownClasses);
+  static_assert(
+      kFlutterAvioContinuousClassImageEdge ==
+      static_cast<uint64_t>(impeller::AvioContinuousClass::kImageEdge));
+  static_assert(impeller::kAvioContinuousSupportedClasses == 0x7f);
+  static_assert(impeller::AvioContinuousSupportedClasses(
+                    impeller::AvioCoverageBackend::kGLES) == 0);
+  static_assert(impeller::AvioContinuousSupportedClasses(
+                    impeller::AvioCoverageBackend::kMetal) == 0);
+  static_assert(kFlutterAvioRenderResourceDeviceBuffers == 9);
   static_assert(offsetof(FlutterProjectArgs, avio_antialiasing_config) >
                 offsetof(FlutterProjectArgs, avio_resource_lifecycle_config));
   static_assert(
       offsetof(FlutterEngineProcTable, RequestAvioRenderResourceReport) >
       offsetof(FlutterEngineProcTable, SetAvioViewVisibility));
+  CapabilityRowsHonorExactAppendBoundsWithoutAllocation();
+  ContinuousClassAdmissionIsBackendSpecific();
+  RootFrameFactsStayBorrowedValidatedAndAllocationFree();
+  RootFrameFactNegotiationRequiresExactRootOpportunity();
+  SplitGroundRegionsStayBoundedExactAndFailClosed();
+  PartialBackendDescriptorsPreserveAvailabilityWithoutInventingBytes();
   AntialiasingValidationFailsClosed();
   UnknownKindsAndExcludedCountersSurviveWithoutAllocating();
   ReportsStayBoundedAndTagOverflow();
@@ -400,8 +653,10 @@ int main() {
   PipelineFirstUseOriginSurvivesAsyncWorker();
   ConcurrentPipelineIntervalsLoseNoSuccessfulCreations();
   std::puts(
-      "Avio coverage ABI/report production contracts: 10 passed, 0 skipped");
+      "Avio coverage ABI/report production contracts: 16 passed, 0 skipped");
   std::printf(
-      "Production readiness: coverage=%s, continuous_classes=0\n",
-      impeller::kAvioCoveragePolicyImplemented ? "enabled" : "disabled");
+      "Production readiness: coverage=%s, Vulkan_continuous_classes=0x%llx\n",
+      impeller::kAvioCoveragePolicyImplemented ? "enabled" : "disabled",
+      static_cast<unsigned long long>(
+          impeller::kAvioContinuousSupportedClasses));
 }

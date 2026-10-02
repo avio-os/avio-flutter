@@ -73,7 +73,7 @@ extern "C" {
 // Flutter embedder ABI. The engine reports supported semantics through
 // FlutterEngineGetAvioExtensionCapabilities and validates the request again
 // during initialization, before creating a view or GPU resource.
-#define FLUTTER_AVIO_EXTENSION_VERSION 8u
+#define FLUTTER_AVIO_EXTENSION_VERSION 9u
 
 typedef uint64_t FlutterAvioExtensionFeatures;
 
@@ -97,6 +97,10 @@ typedef uint64_t FlutterAvioExtensionFeatures;
 #define kFlutterAvioExtensionFeaturePreSubmitFailure 0x0000000000001000ULL
 #define kFlutterAvioExtensionFeatureRenderResourceReport 0x0000000000002000ULL
 #define kFlutterAvioExtensionFeatureAntialiasingPolicy 0x0000000000004000ULL
+#define kFlutterAvioExtensionFeatureEmptyFrame 0x0000000000008000ULL
+#define kFlutterAvioExtensionFeatureItemEffects 0x0000000000010000ULL
+#define kFlutterAvioExtensionFeatureOutputGround 0x0000000000020000ULL
+#define kFlutterAvioExtensionFeatureReadyContent 0x0000000000040000ULL
 #define FLUTTER_AVIO_MAX_RENDER_RESOURCE_ENTRIES 64u
 #define FLUTTER_AVIO_MAX_COVERAGE_REASONS 32u
 #define FLUTTER_AVIO_MAX_WINDOW_PREVIEWS 64u
@@ -129,8 +133,11 @@ typedef struct {
   /// Semantic features implemented by this exact engine build.
   FlutterAvioExtensionFeatures supported_features;
 
-  /// Shape classes implementing continuous coverage. Zero until EG-8.
+  /// Union of backend-specific implemented continuous shape classes below.
   uint64_t continuous_supported_classes;
+  uint64_t continuous_supported_classes_vulkan;
+  uint64_t continuous_supported_classes_gles;
+  uint64_t continuous_supported_classes_metal;
 } FlutterAvioExtensionCapabilities;
 
 typedef struct {
@@ -196,12 +203,31 @@ typedef enum {
 /// Exact, opt-in coverage contract. No implicit fallback to a different policy.
 /// Other shape classes use sample4 quantization. Continuous requests fail if
 /// the capability does not implement every requested class.
+/// Stable class identities. Known classes are not necessarily implemented by
+/// every backend or supported by the selected logical device.
+#define kFlutterAvioContinuousClassRectClip 0x01ULL
+#define kFlutterAvioContinuousClassRoundedRectClip 0x02ULL
+#define kFlutterAvioContinuousClassSuperellipseClip 0x04ULL
+#define kFlutterAvioContinuousClassOvalClip 0x08ULL
+#define kFlutterAvioContinuousClassBorderedRoundedRect 0x10ULL
+#define kFlutterAvioContinuousClassArc 0x20ULL
+#define kFlutterAvioContinuousClassImageEdge 0x40ULL
+#define kFlutterAvioContinuousKnownClasses 0x7FULL
+
 typedef struct {
   size_t struct_size;
   FlutterAvioAntialiasingPolicy policy;
   uint32_t layer_sample_count;
   uint32_t coverage_sample_count;
+  /// Explicit opt-in mask, zero by default. Requires implementation in the
+  /// selected backend's capability row and separate logical-device admission.
+  /// Unsupported and unknown requests fail instead of changing policy.
   uint64_t continuous_requested_classes;
+  /// Vulkan bounds actual attachment allocations; GLES bounds declared
+  /// samples/formats/extents/mips because portable physical sizes are unknown.
+  /// GLES resource reports retain descriptor fields and explicitly mark actual
+  /// allocation fields unavailable. Neither backend grows warm banks on a
+  /// frame.
   uint64_t coverage_region_max_bytes;
   uint64_t layer_region_max_bytes;
 } FlutterAvioAntialiasingConfig;
@@ -231,6 +257,15 @@ typedef enum {
 #define kFlutterAvioRenderResourcePipelines 6u
 #define kFlutterAvioRenderResourceCoverageRegion 7u
 #define kFlutterAvioRenderResourceLayerRegion 8u
+#define kFlutterAvioRenderResourceDeviceBuffers 9u
+
+#define kFlutterAvioResourceFieldCounts 0x1ULL
+#define kFlutterAvioResourceFieldDescriptorBytes 0x2ULL
+#define kFlutterAvioResourceFieldActualAllocatedBytes 0x4ULL
+#define kFlutterAvioResourceFieldTextureDescriptor 0x8ULL
+#define kFlutterAvioResourceFieldDescriptorMultiplicity 0x10ULL
+#define kFlutterAvioResourceFieldLeases 0x20ULL
+#define kFlutterAvioResourceReasonPhysicalAllocationUnavailable 1u
 
 typedef struct {
   size_t struct_size;
@@ -246,6 +281,23 @@ typedef struct {
   uint64_t orphans_released_real_bytes;
   uint64_t created_entries;
   uint64_t created_real_bytes;
+
+  /// Availability for field families. Unknown bits and reason IDs are valid.
+  /// Counts covers live/created/destroyed entry counts; DescriptorBytes covers
+  /// nominal_bytes. ActualAllocatedBytes covers real_bytes and created/orphan
+  /// real bytes. DescriptorMultiplicity covers distinct_keys/duplicate_entries
+  /// of physical descriptors, not idle-cache keys. Leases covers leased_entries
+  /// and peak_leased_nominal_bytes; neither native allocator currently observes
+  /// those lifetimes. Cache ownership/idle eviction is not inferred here.
+  /// An unset bit means unavailable, even if the storage value is zero.
+  uint64_t fields_supported;
+  uint32_t unsupported_reason_id;
+  /// Present only for a single/uniform descriptor, in physical texels.
+  uint32_t descriptor_width;
+  uint32_t descriptor_height;
+  uint32_t descriptor_sample_count;
+  /// Diagnostic raw engine PixelFormat ID; not a backend format contract.
+  uint32_t descriptor_format_id;
 } FlutterAvioRenderResourceEntry;
 
 typedef struct {
@@ -1364,6 +1416,12 @@ typedef struct {
   /// without any additional synchronization.
   /// Not used if a FlutterCompositor is supplied in FlutterProjectArgs.
   FlutterVulkanPresentCallback present_image_callback;
+
+  /// True only when sampleRateShading was enabled at creation of this exact
+  /// logical VkDevice. Physical-device support is insufficient. An absent or
+  /// false field refuses requested continuous coverage without changing the
+  /// legacy/native-four policies.
+  bool native_sample_shading_enabled;
 
 } FlutterVulkanRendererConfig;
 
@@ -2664,6 +2722,55 @@ typedef struct {
 
 } FlutterLayer;
 
+/// View-root alpha applied by the compositor to this exact content revision.
+/// The engine paints the child at identity alpha and creates no effect layer.
+typedef struct {
+  size_t struct_size;
+  double opacity;
+  /// Nonzero monotonic identity of this mounted root effect declaration.
+  uint64_t declaration_id;
+} FlutterAvioItemEffect;
+
+#define FLUTTER_AVIO_MAX_OUTPUT_GROUND_REGIONS 4u
+
+/// Finite nonempty logical view-root rect; regions must not overlap and must
+/// lie inside this view. Coordinates are explicit root facts, not pixel
+/// transforms.
+typedef struct {
+  size_t struct_size;
+  FlutterRect rect;
+  uint32_t color_argb;
+} FlutterAvioOutputGroundRegion;
+
+/// Root-authored output fill. A non-null descriptor with has_color=false
+/// explicitly clears the ground; a null descriptor does not author a ground.
+typedef struct {
+  size_t struct_size;
+  bool has_color;
+  uint32_t color_argb;
+
+  /// At most four borrowed regions, mutually exclusive with has_color.
+  /// Zero regions and has_color=false explicitly clears the authored ground.
+  size_t regions_count;
+  const FlutterAvioOutputGroundRegion* regions;
+} FlutterAvioOutputGround;
+
+/// Classification of an authored ready root revision. Live content is never
+/// eligible for static sealing.
+typedef enum {
+  kFlutterAvioReadyContentKindStatic = 0,
+  kFlutterAvioReadyContentKindLive = 1,
+} FlutterAvioReadyContentKind;
+
+/// Nonzero authored revision of the intended ready root content. A loading
+/// placeholder must not author readiness. Acceptance names this exact buffered
+/// generation and revision; static sealing additionally requires kind Static.
+typedef struct {
+  size_t struct_size;
+  uint64_t content_revision;
+  FlutterAvioReadyContentKind kind;
+} FlutterAvioReadyContent;
+
 typedef struct {
   /// The size of this struct. Must be sizeof(FlutterPresentViewInfo).
   size_t struct_size;
@@ -2688,6 +2795,12 @@ typedef struct {
   /// callback must reject the frame; the array is deliberately not a silently
   /// truncated scene.
   bool compositor_materials_invalid;
+  /// Borrowed immutable root metadata, valid only during this callback.
+  const FlutterAvioItemEffect* item_effect;
+  const FlutterAvioOutputGround* output_ground;
+
+  /// Borrowed authored static revision, valid only during this callback.
+  const FlutterAvioReadyContent* ready_content;
 } FlutterPresentViewInfo;
 
 typedef enum {
@@ -2718,6 +2831,14 @@ typedef enum {
   /// an admission failure, not an uncertain in-flight raster failure.
   /// Requires kFlutterAvioExtensionFeaturePreSubmitFailure.
   kFlutterPresentRenderTargetStatusAllocationFailedBeforeSubmit,
+  /// A new content revision containing no engine pixels, material nodes or
+  /// window previews. No backing store was acquired and both backing-store
+  /// pointers are null. This clears prior content; it is not NoVisualChange.
+  /// Requires kFlutterAvioExtensionFeatureEmptyFrame.
+  kFlutterPresentRenderTargetStatusEmptyContent,
+  /// Root frame metadata was malformed, duplicated, nested below a content
+  /// subtree or used without its negotiated feature. No GPU work was issued.
+  kFlutterPresentRenderTargetStatusInvalidFrameFacts,
 } FlutterPresentRenderTargetStatus;
 
 typedef enum {
@@ -2804,6 +2925,13 @@ typedef struct {
   const FlutterAvioWindowPreview* window_previews;
   size_t window_previews_count;
   bool window_previews_invalid;
+  /// Borrowed immutable metadata belonging to this exact target revision.
+  /// These pointers are also valid for EmptyContent and null on refusals.
+  const FlutterAvioItemEffect* item_effect;
+  const FlutterAvioOutputGround* output_ground;
+
+  /// Borrowed authored static revision, valid only during this callback.
+  const FlutterAvioReadyContent* ready_content;
 } FlutterPresentRenderTargetInfo;
 
 typedef bool (*FlutterBackingStoreCreateCallback)(

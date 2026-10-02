@@ -33,7 +33,9 @@ EmbedderSurfaceVulkanImpeller::EmbedderSurfaceVulkanImpeller(
     impeller::Flags impeller_flags,
     std::optional<EmbedderVulkanResourceLifecycleConfig>
         resource_lifecycle_config,
-    std::optional<impeller::AvioAntialiasingConfig> avio_antialiasing_config)
+    std::optional<impeller::AvioAntialiasingConfig> avio_antialiasing_config,
+    bool native_sample_shading_enabled,
+    bool* native_teardown_safe)
     : vk_(fml::MakeRefCounted<vulkan::VulkanProcTable>(
           vulkan_dispatch_table.get_instance_proc_address)),
       vulkan_dispatch_table_(vulkan_dispatch_table),
@@ -77,6 +79,7 @@ EmbedderSurfaceVulkanImpeller::EmbedderSurfaceVulkanImpeller(
   data.device = device;
   data.queue = queue;
   data.queue_family_index = queue_family_index;
+  data.native_sample_shading_enabled = native_sample_shading_enabled;
   data.instance_extensions.reserve(instance_extension_count);
   for (auto i = 0u; i < instance_extension_count; i++) {
     data.instance_extensions.push_back(std::string{instance_extensions[i]});
@@ -87,7 +90,8 @@ EmbedderSurfaceVulkanImpeller::EmbedderSurfaceVulkanImpeller(
   }
   settings.embedder_data = data;
 
-  context_ = impeller::ContextVK::Create(std::move(settings));
+  context_ =
+      impeller::ContextVK::Create(std::move(settings), native_teardown_safe);
   if (!context_) {
     FML_LOG(ERROR) << "Failed to initialize Vulkan Context.";
     return;

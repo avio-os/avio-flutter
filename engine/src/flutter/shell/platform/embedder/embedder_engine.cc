@@ -146,6 +146,8 @@ bool EmbedderEngine::LaunchShell() {
 }
 
 bool EmbedderEngine::CollectShell() {
+  // A never-run engine still owns its surface/context in the launch callback.
+  shell_args_.reset();
   if (shell_) {
     // Drain report custody before task-host teardown. On a merged runner this
     // executes immediately and cancels reports still queued behind this call.

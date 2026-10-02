@@ -94,7 +94,7 @@ class PipelineLibraryVK final
   std::unique_ptr<ComputePipelineVK> CreateComputePipeline(
       const ComputePipelineDescriptor& desc,
       PipelineKey pipeline_key,
-      bool first_use);
+      AvioPipelineCreationOrigin origin);
 
   void PersistPipelineCacheToDisk();
 

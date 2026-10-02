@@ -66,6 +66,16 @@ struct Snapshot {
   // GPU texture custody is separately retained by the backend submission.
   std::shared_ptr<void> resource_owner;
 
+  bool is_immutable_captured_backdrop = false;
+
+  // Certified opaque physical texels of an immutable captured backdrop.
+  // Only the owning capture/filter sets this fact. A generic RenderTarget,
+  // opaque pixel format, or borrowed producer texture does not establish it.
+  std::optional<Rect> captured_opaque_texels;
+
+  std::optional<Rect> GetCapturedOpaqueRect() const;
+  bool IsImmutableCapturedBackdrop() const;
+
   // The supplied transform maps the logical content origin to world space.
   // The resulting snapshot transform maps physical texels, including a
   // nonzero content origin, into that same world space.

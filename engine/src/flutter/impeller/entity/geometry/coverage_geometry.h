@@ -44,6 +44,10 @@ class CoverageConvexQuad4 {
 
   const Rect& GetBounds() const { return bounds_; }
 
+  // Integer raster tile translation preserves sample phase, winding and
+  // top/left equality ownership. No vertex reconstruction is involved.
+  CoverageConvexQuad4 Translated(Vector2 offset) const;
+
  private:
   CoverageConvexQuad4(Matrix lines, Rect bounds)
       : lines_(lines), bounds_(bounds) {}

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "flutter/shell/platform/embedder/avio_antialiasing_config.h"
+#include "flutter/shell/platform/embedder/avio_frame_facts.h"
 #include "impeller/base/flags.h"
 
 #include "flutter/fml/build_config.h"
@@ -63,6 +64,7 @@ extern const intptr_t kPlatformStrongDillSize;
 #include "flutter/shell/common/switches.h"
 #include "flutter/shell/platform/embedder/embedder.h"
 #include "flutter/shell/platform/embedder/embedder_engine.h"
+#include "flutter/shell/platform/embedder/embedder_external_resource_custody.h"
 #include "flutter/shell/platform/embedder/embedder_external_texture_resolver.h"
 #include "flutter/shell/platform/embedder/embedder_platform_message_response.h"
 #include "flutter/shell/platform/embedder/embedder_render_target.h"
@@ -93,6 +95,7 @@ extern const intptr_t kPlatformStrongDillSize;
 #include "flutter/shell/platform/embedder/embedder_surface_gl_skia.h"  // nogncheck
 #include "impeller/core/texture.h"                        // nogncheck
 #include "impeller/renderer/backend/gles/context_gles.h"  // nogncheck
+#include "impeller/renderer/backend/gles/native_coverage_gles.h"  // nogncheck
 #include "impeller/renderer/backend/gles/texture_gles.h"  // nogncheck
 #include "impeller/renderer/context.h"                    // nogncheck
 #include "impeller/renderer/render_target.h"              // nogncheck
@@ -195,10 +198,18 @@ static constexpr FlutterAvioExtensionFeatures kAvioSupportedFeatures =
     kFlutterAvioExtensionFeatureTypedRenderTargetAcquisition |
     kFlutterAvioExtensionFeatureRenderDeadline |
     kFlutterAvioExtensionFeatureAtomicWindowPreviews |
-    kFlutterAvioExtensionFeaturePreSubmitFailure
+    kFlutterAvioExtensionFeaturePreSubmitFailure |
+    kFlutterAvioExtensionFeatureEmptyFrame |
+    kFlutterAvioExtensionFeatureItemEffects |
+    kFlutterAvioExtensionFeatureOutputGround |
+    kFlutterAvioExtensionFeatureReadyContent
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
-    | kFlutterAvioExtensionFeatureResourceLifecycleConfig |
-    kFlutterAvioExtensionFeatureRenderResourceReport |
+    | kFlutterAvioExtensionFeatureResourceLifecycleConfig
+#endif
+#if FML_OS_LINUX &&                                               \
+    (defined(SHELL_ENABLE_VULKAN) || defined(SHELL_ENABLE_GL)) && \
+    IMPELLER_SUPPORTS_RENDERING
+    | kFlutterAvioExtensionFeatureRenderResourceReport |
     (impeller::kAvioCoveragePolicyImplemented
          ? kFlutterAvioExtensionFeatureAntialiasingPolicy
          : 0u)
@@ -218,6 +229,10 @@ static const char* ValidateAvioExtensionRequest(
   }
   if ((request->required_features & ~kAvioSupportedFeatures) != 0) {
     return "The engine does not implement every required Avio extension.";
+  }
+  if (const char* error =
+          flutter::ValidateAvioFrameFactFeatures(request->required_features)) {
+    return error;
   }
   if ((request->required_features &
        kFlutterAvioExtensionFeatureExactVsyncCancellation) != 0 &&
@@ -556,7 +571,8 @@ InferOpenGLPlatformViewCreationCallback(
     std::unique_ptr<flutter::EmbedderExternalViewEmbedder>
         external_view_embedder,
     bool enable_impeller,
-    impeller::Flags impeller_flags) {
+    impeller::Flags impeller_flags,
+    std::optional<impeller::AvioAntialiasingConfig> antialiasing_config) {
 #ifdef SHELL_ENABLE_GL
   if (config->type != kOpenGL) {
     return nullptr;
@@ -728,7 +744,7 @@ InferOpenGLPlatformViewCreationCallback(
 
   return fml::MakeCopyable(
       [gl_dispatch_table, fbo_reset_after_present, platform_dispatch_table,
-       enable_impeller, impeller_flags,
+       enable_impeller, impeller_flags, antialiasing_config,
        external_view_embedder =
            std::move(external_view_embedder)](flutter::Shell& shell) mutable {
         std::shared_ptr<flutter::EmbedderExternalViewEmbedder> view_embedder =
@@ -739,10 +755,10 @@ InferOpenGLPlatformViewCreationCallback(
               shell.GetTaskRunners(),  // task runners
               std::make_unique<flutter::EmbedderSurfaceGLImpeller>(
                   gl_dispatch_table, fbo_reset_after_present, view_embedder,
-                  shell.GetShutdownSafeIOTaskRunner(),
-                  impeller_flags),      // embedder_surface
-              platform_dispatch_table,  // embedder platform dispatch table
-              view_embedder             // external view embedder
+                  shell.GetShutdownSafeIOTaskRunner(), impeller_flags,
+                  antialiasing_config),  // embedder_surface
+              platform_dispatch_table,   // embedder platform dispatch table
+              view_embedder              // external view embedder
           );
         }
         return std::make_unique<flutter::PlatformViewEmbedder>(
@@ -871,7 +887,9 @@ InferVulkanPlatformViewCreationCallback(
     impeller::Flags impeller_flags,
     std::optional<flutter::EmbedderVulkanResourceLifecycleConfig>
         resource_lifecycle_config,
-    std::optional<impeller::AvioAntialiasingConfig> antialiasing_config) {
+    std::optional<impeller::AvioAntialiasingConfig> antialiasing_config,
+    bool* native_teardown_safe,
+    std::shared_ptr<impeller::Context>* initialized_context) {
   if (config->type != kVulkan) {
     return nullptr;
   }
@@ -935,7 +953,11 @@ InferVulkanPlatformViewCreationCallback(
             config->vulkan.queue_family_index,
             static_cast<VkQueue>(config->vulkan.queue), vulkan_dispatch_table,
             view_embedder, impeller_flags, std::move(resource_lifecycle_config),
-            antialiasing_config);
+            antialiasing_config,
+            SAFE_ACCESS((&config->vulkan), native_sample_shading_enabled,
+                        false),
+            native_teardown_safe);
+    *initialized_context = embedder_surface->CreateImpellerContext();
     if (!embedder_surface->IsValid()) {
       // Context capability/admission failure must reach initialization rather
       // than constructing an engine whose surface can never render.
@@ -1081,7 +1103,9 @@ InferPlatformViewCreationCallback(
     impeller::Flags impeller_flags,
     std::optional<flutter::EmbedderVulkanResourceLifecycleConfig>
         resource_lifecycle_config,
-    std::optional<impeller::AvioAntialiasingConfig> antialiasing_config) {
+    std::optional<impeller::AvioAntialiasingConfig> antialiasing_config,
+    bool* native_teardown_safe,
+    std::shared_ptr<impeller::Context>* initialized_context) {
   if (config == nullptr) {
     return nullptr;
   }
@@ -1090,7 +1114,8 @@ InferPlatformViewCreationCallback(
     case kOpenGL:
       return InferOpenGLPlatformViewCreationCallback(
           config, user_data, platform_dispatch_table,
-          std::move(external_view_embedder), enable_impeller, impeller_flags);
+          std::move(external_view_embedder), enable_impeller, impeller_flags,
+          antialiasing_config);
     case kSoftware:
       return InferSoftwarePlatformViewCreationCallback(
           config, user_data, platform_dispatch_table,
@@ -1103,7 +1128,8 @@ InferPlatformViewCreationCallback(
       return InferVulkanPlatformViewCreationCallback(
           config, user_data, platform_dispatch_table,
           std::move(external_view_embedder), enable_impeller, impeller_flags,
-          std::move(resource_lifecycle_config), antialiasing_config);
+          std::move(resource_lifecycle_config), antialiasing_config,
+          native_teardown_safe, initialized_context);
     default:
       return nullptr;
   }
@@ -1417,9 +1443,19 @@ MakeRenderTargetFromBackingStoreImpeller(
 
   const auto& gl_context =
       impeller::ContextGLES::Cast(*aiks_context->GetContext());
-  const bool implicit_msaa = aiks_context->GetContext()
-                                 ->GetCapabilities()
-                                 ->SupportsImplicitResolvingMSAA();
+  const bool coverage = gl_context.GetAvioAntialiasingConfig().UsesCoverage();
+  if (coverage &&
+      (format.value() != impeller::PixelFormat::kR8G8B8A8UNormInt ||
+       !gl_context.GetReactor()->CanReactOnCurrentThread() ||
+       !impeller::ValidateCoverageFramebufferGLES(
+           gl_context.GetReactor()->GetProcTable(), framebuffer->name))) {
+    FML_LOG(ERROR) << "Coverage requires a complete single-sample RGBA root "
+                      "framebuffer without depth/stencil.";
+    return nullptr;
+  }
+  const bool implicit_msaa = !coverage && aiks_context->GetContext()
+                                              ->GetCapabilities()
+                                              ->SupportsImplicitResolvingMSAA();
   const auto size = impeller::ISize(config.size.width, config.size.height);
 
   impeller::TextureDescriptor color0_tex;
@@ -1480,8 +1516,10 @@ MakeRenderTargetFromBackingStoreImpeller(
   impeller::RenderTarget render_target_desc;
 
   render_target_desc.SetColorAttachment(color0, 0u);
-  render_target_desc.SetDepthAttachment(depth0);
-  render_target_desc.SetStencilAttachment(stencil0);
+  if (!coverage) {
+    render_target_desc.SetDepthAttachment(depth0);
+    render_target_desc.SetStencilAttachment(stencil0);
+  }
 
   fml::closure framebuffer_destruct =
       [callback = framebuffer->destruction_callback,
@@ -1569,8 +1607,8 @@ MakeRenderTargetFromBackingStoreImpeller(
 }
 
 // Wraps an embedder-owned VkImage + VkImageView as an Impeller
-// TextureSourceVK. Does NOT take ownership — the embedder is responsible for
-// the lifetime of both handles.
+// TextureSourceVK. Native GPU tracking owns this exact source, which returns
+// the embedder handles and backing-store baton only after its final reader.
 #if defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
 class EmbedderTextureSourceVK : public impeller::TextureSourceVK {
  public:
@@ -1584,7 +1622,17 @@ class EmbedderTextureSourceVK : public impeller::TextureSourceVK {
         image_view_(image_view),
         external_ownership_(external_ownership) {}
 
-  ~EmbedderTextureSourceVK() override = default;
+  ~EmbedderTextureSourceVK() override {
+    // Derived custody runs before base-member destruction. Release native
+    // framebuffer references explicitly before the callbacks free host views.
+    ReleaseCachedFrameData();
+  }
+
+  void AdoptEmbedderCallbacks(fml::closure framebuffer_destruction,
+                              fml::closure collect) {
+    FML_CHECK(
+        custody_.Adopt(std::move(framebuffer_destruction), std::move(collect)));
+  }
 
  private:
   impeller::vk::Image GetImage() const override { return image_; }
@@ -1632,6 +1680,7 @@ class EmbedderTextureSourceVK : public impeller::TextureSourceVK {
   std::optional<impeller::ExternalImageOwnershipVK> external_ownership_;
   mutable std::mutex render_complete_sync_fd_mutex_;
   mutable fml::UniqueFD render_complete_sync_fd_;
+  flutter::EmbedderExternalResourceCustody custody_;
 };
 
 namespace {
@@ -1871,20 +1920,29 @@ MakeRenderTargetFromBackingStoreImpeller(
     if (!render_target) {
       return nullptr;
     }
-    return std::make_unique<flutter::EmbedderRenderTargetImpeller>(
-        backing_store, aiks_context, std::move(render_target), on_release,
-        framebuffer_destruct, [wrapped_source]() mutable -> fml::UniqueFD {
+    auto result = std::make_unique<flutter::EmbedderRenderTargetImpeller>(
+        backing_store, aiks_context, std::move(render_target), fml::closure{},
+        fml::closure{}, [wrapped_source]() mutable -> fml::UniqueFD {
           return wrapped_source->TakeRenderCompleteSyncFD();
         });
+    // The caller's acquisition guard still owns collect on every failure.
+    // Arm only after the wrapper exists, when that guard will be released.
+    wrapped_source->AdoptEmbedderCallbacks(std::move(framebuffer_destruct),
+                                           on_release);
+    return result;
   }
 
-  return std::make_unique<flutter::EmbedderRenderTargetImpeller>(
+  auto result = std::make_unique<flutter::EmbedderRenderTargetImpeller>(
       backing_store, aiks_context, flutter::DlISize(size),
-      std::move(create_target), on_release, framebuffer_destruct,
+      std::move(create_target), fml::closure{}, fml::closure{},
       [wrapped_source]() mutable -> fml::UniqueFD {
         return wrapped_source->TakeRenderCompleteSyncFD();
       },
-      /*supports_partial_msaa=*/external_ownership.has_value());
+      /*supports_partial_msaa=*/external_ownership.has_value(),
+      /*requires_render_complete_sync_fd=*/true);
+  wrapped_source->AdoptEmbedderCallbacks(std::move(framebuffer_destruct),
+                                         on_release);
+  return result;
 #else
   return nullptr;
 #endif
@@ -2227,6 +2285,15 @@ InferExternalViewEmbedderFromArgs(
   }
   switch (compositor_mode) {
     case kFlutterCompositorModeGeneric:
+      if ((negotiated_avio_features &
+           (kFlutterAvioExtensionFeatureEmptyFrame |
+            kFlutterAvioExtensionFeatureItemEffects |
+            kFlutterAvioExtensionFeatureOutputGround |
+            kFlutterAvioExtensionFeatureReadyContent)) != 0) {
+        return fml::Status(
+            fml::StatusCode::kInvalidArgument,
+            "Root frame facts require root-target compositor mode.");
+      }
       if (!c_create_callback || c_acquire_render_target_callback) {
         return fml::Status(
             fml::StatusCode::kInvalidArgument,
@@ -2320,32 +2387,38 @@ InferExternalViewEmbedderFromArgs(
     present_callback = [c_present_callback, user_data = compositor->user_data](
                            FlutterViewId view_id, const auto& layers,
                            const auto& compositor_materials,
-                           bool compositor_materials_invalid) {
+                           bool compositor_materials_invalid,
+                           const flutter::AvioFrameFacts& frame_facts) {
       (void)compositor_materials;
       (void)compositor_materials_invalid;
+      (void)frame_facts;
       TRACE_EVENT0("flutter", "FlutterCompositorPresentLayers");
       return c_present_callback(const_cast<const FlutterLayer**>(layers.data()),
                                 layers.size(), user_data);
     };
   } else if (c_present_view_callback) {
-    present_callback = [c_present_view_callback,
-                        user_data = compositor->user_data](
-                           FlutterViewId view_id, const auto& layers,
-                           const auto& compositor_materials,
-                           bool compositor_materials_invalid) {
-      TRACE_EVENT0("flutter", "FlutterCompositorPresentView");
-      FlutterPresentViewInfo info = {
-          .struct_size = sizeof(FlutterPresentViewInfo),
-          .view_id = view_id,
-          .layers = const_cast<const FlutterLayer**>(layers.data()),
-          .layers_count = layers.size(),
-          .user_data = user_data,
-          .compositor_materials = compositor_materials.data(),
-          .compositor_materials_count = compositor_materials.size(),
-          .compositor_materials_invalid = compositor_materials_invalid,
-      };
-      return c_present_view_callback(&info);
-    };
+    present_callback =
+        [c_present_view_callback, user_data = compositor->user_data](
+            FlutterViewId view_id, const auto& layers,
+            const auto& compositor_materials, bool compositor_materials_invalid,
+            const flutter::AvioFrameFacts& frame_facts) {
+          TRACE_EVENT0("flutter", "FlutterCompositorPresentView");
+          const flutter::EmbedderAvioFrameFacts facts(frame_facts);
+          FlutterPresentViewInfo info = {
+              .struct_size = sizeof(FlutterPresentViewInfo),
+              .view_id = view_id,
+              .layers = const_cast<const FlutterLayer**>(layers.data()),
+              .layers_count = layers.size(),
+              .user_data = user_data,
+              .compositor_materials = compositor_materials.data(),
+              .compositor_materials_count = compositor_materials.size(),
+              .compositor_materials_invalid = compositor_materials_invalid,
+              .item_effect = facts.effect(),
+              .output_ground = facts.ground(),
+              .ready_content = facts.ready_content(),
+          };
+          return c_present_view_callback(&info);
+        };
   }
 
   flutter::EmbedderExternalViewEmbedder::PresentRenderTargetCallback
@@ -2362,8 +2435,10 @@ InferExternalViewEmbedderFromArgs(
             const FlutterBackingStore* backing_store,
             const FlutterBackingStorePresentInfo* backing_store_present_info,
             const auto& compositor_materials, bool compositor_materials_invalid,
-            const auto& window_previews, bool window_previews_invalid) {
+            const auto& window_previews, bool window_previews_invalid,
+            const flutter::AvioFrameFacts& frame_facts) {
           TRACE_EVENT0("flutter", "FlutterCompositorPresentRenderTarget");
+          const flutter::EmbedderAvioFrameFacts facts(frame_facts);
           FlutterPresentRenderTargetInfo info = {
               .struct_size = sizeof(FlutterPresentRenderTargetInfo),
               .target_id = view_id,
@@ -2379,6 +2454,9 @@ InferExternalViewEmbedderFromArgs(
               .window_previews = window_previews.data(),
               .window_previews_count = window_previews.size(),
               .window_previews_invalid = window_previews_invalid,
+              .item_effect = facts.effect(),
+              .output_ground = facts.ground(),
+              .ready_content = facts.ready_content(),
           };
           if (frame_opportunity_registry) {
             if (opportunity_id == 0 ||
@@ -2391,7 +2469,8 @@ InferExternalViewEmbedderFromArgs(
 
           const bool accepted = c_present_render_target_callback(&info);
           if (!accepted &&
-              status == kFlutterPresentRenderTargetStatusPresented &&
+              (status == kFlutterPresentRenderTargetStatusPresented ||
+               status == kFlutterPresentRenderTargetStatusEmptyContent) &&
               opportunity_id != 0 && c_frame_opportunity_callback != nullptr) {
             SendFrameOpportunityOutcome(
                 c_frame_opportunity_callback, user_data, opportunity_id,
@@ -2405,7 +2484,8 @@ InferExternalViewEmbedderFromArgs(
   return std::make_unique<flutter::EmbedderExternalViewEmbedder>(
       compositor_mode, selected_target_damage, avoid_backing_store_cache,
       create_render_target_callback, acquire_render_target_callback,
-      present_callback, present_render_target_callback);
+      present_callback, present_render_target_callback,
+      negotiated_avio_features);
 }
 
 // Translates embedder metrics to engine metrics, or returns a string on error.
@@ -2808,12 +2888,14 @@ FlutterEngineResult FlutterEngineRun(size_t version,
   return FlutterEngineRunInitialized(*engine_out);
 }
 
-FlutterEngineResult FlutterEngineInitialize(size_t version,
-                                            const FlutterRendererConfig* config,
-                                            const FlutterProjectArgs* args,
-                                            void* user_data,
-                                            FLUTTER_API_SYMBOL(FlutterEngine) *
-                                                engine_out) {
+static FlutterEngineResult FlutterEngineInitializeImpl(
+    size_t version,
+    const FlutterRendererConfig* config,
+    const FlutterProjectArgs* args,
+    void* user_data,
+    FLUTTER_API_SYMBOL(FlutterEngine) * engine_out,
+    bool* native_teardown_safe,
+    std::shared_ptr<impeller::Context>* initialized_context) {
   // Step 0: Figure out arguments for shell creation.
   if (version != FLUTTER_ENGINE_VERSION) {
     return LOG_EMBEDDER_ERROR(
@@ -2908,19 +2990,26 @@ FlutterEngineResult FlutterEngineInitialize(size_t version,
   const auto render_features = kFlutterAvioExtensionFeatureAntialiasingPolicy |
                                kFlutterAvioExtensionFeatureRenderResourceReport;
   if ((negotiated_avio_features & render_features) != 0 &&
-      (config->type != kVulkan || !settings.enable_impeller)) {
+      ((config->type != kVulkan && config->type != kOpenGL) ||
+       !settings.enable_impeller)) {
     return LOG_EMBEDDER_ERROR(
         kInvalidArguments,
-        "Avio render policy/report requires Vulkan Impeller.");
+        "Avio render policy/report requires Vulkan or OpenGL Impeller.");
   }
   if (antialiasing_config) {
+    if (const auto* error = flutter::ValidateAvioAntialiasingBackend(
+            *antialiasing_config, config->type == kVulkan
+                                      ? impeller::AvioCoverageBackend::kVulkan
+                                      : impeller::AvioCoverageBackend::kGLES)) {
+      return LOG_EMBEDDER_ERROR(kInvalidArguments, error);
+    }
     settings.avio_antialiasing_config =
         flutter::CopyAvioAntialiasingConfig(*antialiasing_config);
   }
   const bool coverage_policy =
       settings.avio_antialiasing_config.has_value() &&
       settings.avio_antialiasing_config->UsesCoverage();
-  if (coverage_policy &&
+  if (coverage_policy && config->type == kVulkan &&
       (negotiated_avio_features &
        (kFlutterAvioExtensionFeatureRootRenderTarget |
         kFlutterAvioExtensionFeatureResourceLifecycleConfig |
@@ -3242,7 +3331,8 @@ FlutterEngineResult FlutterEngineInitialize(size_t version,
       std::move(external_view_embedder_result.value()),
       settings.enable_impeller, impeller_flags,
       std::move(avio_resource_lifecycle_config),
-      settings.avio_antialiasing_config);
+      settings.avio_antialiasing_config, native_teardown_safe,
+      initialized_context);
 
   if (!on_create_platform_view) {
     return LOG_EMBEDDER_ERROR(
@@ -3411,10 +3501,38 @@ FlutterEngineResult FlutterEngineInitialize(size_t version,
       std::move(external_texture_resolver)  //
   );
 
+  embedder_engine->SetNativeTeardownContext(*initialized_context);
+
   // Release the ownership of the embedder engine to the caller.
   *engine_out = reinterpret_cast<FLUTTER_API_SYMBOL(FlutterEngine)>(
       embedder_engine.release());
   return kSuccess;
+}
+
+FlutterEngineResult FlutterEngineInitialize(size_t version,
+                                            const FlutterRendererConfig* config,
+                                            const FlutterProjectArgs* args,
+                                            void* user_data,
+                                            FLUTTER_API_SYMBOL(FlutterEngine) *
+                                                engine_out) {
+  bool native_teardown_safe = true;
+  std::shared_ptr<impeller::Context> initialized_context;
+  const auto result =
+      FlutterEngineInitializeImpl(version, config, args, user_data, engine_out,
+                                  &native_teardown_safe, &initialized_context);
+  if (result != kSuccess && initialized_context) {
+    // Later argument/AOT/thread-host errors still owe the exact initialized
+    // native context a cleanup proof. An invalid/absent Shell is not evidence.
+    initialized_context->Shutdown();
+    native_teardown_safe =
+        initialized_context->IsSafeToDestroyNativeResources();
+  }
+  initialized_context.reset();
+  if (!native_teardown_safe) {
+    return LOG_EMBEDDER_ERROR(kInternalInconsistency,
+                              "Native GPU initialization cleanup is unknown.");
+  }
+  return result;
 }
 
 FlutterEngineResult FlutterEngineRunInitialized(
@@ -3599,9 +3717,32 @@ FlutterEngineResult FlutterEngineDeinitialize(FLUTTER_API_SYMBOL(FlutterEngine)
   }
 
   auto embedder_engine = reinterpret_cast<flutter::EmbedderEngine*>(engine);
+  auto impeller_context = embedder_engine->TakeNativeTeardownContext();
+  if (!impeller_context && embedder_engine->IsValid()) {
+    if (auto platform_view = embedder_engine->GetShell().GetPlatformView()) {
+      impeller_context = platform_view->GetImpellerContext();
+    }
+  }
   embedder_engine->NotifyDestroyed();
   embedder_engine->CollectShell();
   embedder_engine->CollectThreadHost();
+  bool native_safe = true;
+  if (impeller_context) {
+    // Engine threads have joined. Only the exact native owner can now prove
+    // that a host may destroy its borrowed images/device; thread joins alone
+    // say nothing about previously accepted queue submissions.
+    impeller_context->Shutdown();
+    native_safe = impeller_context->IsSafeToDestroyNativeResources();
+  }
+  const bool teardown_safe =
+      embedder_engine->RecordNativeTeardownProof(native_safe);
+  // Finish normal native cleanup before returning its receipt to the host.
+  // Unknown submitted custody stays in the bounded native completion actor.
+  impeller_context.reset();
+  if (!teardown_safe) {
+    return LOG_EMBEDDER_ERROR(kInternalInconsistency,
+                              "Native GPU teardown completion is unknown.");
+  }
   return kSuccess;
 }
 
@@ -4518,10 +4659,23 @@ FlutterEngineResult FlutterEngineGetAvioExtensionCapabilities(
   capabilities->minimum_version = FLUTTER_AVIO_EXTENSION_VERSION;
   capabilities->maximum_version = FLUTTER_AVIO_EXTENSION_VERSION;
   capabilities->supported_features = kAvioSupportedFeatures;
-  if (STRUCT_HAS_MEMBER(capabilities, continuous_supported_classes)) {
-    capabilities->continuous_supported_classes =
-        impeller::kAvioContinuousSupportedClasses;
-  }
+  constexpr uint64_t vulkan_classes =
+#if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
+      impeller::AvioContinuousSupportedClasses(
+          impeller::AvioCoverageBackend::kVulkan);
+#else
+      0u;
+#endif
+  constexpr uint64_t gles_classes =
+#if FML_OS_LINUX && defined(SHELL_ENABLE_GL) && IMPELLER_SUPPORTS_RENDERING
+      impeller::AvioContinuousSupportedClasses(
+          impeller::AvioCoverageBackend::kGLES);
+#else
+      0u;
+#endif
+  // The current external-engine contract has no Metal admission path.
+  flutter::WriteAvioContinuousCapabilities(*capabilities, vulkan_classes,
+                                           gles_classes, 0u);
   return kSuccess;
 }
 

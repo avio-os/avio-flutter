@@ -27,8 +27,53 @@ impeller_component("golden_playground_test") {
       ":metal_golden_screenshot",
       "//third_party/abseil-cpp/absl/base:no_destructor",
     ]
+  } else if (is_linux && impeller_enable_vulkan) {
+    sources += [ "golden_playground_test_vk.cc" ]
+    deps += [ ":golden_renderer_vk" ]
   } else {
     sources += [ "golden_playground_test_stub.cc" ]
+  }
+}
+
+if (is_linux && impeller_enable_vulkan) {
+  impeller_component("golden_renderer_vk") {
+    testonly = true
+    sources = [
+      "golden_renderer_vk.cc",
+      "golden_renderer_vk.h",
+    ]
+    deps = [
+      "//flutter/fml",
+      "//flutter/impeller/display_list",
+      "//flutter/impeller/renderer/backend/vulkan",
+      "//flutter/impeller/testing:screenshot",
+      "//flutter/third_party/skia",
+    ]
+  }
+
+  impeller_component("impeller_golden_tests_vk") {
+    target_type = "executable"
+    testonly = true
+    sources = [
+      "avio_captured_backdrop_goldens_vk.cc",
+      "avio_coverage_goldens_vk.cc",
+      "golden_edge_comparison.h",
+      "golden_edge_comparison_unittests.cc",
+      "main_vk.cc",
+    ]
+    deps = [
+      ":digest",
+      ":golden_playground_test",
+      ":golden_renderer_vk",
+      "//flutter/display_list",
+      "//flutter/fml",
+      "//flutter/impeller/display_list:aiks_unittests_golden",
+      "//flutter/impeller/fixtures",
+      "//flutter/impeller/typographer/backends/skia:typographer_skia_backend",
+      "//flutter/third_party/googletest:gtest",
+      "//flutter/third_party/swiftshader",
+      "//flutter/txt",
+    ]
   }
 }
 

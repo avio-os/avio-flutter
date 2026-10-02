@@ -16,8 +16,52 @@ Example invocation:
 ./run_tests.py --variant="host_debug_unopt_arm64" --type="impeller-golden"
 ```
 
-Currently these tests are only supported on macOS and only test the Metal
-backend to Impeller.
+The macOS harness supports its existing backends. The additional Linux Vulkan
+target renders headless without GLFW or a display server, using the selected
+real Vulkan ICD and validation layers.
+
+## Linux Vulkan coverage checks
+
+Build `impeller_golden_tests_vk` in a dependency-complete engine checkout:
+
+```sh
+ninja -C out/host_debug_unopt impeller_golden_tests_vk
+VK_ICD_FILENAMES="$PWD/out/host_debug_unopt/vk_swiftshader_icd.json" \
+  out/host_debug_unopt/impeller_golden_tests_vk \
+  --working_dir=/tmp/avio-goldens \
+  --gtest_filter='AvioSites/*:*ScreenVulkanComparisonTest*:GoldenEdgeComparisonTest.*' \
+  --gtest_output=xml:/tmp/avio-goldens/results.xml
+```
+
+The path above assumes the engine `src` directory as the working directory.
+Use the variant's actual validation-layer path when it is not installed in the
+loader's search path. Missing native dependencies, unsupported capabilities,
+an empty test selection and every skipped test fail; no result is synthesized.
+Other existing Vulkan DisplayList goldens can be selected with `*/Vulkan`.
+
+`AvioSites` renders its class/site catalog in light and dark at scales 1, 1.25
+and 2, each at four fractional phases. It writes native4, Coverage, aliased1
+and actual edge-mask PNGs, XML maximum deltas and a digest with the real GPU
+description. The aliased reference uses one sample for root and nested
+offscreen targets and disables AA in scene commands. It does not modify
+production AA defaults. Text requires the real `Roboto-Regular.ttf` fixture.
+
+Raw premultiplied renderer bytes determine the edge mask and comparisons.
+Outside the native4-versus-aliased mask Coverage must match exactly; inside it
+each channel differs by at most one byte. SDF, text, shadow and gradient classes
+require all bytes exact. PNG export applies normal straight-alpha encoding;
+the opaque background keeps that conversion from obscuring edge differences.
+Failed comparisons retain their output artifacts and still exit unsuccessfully.
+Focused site replicas test operators and geometry, while installed Shell and
+composed-output captures remain separate evidence.
+
+Run the same target from a separately rebuilt EN50-reverted revision to check
+the gradient backport's independent revert contract. A runtime flag cannot
+substitute for that source/build check. The old-fetch Screen fixture documents
+real operator changes and now asserts zero interior delta; an unexecuted test
+or a recorded edge delta establishes neither pixel parity nor user approval.
+Hosted source compilation and CPU oracle tests do not constitute a native
+Vulkan golden run.
 
 ## Adding tests
 

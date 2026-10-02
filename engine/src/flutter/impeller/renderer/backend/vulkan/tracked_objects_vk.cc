@@ -37,14 +37,17 @@ TrackedObjectsVK::TrackedObjectsVK(
 }
 
 TrackedObjectsVK::~TrackedObjectsVK() {
-  if (!buffer_) {
-    return;
+  if (buffer_) {
+    pool_->CollectCommandBuffer(std::move(buffer_));
   }
-  pool_->CollectCommandBuffer(std::move(buffer_));
+  // Native framebuffers/render passes reference the external source's views.
+  // Release those refs before a final source/BO owner can destroy its image.
+  tracked_objects_.clear();
 }
 
 bool TrackedObjectsVK::IsValid() const {
-  return is_valid_;
+  return is_valid_ && tracked_pipelines_.IsValid() &&
+         retained_resources_.IsValid();
 }
 
 void TrackedObjectsVK::Track(const std::shared_ptr<SharedObjectVK>& object) {

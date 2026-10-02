@@ -9,6 +9,7 @@
 
 #include "impeller/base/backend_cast.h"
 #include "impeller/core/device_buffer.h"
+#include "impeller/renderer/allocated_buffer_ledger.h"
 #include "impeller/renderer/backend/vulkan/resource_manager_vk.h"
 #include "impeller/renderer/backend/vulkan/vma.h"
 
@@ -21,7 +22,8 @@ class DeviceBufferVK final : public DeviceBuffer,
                  std::weak_ptr<Context> context,
                  UniqueBufferVMA buffer,
                  VmaAllocationInfo info,
-                 bool is_host_coherent);
+                 bool is_host_coherent,
+                 AllocatedBufferLedger::Registration registration = {});
 
   // |DeviceBuffer|
   ~DeviceBufferVK() override;
@@ -35,15 +37,22 @@ class DeviceBufferVK final : public DeviceBuffer,
   friend class AllocatorVK;
 
   struct BufferResource {
+    // Declared first: VMA buffer destruction precedes the census decrement.
+    AllocatedBufferLedger::Registration registration;
     UniqueBufferVMA buffer;
     VmaAllocationInfo info = {};
 
     BufferResource() = default;
 
-    BufferResource(UniqueBufferVMA p_buffer, VmaAllocationInfo p_info)
-        : buffer(std::move(p_buffer)), info(p_info) {}
+    BufferResource(UniqueBufferVMA p_buffer,
+                   VmaAllocationInfo p_info,
+                   AllocatedBufferLedger::Registration p_registration)
+        : registration(std::move(p_registration)),
+          buffer(std::move(p_buffer)),
+          info(p_info) {}
 
-    BufferResource(BufferResource&& o) {
+    BufferResource(BufferResource&& o)
+        : registration(std::move(o.registration)) {
       std::swap(o.buffer, buffer);
       std::swap(o.info, info);
     }

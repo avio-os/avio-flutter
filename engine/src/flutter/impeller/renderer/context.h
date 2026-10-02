@@ -230,6 +230,10 @@ class Context {
   ///
   virtual void Shutdown() = 0;
 
+  // Cold teardown proof, queried only after Shutdown. Backends without borrowed
+  // native-device quarantine preserve their existing shutdown contract.
+  virtual bool IsSafeToDestroyNativeResources() const { return true; }
+
   /// Stores a task on the `ContextMTL` that is awaiting access for the GPU.
   ///
   /// The task will be executed in the event that the GPU access has changed to
@@ -338,10 +342,21 @@ class Context {
   // allocation bytes or inferred shaded-sample counts.
   void RecordAvioCoverageDraw(AvioCoverageReason reason,
                               uint64_t bounding_box_pixels);
+  void RecordAvioCoverageClassification(AvioCoverageReason reason,
+                                        uint64_t draw_count,
+                                        uint64_t bounding_box_pixels);
+  void RecordAvioCoverageLayerDemand(uint64_t nominal_bytes,
+                                     uint64_t scope_count);
   AvioRenderResourceReport GetAvioCoverageUsageReport(
       bool start_new_interval) const;
   std::shared_ptr<AvioCoverageRegion> InitializeAvioCoverageRegion(
-      const std::function<std::shared_ptr<AvioCoverageRegion>()>& create);
+      const std::function<std::shared_ptr<AvioCoverageRegion>()>& create,
+      std::function<AvioRenderResourceReport(const AvioCoverageRegion&, bool)>
+          descriptor_report = {});
+  // The immutable cold provider exposes a region's fixed descriptor inventory
+  // without making the backend renderer depend on entity implementation types.
+  AvioRenderResourceReport GetAvioCoverageRegionResourceReport(
+      bool start_new_interval) const;
 
  protected:
   explicit Context(const Flags& flags);
@@ -353,7 +368,11 @@ class Context {
   mutable std::mutex avio_coverage_region_mutex_;
   mutable std::mutex avio_coverage_usage_mutex_;
   mutable AvioRenderResourceReport avio_coverage_usage_;
+  mutable uint64_t avio_nominal_layer_demand_ = 0;
+  mutable uint64_t avio_classified_scope_count_ = 0;
   std::shared_ptr<AvioCoverageRegion> avio_coverage_region_;
+  std::function<AvioRenderResourceReport(const AvioCoverageRegion&, bool)>
+      avio_region_descriptor_report_;
   Context(const Context&) = delete;
 
   Context& operator=(const Context&) = delete;

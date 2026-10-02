@@ -75,9 +75,9 @@ echo "--- Exact frame opportunities ---"
 need "exact opportunity feature negotiation" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureFrameOpportunityOutcomes'
-need "Avio ABI extension version (v8 coverage policy/report)" \
+need "Avio ABI extension version (v9 exact root frame facts)" \
   $F/shell/platform/embedder/embedder.h \
-  'FLUTTER_AVIO_EXTENSION_VERSION 8u'
+  'FLUTTER_AVIO_EXTENSION_VERSION 9u'
 need "render-deadline semantic feature" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureRenderDeadline'
@@ -669,6 +669,20 @@ need "non-AA and filter subpasses have an explicit 1x route" \
   "$F/impeller/entity/contents/content_context.cc" 'CoverageTiledRenderPass::MakeDirect1x'
 need "common coverage pipelines are initialized before raster frames" \
   "$F/impeller/entity/contents/content_context.cc" 'PrewarmAvioCoveragePipelines'
+need "upstream async variant authority is preserved" \
+  "$F/impeller/entity/contents/content_context.cc" 'void Prewarm\(const Context& context'
+need "legacy asynchronous prewarm catalogue API is preserved" \
+  "$F/impeller/entity/contents/content_context.h" 'MakeAvioPrewarmVariants'
+need "coverage queues all actual keys before validation" \
+  "$F/impeller/entity/contents/content_context.cc" 'PrewarmAvioPipelineKeysInTwoPhases'
+need "async clip variants preserve their real descriptor" \
+  "$F/impeller/entity/contents/content_context.cc" 'clip\.SetDefaultDescriptor\(clip_pipeline_descriptor\)'
+need "queue/join ordering regression" \
+  "$F/impeller/entity/contents/avio_pipeline_prewarm_unittests.cc" 'QueuesAllKeysBeforeJoiningTheSameKeys'
+need "failed async join never publishes Ready" \
+  "$F/impeller/entity/contents/avio_pipeline_prewarm_unittests.cc" 'AsyncJoinFailureKeepsPublicStateUnready'
+need "upstream legacy prewarm regressions remain registered" \
+  "$F/impeller/entity/BUILD.gn" '"contents/content_context_prewarm_unittests.cc"'
 need "runtime Canvas selects coverage explicitly" \
   "$F/impeller/display_list/canvas.cc" 'UsesAvioCoverage'
 need "shared backdrop readers retain a frozen prefix" \
@@ -688,13 +702,185 @@ need "physical image source lifetime census" \
 need "native pipeline lifetime census" \
   "$F/impeller/renderer/backend/vulkan/pipeline_vk.h" 'resource_registration_'
 need "frame origin survives asynchronous pipeline compilation" \
-  "$F/impeller/renderer/backend/vulkan/pipeline_library_vk.cc" 'IsAvioRasterFrameActive'
+  "$F/impeller/renderer/backend/vulkan/pipeline_library_vk.cc" 'AvioPipelineCreationOrigin::Capture\(\)'
 need "renderer ledger/report contracts are in GN" \
   "$F/impeller/renderer/BUILD.gn" 'render_resource_contracts'
 need "standalone production coverage contracts are in GN" \
   "$F/shell/platform/embedder/BUILD.gn" 'avio_coverage_contract_tests'
 need "coverage design and honest packaging gates" \
   AVIO_PATCHES.md 'Patch 55: explicit coverage policy and resource census'
+
+
+
+echo "--- Exact empty content and root frame facts ---"
+need "strict native root fact validation" \
+  "$F/flow/layers/avio_frame_metadata_layer.cc" 'CollectAvioRootFrameFacts'
+need "root fact layer regression inventory" \
+  "$F/flow/BUILD.gn" '"layers/avio_frame_metadata_layer_unittests.cc"'
+need "bufferless empty path precedes ordinary surface acquisition" \
+  "$F/shell/common/rasterizer.cc" 'SubmitAvioEmptyFrame'
+need "empty path releases cached root custody" \
+  "$F/shell/platform/embedder/embedder_external_view_embedder.cc" 'render_target_caches_.erase\(view_id\)'
+need "exact empty terminal and next-target regression" \
+  "$F/shell/platform/embedder/embedder_external_view_embedder_unittests.cc" 'EmptyRootReportsOneExactFrameWithoutTargetAndTransitionsNormally'
+need "root facts force ordinary raster on changed revision" \
+  "$F/shell/common/rasterizer.cc" 'root_facts_changed'
+need "bufferless surface/target regression" \
+  "$F/shell/common/rasterizer_unittests.cc" 'EmptyRootSkipsSurfaceAndTargetThenContentAcquiresNormally'
+need "bounded logical split ground" \
+  "$F/shell/platform/embedder/embedder.h" 'FLUTTER_AVIO_MAX_OUTPUT_GROUND_REGIONS 4u'
+need "borrowed allocation-free frame facts" \
+  "$F/shell/platform/embedder/avio_frame_facts.h" 'class EmbedderAvioFrameFacts'
+need "retained root framework alpha" \
+  packages/flutter/lib/src/rendering/avio_item_effect.dart 'class RenderAvioItemEffect'
+need "root alpha retains child painting regression" \
+  packages/flutter/test/widgets/avio_item_effect_test.dart 'root fade retains child painting'
+need "ready Static/Live content exact identity" \
+  "$F/shell/platform/embedder/embedder.h" 'FlutterAvioReadyContent'
+need "nullable ready framework author" \
+  packages/flutter/lib/src/rendering/avio_item_effect.dart 'class RenderAvioReadyContent'
+need "root facts design note and release gates" \
+  AVIO_PATCHES.md 'Patch 56: exact empty content'
+need "root effect declaration identity is carried with revision" \
+  "$F/shell/platform/embedder/avio_frame_facts.h" 'item_effect_declaration_id'
+need "raster spans bind actual submitted Flutter view" \
+  "$F/shell/platform/embedder/embedder_external_view.cc" 'view_id_string \+ 31, flutter_view_id'
+
+echo "--- GTK bounded native Coverage ---"
+need "native GL admission exercises actual sample identity" \
+  "$F/impeller/renderer/backend/gles/native_coverage_gles.h" 'colour_samples == 4 && stencil_samples == 4'
+need "host GL root is validated as single-sample color-only" \
+  "$F/shell/platform/embedder/embedder.cc" 'ValidateCoverageFramebufferGLES'
+need "GTK uses color-only backing stores under admitted Coverage" \
+  "$F/shell/platform/linux/fl_engine.cc" 'fl_framebuffer_new_color_only'
+need "GTK probe is linked as its actual header-only dependency" \
+  "$F/shell/platform/linux/BUILD.gn" 'gles:native_coverage_probe'
+need "native GL capability regression is registered" \
+  "$F/impeller/renderer/backend/gles/BUILD.gn" '"native_coverage_gles_unittests.cc"'
+need "GL masks are deliberately uncached native replay" \
+  "$F/impeller/entity/contents/content_context.cc" 'cache_native_masks = false'
+need "descriptor-only region mode excludes invented physical bytes" \
+  "$F/impeller/entity/avio_coverage_region.cc" 'config.require_exact_allocated_bytes'
+need "fixed prefix scratch prevents wrapped-FBO sampling" \
+  "$F/impeller/entity/coverage_tiled_render_pass.cc" 'GetColourSeedTexture'
+need "wrapped GL framebuffers remain borrowed during blits" \
+  "$F/impeller/renderer/backend/gles/blit_command_gles.cc" 'FramebufferBinding\{\*fbo, false\}'
+need "public report distinguishes physical descriptor multiplicity" \
+  "$F/shell/platform/embedder/embedder.h" 'kFlutterAvioResourceFieldDescriptorMultiplicity 0x10ULL'
+need "actual allocator advertises observed descriptor multiplicity" \
+  "$F/impeller/renderer/allocated_image_ledger.cc" 'kAvioResourceFieldDescriptorMultiplicity'
+need "lease availability is not inferred from allocator ownership" \
+  "$F/impeller/renderer/allocated_image_ledger_unittests.cc" 'PhysicalDescriptorMultiplicityIsAvailableWithoutLeaseInference'
+need "GLES accounting and native release gates are documented" \
+  AVIO_PATCHES.md 'Patch 58: GTK/GLES bounded native-four-sample Coverage'
+echo "--- Headless Vulkan golden execution contract ---"
+need "Linux Vulkan golden target is registered" \
+  "$F/impeller/golden_tests/BUILD.gn" 'impeller_golden_tests_vk'
+need "Linux Vulkan golden backend replaces the skip-only stub" \
+  "$F/impeller/golden_tests/BUILD.gn" 'golden_playground_test_vk.cc'
+need "golden readback waits for actual submission completion" \
+  "$F/impeller/golden_tests/golden_renderer_vk.cc" 'WaitWithTimeout'
+need "aliased reference constrains nested targets too" \
+  "$F/impeller/golden_tests/golden_renderer_vk.cc" 'class SingleSampleGoldenAllocator'
+need "golden edge rule asserts exact interior bytes" \
+  "$F/impeller/golden_tests/golden_edge_comparison.h" 'max_interior_delta == 0'
+need "missing and skipped golden execution cannot pass" \
+  "$F/impeller/golden_tests/main_vk.cc" 'skipped_test_count\(\) != 0'
+need "Screen prior-fetch comparison fails any interior delta" \
+  "$F/impeller/display_list/aiks_dl_backdrop_flip_unittests.cc" 'EXPECT_EQ\(max_interior_delta, 0\)'
+need "headless golden release gates are documented" \
+  AVIO_PATCHES.md 'Patch 59: headless Linux Vulkan golden harness'
+
+echo "--- Explicit continuous classes and native4 destination coverage ---"
+need "backend implementation masks remain independent" \
+  "$F/impeller/core/antialiasing_policy.h" 'AvioContinuousSupportedClasses\(AvioCoverageBackend'
+need "immutable bounded analytic expression" \
+  "$F/impeller/core/continuous_coverage.h" 'kAvioContinuousMaxClips = 16'
+need "retained clip state reaches actual recorder" \
+  "$F/impeller/entity/coverage_tiled_recorder.cc" 'pending_.continuous_clip = avio_continuous_clip_'
+need "raw filtered own geometry reaches final native draw" \
+  "$F/impeller/display_list/canvas.cc" 'SetAvioContinuousGeometryPrimitive'
+need "native destination prefix stays in the bounded bank" \
+  "$F/impeller/entity/avio_coverage_region_unittests.cc" 'ContinuousPrefixCannotEscapeActualByteCap'
+need "ordered destination copy occurs outside render passes" \
+  "$F/impeller/entity/coverage_tiled_render_pass.cc" 'AddCopy\(island_.GetColorAttachment\(0\).texture, prefix\)'
+need "destination operator preserves fractional coverage" \
+  "$F/impeller/entity/shaders/continuous_coverage.glsl" 'mix\(destination, AvioApplyOriginalBlend\(source, destination\), coverage\)'
+need "continuous shader source inventory is Vulkan-only" \
+  "$F/impeller/entity/BUILD.gn" 'vulkan_only_shaders ='
+need "continuous control tests are registered" \
+  "$F/impeller/renderer/BUILD.gn" 'continuous_coverage_pipeline_unittests.cc'
+need "borrowed logical-device enablement is explicit ABI data" \
+  "$F/shell/platform/embedder/embedder.h" 'bool native_sample_shading_enabled'
+need "selected Coverage target fixtures remain registered" \
+  "$F/shell/platform/embedder/tests/embedder_vk_unittests.cc" 'CoverageSelectedTargetDamageKeepsNativeFourEdge'
+need "Ready live content is distinct from static sealability" \
+  "$F/shell/platform/embedder/embedder.h" 'kFlutterAvioReadyContentKindLive = 1'
+need "continuous expression pool is cold and bounded" \
+  "$F/impeller/entity/contents/continuous_clip_pool.h" 'kCapacity = 128'
+need "continuous recorder upload cache is fixed" \
+  "$F/impeller/entity/coverage_tiled_render_pass.h" 'std::array<ClipBuffer, kMaxContinuousStates>'
+need "continuous data arena is prewarmed and bounded" \
+  "$F/impeller/entity/contents/content_context.cc" 'HostBuffer::CreateBounded'
+need "bounded host storage preserves pending/submitted owners" \
+  "$F/impeller/core/host_buffer.cc" 'buffer.use_count\(\) != 1'
+need "bounded host storage tests are registered" \
+  "$F/impeller/core/BUILD.gn" 'host_buffer_bounded_unittests.cc'
+need "native buffer lifetime ledger is attached to deferred resources" \
+  "$F/impeller/renderer/backend/vulkan/device_buffer_vk.h" 'AllocatedBufferLedger::Registration registration'
+need "native buffer census is merged once by the context" \
+  "$F/impeller/renderer/backend/vulkan/context_vk.cc" 'GetAllocatedBufferReport\(start_new_interval\)'
+need "native buffer census tests are registered" \
+  "$F/impeller/renderer/BUILD.gn" 'allocated_buffer_ledger_unittests.cc'
+need "continuous source design and release gates are documented" \
+  AVIO_PATCHES.md 'Patch 60: opt-in continuous classes'
+
+
+echo "--- Exact declaration clip strategies and bounded typed recording ---"
+need "runtime DisplayList pre-pass is called before dispatch" \
+  "$F/impeller/display_list/dl_dispatcher.cc" 'ClassifyCoverageDisplayList'
+need "mixed painter ranges consume exact clip declarations" \
+  "$F/impeller/entity/coverage_tiled_render_pass.cc" 'EncodeCertifiedClip\(writable, true\)'
+need "geometry/tag completeness guards recorded substitutions" \
+  "$F/impeller/entity/coverage_tiled_recorder.cc" 'pending_.sample4_clip_complete = avio_sample4_clip_complete_'
+need "logical clip operations are distinguishable from own stencil" \
+  "$F/impeller/entity/coverage_tiled_recorder.cc" 'pending_.clip_operation = IsAvioClipOperation\(\)'
+need "all-depth mask recipes stream through existing scratch" \
+  "$F/impeller/entity/contents/coverage_clip_mask_flattener.cc" 'AcquireClipMaskScratch'
+need "shape fringe/interior plan is actually consumed" \
+  "$F/impeller/entity/coverage_tiled_render_pass.cc" 'GetFringePlan\(writable\)'
+need "unknown shape full pixels and partial lanes remain distinct" \
+  "$F/impeller/entity/shaders/sample4/avio_sample4_fringe_solid_fill.frag" 'gl_SampleMask\[0\] = int\(mask\)'
+need "full ancestor recipe cannot be truncated to newest K4" \
+  "$F/impeller/entity/contents/sample4_clip_uniform.cc" 'clip.parent'
+need "captured source evidence reaches real packets" \
+  "$F/impeller/entity/coverage_tiled_recorder.cc" 'pending_.sample4_source_proof = sample4_source_proof_'
+need "captured source rounding is materialized before joint mask" \
+  "$F/impeller/entity/coverage_tiled_render_pass.cc" 'opaque_group.IsValid\(\)'
+need "CPU recorder bank is cold and bounded" \
+  "$F/impeller/entity/coverage_recorder_bank.h" 'kPackets = 8192'
+need "recorder storage is registered in GN" \
+  "$F/impeller/entity/BUILD.gn" '"coverage_tiled_recorder.cc"'
+need "source proof production fixtures are registered" \
+  "$F/impeller/entity/BUILD.gn" 'sample4_source_proof_unittests.cc'
+need "exact clip strategy refinements are documented" \
+  AVIO_PATCHES.md 'Patch 61: exact clip segments and bounded typed recording'
+need "encoded source sampling uses high precision" \
+  "$F/impeller/entity/shaders/sample4/avio_sample4_layer_texture_fill.frag" 'uniform highp sampler2D texture_sampler'
+need "encoded source reconstructs stored byte codes" \
+  "$F/impeller/entity/shaders/sample4/avio_sample4_layer_texture_fill.frag" 'round\(textureLod'
+need "captured group native rounding fixture remains registered" \
+  "$F/impeller/golden_tests/BUILD.gn" 'avio_captured_backdrop_goldens_vk.cc'
+need "foreign callback baton follows native image source" \
+  "$F/shell/platform/embedder/embedder.cc" 'EmbedderExternalResourceCustody custody_'
+need "foreign view is released after native frame cache" \
+  "$F/shell/platform/embedder/embedder.cc" 'ReleaseCachedFrameData\(\)'
+need "selected render targets require proved completion fd" \
+  "$F/shell/platform/embedder/embedder_render_target_impeller.cc" 'requires_render_complete_sync_fd_'
+need "required missing completion fd settles a failed frame" \
+  "$F/shell/platform/embedder/embedder_external_view_embedder.cc" 'RequiresRenderCompleteSyncFD\(\)'
+need "actual native-cache callback regression remains registered" \
+  "$F/shell/platform/embedder/BUILD.gn" 'embedder_external_resource_custody_unittests.cc'
 
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"

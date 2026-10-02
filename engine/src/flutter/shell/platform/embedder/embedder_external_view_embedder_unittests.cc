@@ -164,7 +164,8 @@ TEST(EmbedderExternalViewEmbedderTest,
          FlutterPresentRenderTargetStatus, const FlutterBackingStore*,
          const FlutterBackingStorePresentInfo*,
          const std::vector<FlutterAvioCompositorMaterial>&, bool,
-         const std::vector<FlutterAvioWindowPreview>&, bool) { return true; });
+         const std::vector<FlutterAvioWindowPreview>&, bool,
+         const AvioFrameFacts&) { return true; });
   ExternalViewEmbedder& boundary = embedder;
   boundary.BeginFrame(nullptr, nullptr);
   boundary.SetFrameOpportunity(FrameOpportunityContext{
@@ -182,6 +183,128 @@ TEST(EmbedderExternalViewEmbedderTest,
   EXPECT_EQ(observed_view, 29);
   EXPECT_EQ(boundary.GetRootRenderTargetAcquisition(29),
             ExternalViewEmbedder::RootRenderTargetAcquisition::kWithdrawn);
+}
+
+TEST(EmbedderExternalViewEmbedderTest,
+     EmptyRootReportsOneExactFrameWithoutTargetAndTransitionsNormally) {
+  size_t acquisitions = 0, presentations = 0;
+  bool accept = true;
+  std::vector<FlutterPresentRenderTargetStatus> statuses;
+  EmbedderExternalViewEmbedder embedder(
+      kFlutterCompositorModeRootRenderTarget, true, false, nullptr,
+      [&](GrDirectContext*, const std::shared_ptr<impeller::AiksContext>&,
+          const FlutterBackingStoreConfig& config, FlutterFrameOpportunityId id,
+          FlutterEngineDisplayId display) {
+        ++acquisitions;
+        EXPECT_EQ(config.view_id, 29);
+        EXPECT_EQ(id, 74u);
+        EXPECT_EQ(display, 11u);
+        return EmbedderExternalViewEmbedder::RenderTargetAcquisition{
+            .status =
+                ExternalViewEmbedder::RootRenderTargetAcquisition::kWithdrawn,
+            .target = nullptr};
+      },
+      nullptr,
+      [&](FlutterViewId view, FlutterFrameOpportunityId id,
+          FlutterEngineDisplayId display,
+          FlutterPresentRenderTargetStatus status,
+          const FlutterBackingStore* target,
+          const FlutterBackingStorePresentInfo* damage,
+          const std::vector<FlutterAvioCompositorMaterial>& materials,
+          bool invalid_materials,
+          const std::vector<FlutterAvioWindowPreview>& previews,
+          bool invalid_previews, const AvioFrameFacts& facts) {
+        ++presentations;
+        statuses.push_back(status);
+        EXPECT_EQ(view, 29);
+        EXPECT_EQ(id, 73u);
+        EXPECT_EQ(display, 11u);
+        EXPECT_EQ(status, kFlutterPresentRenderTargetStatusEmptyContent);
+        EXPECT_EQ(target, nullptr);
+        EXPECT_EQ(damage, nullptr);
+        EXPECT_TRUE(materials.empty() && previews.empty());
+        EXPECT_FALSE(invalid_materials || invalid_previews);
+        EXPECT_EQ(facts.item_opacity, 0.25);
+        EXPECT_TRUE(facts.ground_authored);
+        return accept;
+      },
+      kFlutterAvioExtensionFeatureEmptyFrame |
+          kFlutterAvioExtensionFeatureItemEffects |
+          kFlutterAvioExtensionFeatureOutputGround);
+  ExternalViewEmbedder& boundary = embedder;
+  boundary.BeginFrame(nullptr, nullptr);
+  boundary.SetFrameOpportunity(
+      FrameOpportunityContext{.id = 73u, .display_id = 11, .target_ids = {29}});
+  boundary.PrepareFlutterView(DlISize(800, 600), 1.0);
+  SurfaceFrame::SubmitInfo info;
+  info.avio_frame_facts.item_effect_declaration_id = 1;
+  info.avio_frame_facts.item_opacity = 0.25;
+  info.avio_frame_facts.ground_authored = true;
+  ASSERT_TRUE(boundary.SubmitAvioEmptyFrame(29, info));
+  EXPECT_EQ(acquisitions, 0u);
+  EXPECT_EQ(presentations, 1u);
+  EXPECT_FALSE(boundary.SubmitAvioEmptyFrame(29, info));
+  EXPECT_EQ(presentations, 1u);
+  EXPECT_EQ(boundary.GetRootRenderTargetResult(29),
+            ExternalViewEmbedder::RootRenderTargetResult::kPresented);
+  // The next opportunity must use the ordinary typed acquisition path.
+  boundary.BeginFrame(nullptr, nullptr);
+  boundary.SetFrameOpportunity(
+      FrameOpportunityContext{.id = 74u, .display_id = 11, .target_ids = {29}});
+  boundary.PrepareFlutterView(DlISize(800, 600), 1.0);
+  boundary.AcquireRootRenderTarget(29, nullptr, nullptr);
+  EXPECT_EQ(acquisitions, 1u);
+  EXPECT_EQ(presentations, 1u);
+}
+
+TEST(EmbedderExternalViewEmbedderTest,
+     EmptyFrameRefusesProceduralSidecarsAndUnnegotiatedFactsBeforeAcquisition) {
+  size_t acquisitions = 0, presentations = 0;
+  EmbedderExternalViewEmbedder embedder(
+      kFlutterCompositorModeRootRenderTarget, true, true, nullptr,
+      [&](GrDirectContext*, const std::shared_ptr<impeller::AiksContext>&,
+          const FlutterBackingStoreConfig&, FlutterFrameOpportunityId,
+          FlutterEngineDisplayId) {
+        ++acquisitions;
+        return EmbedderExternalViewEmbedder::RenderTargetAcquisition{};
+      },
+      nullptr,
+      [&](FlutterViewId, FlutterFrameOpportunityId, FlutterEngineDisplayId,
+          FlutterPresentRenderTargetStatus status,
+          const FlutterBackingStore* target,
+          const FlutterBackingStorePresentInfo*,
+          const std::vector<FlutterAvioCompositorMaterial>&, bool,
+          const std::vector<FlutterAvioWindowPreview>&, bool,
+          const AvioFrameFacts& facts) {
+        ++presentations;
+        EXPECT_EQ(status, kFlutterPresentRenderTargetStatusInvalidFrameFacts);
+        EXPECT_EQ(target, nullptr);
+        EXPECT_FALSE(facts.HasMetadata());
+        return false;
+      },
+      kFlutterAvioExtensionFeatureEmptyFrame);
+  ExternalViewEmbedder& boundary = embedder;
+  for (size_t scenario = 0; scenario < 4; ++scenario) {
+    boundary.BeginFrame(nullptr, nullptr);
+    boundary.SetFrameOpportunity(FrameOpportunityContext{
+        .id = scenario + 1u, .display_id = 11, .target_ids = {29}});
+    boundary.PrepareFlutterView(DlISize(800, 600), 1.0);
+    SurfaceFrame::SubmitInfo info;
+    if (scenario == 0) {
+      info.avio_frame_facts.item_effect_declaration_id = 1;
+      info.avio_frame_facts.item_opacity = 0.5;
+    }
+    if (scenario == 1)
+      info.avio_compositor_materials.push_back(
+          MakeMaterial(1u, DlRect::MakeXYWH(0, 0, 10, 10)));
+    if (scenario == 2)
+      info.avio_window_previews_invalid = true;
+    if (scenario == 3)
+      info.avio_frame_facts.ready_content_revision = 9u;
+    EXPECT_FALSE(boundary.SubmitAvioEmptyFrame(29, info));
+  }
+  EXPECT_EQ(acquisitions, 0u);
+  EXPECT_EQ(presentations, 4u);
 }
 
 }  // namespace

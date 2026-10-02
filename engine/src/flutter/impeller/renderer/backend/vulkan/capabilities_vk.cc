@@ -9,6 +9,7 @@
 
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
+#include "impeller/renderer/backend/vulkan/formats_vk.h"
 #include "impeller/renderer/backend/vulkan/vk.h"
 #include "impeller/renderer/backend/vulkan/workarounds_vk.h"
 
@@ -517,6 +518,7 @@ CapabilitiesVK::GetEnabledDeviceFeatures(
     // `max_anisotropy` greater than 1 may only be created when this feature
     // is enabled.
     required.samplerAnisotropy = supported.samplerAnisotropy;
+    required.sampleRateShading = supported.sampleRateShading;
   }
   // VK_KHR_sampler_ycbcr_conversion features.
   if (IsExtensionInList(
@@ -755,6 +757,7 @@ bool CapabilitiesVK::SetPhysicalDevice(
     supports_texture_compression_bc_ = features.textureCompressionBC;
     supports_texture_compression_etc2_ = features.textureCompressionETC2;
     supports_texture_compression_astc_ = features.textureCompressionASTC_LDR;
+    native_sample_shading_enabled_ = features.sampleRateShading;
   }
 
   supports_texture_compression_astc_hdr_ =
@@ -899,6 +902,25 @@ bool CapabilitiesVK::SupportsAvioCoverageResources() const {
                                    vk::ImageUsageFlagBits::eSampled) &&
          supports_four_samples(vk::Format::eS8Uint,
                                vk::ImageUsageFlagBits::eDepthStencilAttachment);
+}
+
+bool CapabilitiesVK::SupportsAvioContinuousCoverageResources() const {
+  if (!native_sample_shading_enabled_ || !SupportsAvioCoverageResources()) {
+    return false;
+  }
+  vk::PhysicalDeviceImageFormatInfo2 info;
+  info.format = ToVKImageFormat(default_color_format_);
+  info.type = vk::ImageType::e2D;
+  info.tiling = vk::ImageTiling::eOptimal;
+  info.usage = vk::ImageUsageFlagBits::eColorAttachment |
+               vk::ImageUsageFlagBits::eSampled |
+               vk::ImageUsageFlagBits::eTransferSrc |
+               vk::ImageUsageFlagBits::eTransferDst;
+  const auto [result, properties] =
+      physical_device_.getImageFormatProperties2(info);
+  return result == vk::Result::eSuccess &&
+         !!(properties.imageFormatProperties.sampleCounts &
+            vk::SampleCountFlagBits::e4);
 }
 
 const vk::PhysicalDeviceProperties&

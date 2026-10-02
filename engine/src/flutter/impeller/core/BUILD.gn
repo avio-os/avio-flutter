@@ -6,7 +6,11 @@ import("//flutter/impeller/tools/impeller.gni")
 
 # Settings carries this pure contract even in builds without a GPU renderer.
 source_set("antialiasing_policy") {
-  sources = [ "antialiasing_policy.h" ]
+  sources = [
+    "antialiasing_policy.h",
+    "continuous_coverage.h",
+    "sample4_source_proof.h",
+  ]
   public_configs = [ "//flutter:config" ]
 }
 
@@ -68,6 +72,7 @@ impeller_component("allocator_unittests") {
   sources = [
     "allocator_unittests.cc",
     "buffer_view_unittests.cc",
+    "host_buffer_bounded_unittests.cc",
     "raw_ptr_unittests.cc",
     "sampler_descriptor_unittests.cc",
     "shader_types_unittests.cc",

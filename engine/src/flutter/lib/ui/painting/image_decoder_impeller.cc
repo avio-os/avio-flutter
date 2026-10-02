@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "flutter/lib/ui/painting/image_decoder_impeller.h"
+#include "impeller/renderer/render_resource_scope.h"
 
 #include <format>
 #include <memory>
@@ -456,6 +457,8 @@ ImageDecoderImpeller::UnsafeUploadTextureToPrivate(
     const std::shared_ptr<impeller::DeviceBuffer>& buffer,
     const ImageDecoderImpeller::ImageInfo& image_info,
     const std::optional<SkImageInfo>& resize_info) {
+  const impeller::AvioRasterAllocationCauseScope upload_operation(
+      impeller::AvioRasterAllocationCause::kImageUpload);
   impeller::TextureDescriptor texture_descriptor;
   texture_descriptor.storage_mode = impeller::StorageMode::kDevicePrivate;
   texture_descriptor.format = image_info.format;
@@ -613,6 +616,8 @@ std::pair<sk_sp<DlImage>, std::string>
 ImageDecoderImpeller::UploadTextureToStorage(
     const std::shared_ptr<impeller::Context>& context,
     std::shared_ptr<SkBitmap> bitmap) {
+  const impeller::AvioRasterAllocationCauseScope upload_operation(
+      impeller::AvioRasterAllocationCause::kImageUpload);
   TRACE_EVENT0("impeller", __FUNCTION__);
   if (!context) {
     return std::make_pair(nullptr, "No Impeller context is available");

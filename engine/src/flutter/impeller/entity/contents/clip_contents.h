@@ -5,8 +5,10 @@
 #ifndef FLUTTER_IMPELLER_ENTITY_CONTENTS_CLIP_CONTENTS_H_
 #define FLUTTER_IMPELLER_ENTITY_CONTENTS_CLIP_CONTENTS_H_
 
+#include <memory>
 #include <optional>
 #include <vector>
+#include "impeller/core/continuous_coverage.h"
 
 #include "impeller/entity/contents/contents.h"
 #include "impeller/entity/contents/coverage_mask_contents.h"
@@ -55,6 +57,9 @@ class ClipContents {
 
   bool HasCoverageQuad() const { return coverage_quad_.has_value(); }
 
+  void SetContinuousClip(
+      std::shared_ptr<const AvioContinuousClipExpression> expression);
+
   void SetClipOperation(Entity::ClipOperation clip_op);
 
   //----------------------------------------------------------------------------
@@ -76,6 +81,7 @@ class ClipContents {
  private:
   // Pre-tessellated clip geometry.
   GeometryResult clip_geometry_;
+  std::shared_ptr<const AvioContinuousClipExpression> continuous_clip_;
   std::optional<std::vector<CoverageMaskTile>> coverage_masks_;
   std::optional<CoverageConvexQuad4> coverage_quad_;
   // Coverage rect of the tessellated geometry.

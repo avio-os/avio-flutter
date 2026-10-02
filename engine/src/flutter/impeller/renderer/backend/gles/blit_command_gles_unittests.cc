@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <array>
 #include <initializer_list>
 #include <tuple>
 
@@ -524,6 +525,86 @@ TEST(BlitCommandGLESTest,
       .Times(1);
 
   EXPECT_TRUE(command.Encode(*reactor));
+}
+
+namespace {
+std::array<GLint, 8> last_blit;
+void CaptureBlit(GLint x0,
+                 GLint y0,
+                 GLint x1,
+                 GLint y1,
+                 GLint dx0,
+                 GLint dy0,
+                 GLint dx1,
+                 GLint dy1,
+                 GLbitfield mask,
+                 GLenum filter) {
+  last_blit = {x0, y0, x1, y1, dx0, dy0, dx1, dy1};
+  EXPECT_EQ(mask, GL_COLOR_BUFFER_BIT);
+  EXPECT_EQ(filter, GL_NEAREST);
+}
+}  // namespace
+
+TEST(BlitCommandGLESTest,
+     WrappedPrefixUsesExactBorrowedFBOAndLogicalOrientation) {
+  auto mock_impl = std::make_unique<::testing::NiceMock<MockGLESImpl>>();
+  auto& mock = *mock_impl;
+  auto mock_gl = MockGLES::Init(std::move(mock_impl));
+  auto table = std::make_unique<ProcTableGLES>(kMockResolverGLES);
+  table->BlitFramebuffer.function = CaptureBlit;
+  auto reactor = std::make_shared<ReactorGLES>(std::move(table));
+  auto worker = std::make_shared<MockWorker>();
+  reactor->AddWorker(worker);
+  TextureDescriptor descriptor;
+  descriptor.format = PixelFormat::kR8G8B8A8UNormInt;
+  descriptor.size = {10, 10};
+  descriptor.usage = TextureUsage::kRenderTarget;
+  auto source = TextureGLES::WrapFBO(reactor, descriptor, 81);
+  auto scratch = CreateTexture(reactor, descriptor.format);
+  EXPECT_CALL(mock, BindFramebuffer(GL_READ_FRAMEBUFFER, 81));
+  EXPECT_CALL(mock, GenFramebuffers(1, _)).WillOnce([](GLsizei, GLuint* fbo) {
+    *fbo = 99;
+  });
+  EXPECT_CALL(mock, CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER))
+      .WillOnce(Return(GL_FRAMEBUFFER_COMPLETE));
+  EXPECT_CALL(mock, DeleteFramebuffers(1, _))
+      .WillOnce([](GLsizei, const GLuint* fbo) {
+        EXPECT_EQ(*fbo, 99u);  // host FBO81 remains borrowed
+      });
+  BlitCopyTextureToTextureCommandGLES command;
+  command.source = source;
+  command.destination = scratch;
+  command.source_region = IRect::MakeLTRB(1, 2, 4, 5);
+  command.destination_origin = {3, 4};
+  ASSERT_TRUE(command.Encode(*reactor));
+  EXPECT_EQ(last_blit, (std::array<GLint, 8>{1, 8, 4, 5, 3, 4, 6, 7}));
+}
+
+TEST(BlitCommandGLESTest, IncompleteScratchNeverDeletesBorrowedHostFBO) {
+  auto mock_impl = std::make_unique<::testing::NiceMock<MockGLESImpl>>();
+  auto& mock = *mock_impl;
+  auto mock_gl = MockGLES::Init(std::move(mock_impl));
+  auto reactor = std::make_shared<TestReactorGLES>();
+  auto worker = std::make_shared<MockWorker>();
+  reactor->AddWorker(worker);
+  TextureDescriptor descriptor;
+  descriptor.format = PixelFormat::kR8G8B8A8UNormInt;
+  descriptor.size = {10, 10};
+  descriptor.usage = TextureUsage::kRenderTarget;
+  auto source = TextureGLES::WrapFBO(reactor, descriptor, 83);
+  auto scratch = CreateTexture(reactor, descriptor.format);
+  EXPECT_CALL(mock, GenFramebuffers(1, _)).WillOnce([](GLsizei, GLuint* fbo) {
+    *fbo = 99;
+  });
+  EXPECT_CALL(mock, CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER))
+      .WillOnce(Return(GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT));
+  EXPECT_CALL(mock, DeleteFramebuffers(1, _))
+      .WillOnce([](GLsizei, const GLuint* fbo) { EXPECT_EQ(*fbo, 99u); });
+  BlitCopyTextureToTextureCommandGLES command;
+  command.source = source;
+  command.destination = scratch;
+  command.source_region = IRect::MakeSize(descriptor.size);
+  EXPECT_FALSE(command.Encode(*reactor));
 }
 
 }  // namespace testing

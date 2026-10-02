@@ -9,6 +9,7 @@
 #include "impeller/core/formats.h"
 #include "impeller/core/vertex_buffer.h"
 #include "impeller/entity/contents/clip_contents.h"
+#include "impeller/entity/contents/clip_operation_scope.h"
 #include "impeller/entity/contents/content_context.h"
 #include "impeller/entity/contents/pipelines.h"
 #include "impeller/entity/entity.h"
@@ -48,6 +49,13 @@ void ClipContents::SetCoverageQuad(CoverageConvexQuad4 quad) {
   coverage_quad_ = std::move(quad);
 }
 
+void ClipContents::SetContinuousClip(
+    std::shared_ptr<const AvioContinuousClipExpression> expression) {
+  continuous_clip_ = std::move(expression);
+  coverage_masks_.reset();
+  coverage_quad_.reset();
+}
+
 void ClipContents::SetClipOperation(Entity::ClipOperation clip_op) {
   clip_op_ = clip_op;
 }
@@ -80,6 +88,11 @@ ClipCoverage ClipContents::GetClipCoverage(
 bool ClipContents::Render(const ContentContext& renderer,
                           RenderPass& pass,
                           uint32_t clip_depth) const {
+  AvioClipOperationScope clip_operation(pass);
+  if (continuous_clip_) {
+    pass.SetAvioContinuousClip(continuous_clip_);
+    return true;
+  }
   if (coverage_quad_) {
     return CoverageMaskContents::RenderQuadClip(renderer, pass, *coverage_quad_,
                                                 clip_depth, clip_op_);

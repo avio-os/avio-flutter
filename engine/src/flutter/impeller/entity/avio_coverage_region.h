@@ -12,10 +12,14 @@
 
 #include "impeller/core/allocator.h"
 #include "impeller/entity/avio_region_packing.h"
+#include "impeller/renderer/render_resource_report.h"
 #include "impeller/renderer/render_resource_usage.h"
 #include "impeller/renderer/render_target.h"
 
 namespace impeller {
+
+template <class T>
+struct AvioCoverageLeaseAllocator;
 
 // Negotiation supplies budgets before creation; no frame grows a warm region.
 struct AvioCoverageRegionConfig {
@@ -32,6 +36,17 @@ struct AvioCoverageRegionConfig {
   PixelFormat colour_depth_stencil_format = PixelFormat::kD32FloatS8UInt;
   size_t coverage_max_bytes = 8u * 1024u * 1024u;
   size_t layer_max_bytes = 4u * 1024u * 1024u;
+  // Vulkan caches sampled native masks. GLES replays original winding/clip
+  // geometry in the native colour tiles, without a sampler2DMS mask cache.
+  bool cache_native_masks = true;
+  // Vulkan proves actual allocation requirements. GLES has no portable
+  // physical-byte query; its opt-in cap proves descriptor bytes only and
+  // leaves actual-byte fields explicitly unsupported in the report.
+  bool require_exact_allocated_bytes = true;
+  // Optional continuous coverage reads the exact native sample prefix from a
+  // distinct fixed image. It is part of this coverage bank, never a frame
+  // allocation or a resolved single-sample substitute.
+  bool continuous_destination_prefix = false;
 };
 
 struct AvioCoverageRegionUsage {
@@ -55,6 +70,11 @@ class AvioCoverageRegion final {
   struct State;
 
  public:
+  // Each coverage packer and the distinct-layer bank has at most 512 claims.
+  // Expired weak references retain their control slot until they are dropped;
+  // bounded exhaustion cannot resurrect an old allocation's weak identity.
+  static constexpr size_t kMaximumLeaseClaims =
+      3u * AvioRegionPacking::kMaximumAllocations;
   enum class Kind { kMask, kColour, kLayer };
   enum class Status {
     kSuccess,
@@ -84,11 +104,14 @@ class AvioCoverageRegion final {
 
    private:
     friend class AvioCoverageRegion;
+    template <class T>
+    friend struct AvioCoverageLeaseAllocator;
     Lease(std::shared_ptr<State> state,
           Kind kind,
           uint64_t frame,
           AvioRegionPacking::Allocation allocation,
-          bool overflow = false);
+          bool overflow = false,
+          bool clip_mask_scratch = false);
     std::weak_ptr<State> state_;
     Kind kind_;
     uint64_t frame_;
@@ -97,6 +120,7 @@ class AvioCoverageRegion final {
     IRect content_;
     bool overflow_ = false;
     bool released_ = false;
+    bool clip_mask_scratch_ = false;
   };
 
   struct Acquisition {
@@ -125,6 +149,11 @@ class AvioCoverageRegion final {
   // cache, snapshot or logical clip reader owns them across raster frames.
   void EndRasterFrame();
   Acquisition AcquireCoverage(Kind kind, ISize size);
+  // Exclusive temporary native mask, released after its consumer is encoded.
+  // The entire physical scratch is cleared before replay; only the requested
+  // origin-zero content is sampled. No persistent recipe/cache may overwrite
+  // it while an older logical consumer retains the exact claim.
+  Acquisition AcquireClipMaskScratch(ISize size);
   // A distinct warm 1x/no-D/S image. Incompatible/mip/oversized requests are
   // explicitly counted frame-local 1x overflow, never full-size MSAA fallback.
   Acquisition AcquireLayer(ISize size,
@@ -142,11 +171,27 @@ class AvioCoverageRegion final {
   // must finish/seed/render/composite each tile in queue order before reuse.
   RenderTarget GetColourIslandTarget() const;
   RenderTarget GetCoverageAtlasTarget() const;
+  // Fixed native R8 sample lanes for deep clip replay. Its D/S attachments
+  // borrow the colour island, so the owner must finish colour work before
+  // clearing/replaying this full target, then encode its consumer before
+  // releasing the exclusive scratch lease. It has no persistent readers.
+  // Empty when the backend does not cache sampled native masks.
+  RenderTarget GetClipMaskScratchTarget() const;
+  // GLES FBOs are not shader textures. This distinct warm 1x image receives
+  // the exact parent prefix before native tile seeding; never a frame
+  // allocation.
+  std::shared_ptr<Texture> GetColourSeedTexture() const;
+  std::shared_ptr<Texture> GetContinuousDestinationPrefix() const;
+  std::array<RenderTarget, 5> GetWarmLayerTargets() const;
   ISize GetColourIslandSize() const;
   ISize GetCoverageAtlasSize() const;
   ISize GetCoverageTileSize(Kind kind) const;
   const AvioCoverageRegionConfig& GetConfig() const;
   AvioCoverageRegionUsage ReportUsage(bool start_new_interval);
+  bool HasExactAllocatedBytes() const;
+  bool CachesNativeMasks() const;
+  AvioRenderResourceReport GetDescriptorResourceReport(
+      bool start_new_interval = false) const;
   // All-hidden trims preserve both context-owned warm regions.
   void TrimIdleResourceCaches() {}
 

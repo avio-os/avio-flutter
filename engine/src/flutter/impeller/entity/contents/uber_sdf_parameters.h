@@ -11,6 +11,7 @@
 
 #include "impeller/core/texture.h"
 #include "impeller/entity/entity.h"
+#include "impeller/geometry/arc.h"
 #include "impeller/geometry/color.h"
 #include "impeller/geometry/point.h"
 #include "impeller/geometry/rect.h"
@@ -34,6 +35,8 @@ struct UberSDFParameters {
     kOval,
     kRoundedRect,
     kRoundedSuperellipseSymmetric,
+    kBorderedRoundedRect,
+    kArc,
   };
 
   /// A gradient color source shaded inside UberSDF.
@@ -102,6 +105,17 @@ struct UberSDFParameters {
       const RoundSuperellipseParam& round_superellipse_params,
       std::optional<StrokeParameters> stroke);
 
+  static UberSDFParameters MakeBorderedRoundedRect(Color color,
+                                                   const RoundRect& outer,
+                                                   const RoundRect& inner);
+  static UberSDFParameters MakeArc(Color color,
+                                   const Arc& arc,
+                                   std::optional<StrokeParameters> stroke);
+
+  // Local-space raster padding for a full physical pixel fringe and the
+  // actual stroke/cap/join extent. Shared by snapshots and the source quad.
+  Size GetRasterPadding(const Matrix& transform) const;
+
   /// The type of shape to render.
   Type type;
 
@@ -151,6 +165,14 @@ struct UberSDFParameters {
   /// Rounding radii for standard rounded rects and corner radii for circular
   /// caps of superellipses for top and right octants.
   Vector4 radii;
+  // The two closed contours form one distance expression (outer AND !inner).
+  Point inner_center;
+  Point inner_size;
+  Vector4 inner_radii;
+  Vector4 bordered_radii_y;
+  Vector4 inner_radii_y;
+  // Start/sweep radians, include-center flag, native Cap ordinal.
+  Vector4 arc;
 };
 
 }  // namespace impeller

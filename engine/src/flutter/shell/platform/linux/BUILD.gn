@@ -187,6 +187,7 @@ source_set("flutter_linux_sources") {
   ]
 
   deps = [
+    "//flutter/impeller/renderer/backend/gles:native_coverage_probe",
     "$dart_src/runtime:dart_api",
     "//flutter/fml",
     "//flutter/shell/platform/common:common_cpp_enums",

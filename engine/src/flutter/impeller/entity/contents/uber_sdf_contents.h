@@ -34,6 +34,10 @@ class UberSDFContents : public ColorSourceContents {
   Color GetColor() const;
 
   void SetCoverageMode(flutter::DlCoverageMode mode);
+  void SetDeferGeometryCoverage(bool defer) {
+    defer_geometry_coverage_ = defer;
+  }
+
   void SetDeferCoverageTransform(bool defer) {
     defer_coverage_transform_ = defer;
   }
@@ -60,6 +64,7 @@ class UberSDFContents : public ColorSourceContents {
                   RenderPass& pass) const;
 
   bool defer_coverage_transform_ = false;
+  bool defer_geometry_coverage_ = false;
   UberSDFParameters params_;
   std::unique_ptr<Geometry> geometry_;
   flutter::DlCoverageMode coverage_mode_ =

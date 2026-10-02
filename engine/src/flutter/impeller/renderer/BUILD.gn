@@ -40,9 +40,12 @@ if (impeller_enable_compute) {
 
 impeller_component("renderer") {
   sources = [
+    "allocated_buffer_ledger.h",
     "allocated_image_ledger.cc",
     "allocated_image_ledger.h",
     "blit_command.cc",
+    "continuous_coverage_pipeline.cc",
+    "continuous_coverage_pipeline.h",
     "blit_command.h",
     "blit_pass.cc",
     "blit_pass.h",
@@ -52,6 +55,8 @@ impeller_component("renderer") {
     "command.h",
     "command_buffer.cc",
     "command_buffer.h",
+    "bounded_resource_owners.h",
+    "native_teardown_status.h",
     "command_queue.cc",
     "command_queue.h",
     "compute_pass.cc",
@@ -73,6 +78,7 @@ impeller_component("renderer") {
     "pipeline_library.cc",
     "pipeline_library.h",
     "pool.h",
+    "opaque_coverage.h",
     "render_pass.cc",
     "render_pass.h",
     "render_target.cc",
@@ -120,14 +126,19 @@ impeller_component("renderer") {
 template("renderer_unittests_component") {
   target_name = invoker.target_name
   predefined_sources = [
+    "allocated_buffer_ledger_unittests.cc",
     "allocated_image_ledger_unittests.cc",
     "blit_pass_unittests.cc",
+    "bounded_resource_owners_unittests.cc",
     "capabilities_unittests.cc",
+    "continuous_coverage_pipeline_unittests.cc",
     "device_buffer_unittests.cc",
     "pipeline_compile_queue_unittests.cc",
     "pipeline_descriptor_unittests.cc",
+    "pipeline_resource_ledger_unittests.cc",
     "pipeline_library_unittests.cc",
     "pool_unittests.cc",
+    "opaque_coverage_unittests.cc",
     "snapshot_unittests.cc",
     "renderer_golden_unittests.cc",
     "renderer_unittests.cc",

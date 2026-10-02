@@ -19,40 +19,45 @@ namespace impeller {
 
 BlitEncodeGLES::~BlitEncodeGLES() = default;
 
-static void DeleteFBO(const ProcTableGLES& gl, GLuint fbo, GLenum type) {
-  if (fbo != GL_NONE) {
-    gl.BindFramebuffer(type, GL_NONE);
-    gl.DeleteFramebuffers(1u, &fbo);
-  }
+struct FramebufferBinding {
+  GLuint name = GL_NONE;
+  bool owned = false;
 };
 
-static std::optional<GLuint> ConfigureFBO(
+static void DeleteFBO(const ProcTableGLES& gl,
+                      FramebufferBinding fbo,
+                      GLenum type) {
+  if (fbo.owned && fbo.name != GL_NONE) {
+    gl.BindFramebuffer(type, GL_NONE);
+    gl.DeleteFramebuffers(1u, &fbo.name);
+  }
+}
+
+static std::optional<FramebufferBinding> ConfigureFBO(
     const ProcTableGLES& gl,
     const std::shared_ptr<Texture>& texture,
     GLenum fbo_type) {
-  auto handle = TextureGLES::Cast(texture.get())->GetGLHandle();
-  if (!handle.has_value()) {
+  const auto& source = TextureGLES::Cast(*texture);
+  // A wrapped FBO has no owned sampleable texture handle. Its exact nonzero
+  // host name is borrowed, and cleanup must never delete it.
+  if (auto fbo = source.GetFBO()) {
+    gl.BindFramebuffer(fbo_type, *fbo);
+    return FramebufferBinding{*fbo, false};
+  }
+  if (!source.GetGLHandle())
     return std::nullopt;
-  }
-
-  if (TextureGLES::Cast(*texture).IsWrapped()) {
-    // The texture is attached to the default FBO, so there's no need to
-    // create/configure one.
-    gl.BindFramebuffer(fbo_type, 0);
-    return 0;
-  }
-
-  GLuint fbo;
-  gl.GenFramebuffers(1u, &fbo);
-  gl.BindFramebuffer(fbo_type, fbo);
-
+  GLuint name = 0;
+  gl.GenFramebuffers(1u, &name);
+  FramebufferBinding fbo{name, true};
+  if (name == 0)
+    return std::nullopt;
+  gl.BindFramebuffer(fbo_type, name);
   if (!TextureGLES::Cast(*texture).SetAsFramebufferAttachment(
           fbo_type, TextureGLES::AttachmentType::kColor0)) {
     VALIDATION_LOG << "Could not attach texture to framebuffer.";
     DeleteFBO(gl, fbo, fbo_type);
     return std::nullopt;
   }
-
   GLenum status = gl.CheckFramebufferStatus(fbo_type);
   if (status != GL_FRAMEBUFFER_COMPLETE) {
     VALIDATION_LOG << "Could not create a complete framebuffer: "
@@ -60,9 +65,20 @@ static std::optional<GLuint> ConfigureFBO(
     DeleteFBO(gl, fbo, fbo_type);
     return std::nullopt;
   }
-
   return fbo;
-};
+}
+
+// The renderer flips projection/scissor for owned offscreen attachments, but
+// host FBOs retain GL's bottom-up convention. Blit endpoints express logical
+// top/bottom independently on each side, including the required reversal.
+static std::pair<GLint, GLint> LogicalY(const Texture& texture,
+                                        const IRect& rect) {
+  if (TextureGLES::Cast(texture).GetFBO().has_value()) {
+    return {texture.GetSize().height - rect.GetTop(),
+            texture.GetSize().height - rect.GetBottom()};
+  }
+  return {rect.GetTop(), rect.GetBottom()};
+}
 
 BlitCopyTextureToTextureCommandGLES::~BlitCopyTextureToTextureCommandGLES() =
     default;
@@ -83,8 +99,8 @@ bool BlitCopyTextureToTextureCommandGLES::Encode(
     return false;
   }
 
-  GLuint read_fbo = GL_NONE;
-  GLuint draw_fbo = GL_NONE;
+  FramebufferBinding read_fbo;
+  FramebufferBinding draw_fbo;
   fml::ScopedCleanupClosure delete_fbos([&gl, &read_fbo, &draw_fbo]() {
     DeleteFBO(gl, read_fbo, GL_READ_FRAMEBUFFER);
     DeleteFBO(gl, draw_fbo, GL_DRAW_FRAMEBUFFER);
@@ -110,22 +126,14 @@ bool BlitCopyTextureToTextureCommandGLES::Encode(
   gl.Disable(GL_DEPTH_TEST);
   gl.Disable(GL_STENCIL_TEST);
 
-  const auto destination_right =
-      destination_origin.x + source_region.GetWidth();
-  const auto destination_bottom =
-      destination_origin.y + source_region.GetHeight();
-
-  gl.BlitFramebuffer(source_region.GetX(),       // srcX0
-                     source_region.GetY(),       // srcY0
-                     source_region.GetRight(),   // srcX1
-                     source_region.GetBottom(),  // srcY1
-                     destination_origin.x,       // dstX0
-                     destination_origin.y,       // dstY0
-                     destination_right,          // dstX1
-                     destination_bottom,         // dstY1
-                     GL_COLOR_BUFFER_BIT,        // mask
-                     GL_NEAREST                  // filter
-  );
+  auto dest_rect =
+      IRect::MakeOriginSize(destination_origin, source_region.GetSize());
+  const auto source_y = LogicalY(*source, source_region);
+  const auto dest_y = LogicalY(*destination, dest_rect);
+  gl.BlitFramebuffer(source_region.GetLeft(), source_y.first,
+                     source_region.GetRight(), source_y.second,
+                     dest_rect.GetLeft(), dest_y.first, dest_rect.GetRight(),
+                     dest_y.second, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
   return true;
 };
@@ -303,7 +311,7 @@ bool BlitCopyTextureToBufferCommandGLES::Encode(
     return false;
   }
 
-  GLuint read_fbo = GL_NONE;
+  FramebufferBinding read_fbo;
   fml::ScopedCleanupClosure delete_fbos(
       [&gl, &read_fbo]() { DeleteFBO(gl, read_fbo, GL_FRAMEBUFFER); });
 
@@ -364,8 +372,8 @@ bool BlitResizeTextureCommandGLES::Encode(const ReactorGLES& reactor) const {
     return false;
   }
 
-  GLuint read_fbo = GL_NONE;
-  GLuint draw_fbo = GL_NONE;
+  FramebufferBinding read_fbo;
+  FramebufferBinding draw_fbo;
   fml::ScopedCleanupClosure delete_fbos([&gl, &read_fbo, &draw_fbo]() {
     DeleteFBO(gl, read_fbo, GL_READ_FRAMEBUFFER);
     DeleteFBO(gl, draw_fbo, GL_DRAW_FRAMEBUFFER);
@@ -394,17 +402,13 @@ bool BlitResizeTextureCommandGLES::Encode(const ReactorGLES& reactor) const {
   const IRect source_region = IRect::MakeSize(source->GetSize());
   const IRect destination_region = IRect::MakeSize(destination->GetSize());
 
-  gl.BlitFramebuffer(source_region.GetX(),            // srcX0
-                     source_region.GetY(),            // srcY0
-                     source_region.GetWidth(),        // srcX1
-                     source_region.GetHeight(),       // srcY1
-                     destination_region.GetX(),       // dstX0
-                     destination_region.GetY(),       // dstY0
-                     destination_region.GetWidth(),   // dstX1
-                     destination_region.GetHeight(),  // dstY1
-                     GL_COLOR_BUFFER_BIT,             // mask
-                     GL_LINEAR                        // filter
-  );
+  const auto source_y = LogicalY(*source, source_region);
+  const auto dest_y = LogicalY(*destination, destination_region);
+  gl.BlitFramebuffer(source_region.GetLeft(), source_y.first,
+                     source_region.GetRight(), source_y.second,
+                     destination_region.GetLeft(), dest_y.first,
+                     destination_region.GetRight(), dest_y.second,
+                     GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
   return true;
 }

@@ -39,6 +39,19 @@ Rect Snapshot::GetTextureRect() const {
                                        : Rect());
 }
 
+std::optional<Rect> Snapshot::GetCapturedOpaqueRect() const {
+  if (!IsImmutableCapturedBackdrop() || opacity != 1.f ||
+      !captured_opaque_texels || !captured_opaque_texels->IsFinite() ||
+      !GetCoverage()) {
+    return std::nullopt;
+  }
+  return captured_opaque_texels->Intersection(GetTextureRect());
+}
+
+bool Snapshot::IsImmutableCapturedBackdrop() const {
+  return is_immutable_captured_backdrop && resource_owner && GetCoverage();
+}
+
 std::optional<Rect> Snapshot::GetCoverage() const {
   if (!texture) {
     return std::nullopt;

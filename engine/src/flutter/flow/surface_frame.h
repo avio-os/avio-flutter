@@ -15,6 +15,7 @@
 #include "flutter/display_list/geometry/dl_region.h"
 #include "flutter/display_list/skia/dl_sk_canvas.h"
 #include "flutter/flow/avio_compositor_material.h"
+#include "flutter/flow/avio_frame_facts.h"
 #include "flutter/flow/avio_window_preview.h"
 #include "flutter/fml/macros.h"
 #include "flutter/fml/time/time_point.h"
@@ -136,6 +137,7 @@ class SurfaceFrame {
     bool avio_compositor_materials_invalid = false;
     std::vector<AvioWindowPreview> avio_window_previews;
     bool avio_window_previews_invalid = false;
+    AvioFrameFacts avio_frame_facts;
   };
 
   bool Encode();

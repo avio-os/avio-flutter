@@ -27,11 +27,7 @@ ConcurrentMessageLoop::ConcurrentMessageLoop(size_t worker_count)
 }
 
 ConcurrentMessageLoop::~ConcurrentMessageLoop() {
-  Terminate();
-  for (auto& worker : workers_) {
-    FML_DCHECK(worker.joinable());
-    worker.join();
-  }
+  FML_CHECK(TerminateAndJoin());
 }
 
 size_t ConcurrentMessageLoop::GetWorkerCount() const {
@@ -120,6 +116,24 @@ void ConcurrentMessageLoop::Terminate() {
   std::scoped_lock lock(tasks_mutex_);
   shutdown_ = true;
   tasks_condition_.notify_all();
+}
+
+bool ConcurrentMessageLoop::TerminateAndJoin() {
+  if (joined_.load(std::memory_order_acquire)) {
+    return true;
+  }
+  Terminate();
+  if (RunsTasksOnCurrentThread()) {
+    return false;
+  }
+  std::scoped_lock lock(join_mutex_);
+  for (auto& worker : workers_) {
+    if (worker.joinable()) {
+      worker.join();
+    }
+  }
+  joined_.store(true, std::memory_order_release);
+  return true;
 }
 
 void ConcurrentMessageLoop::PostTaskToAllWorkers(const fml::closure& task) {

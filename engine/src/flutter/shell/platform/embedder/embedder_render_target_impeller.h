@@ -37,7 +37,8 @@ class EmbedderRenderTargetImpeller final : public EmbedderRenderTarget {
       fml::closure framebuffer_destruction_callback,
       TakeRenderCompleteSyncFDCallback take_render_complete_sync_fd_callback =
           {},
-      bool supports_partial_msaa = false);
+      bool supports_partial_msaa = false,
+      bool requires_render_complete_sync_fd = false);
 
   // |EmbedderRenderTarget|
   ~EmbedderRenderTargetImpeller() override;
@@ -56,6 +57,7 @@ class EmbedderRenderTargetImpeller final : public EmbedderRenderTarget {
 
   // |EmbedderRenderTarget|
   fml::UniqueFD TakeRenderCompleteSyncFD() override;
+  bool RequiresRenderCompleteSyncFD() const override;
 
   bool RasterReplacesWholeTarget() const override;
 
@@ -65,6 +67,7 @@ class EmbedderRenderTargetImpeller final : public EmbedderRenderTarget {
   mutable RenderTargetFactory create_target_;
   DlISize target_size_;
   bool supports_partial_msaa_ = false;
+  bool requires_render_complete_sync_fd_ = false;
   fml::closure framebuffer_destruction_callback_;
   TakeRenderCompleteSyncFDCallback take_render_complete_sync_fd_callback_;
 

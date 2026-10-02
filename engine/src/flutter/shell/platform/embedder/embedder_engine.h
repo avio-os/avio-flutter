@@ -9,6 +9,7 @@
 #include <memory>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "flutter/fml/macros.h"
@@ -17,6 +18,7 @@
 #include "flutter/shell/platform/embedder/embedder.h"
 #include "flutter/shell/platform/embedder/embedder_external_texture_resolver.h"
 #include "flutter/shell/platform/embedder/embedder_thread_host.h"
+#include "impeller/renderer/native_teardown_status.h"  // nogncheck
 
 #ifdef __linux__
 #include "flutter/shell/platform/embedder/dmabuf_texture_mailbox.h"
@@ -48,6 +50,20 @@ class EmbedderEngine {
   bool CollectShell();
 
   void CollectThreadHost();
+
+  // Retain exact startup custody even before Shell launch or after a failed
+  // launch. Taking it transfers the cold proof obligation to Deinitialize.
+  void SetNativeTeardownContext(std::shared_ptr<impeller::Context> context) {
+    native_teardown_context_ = std::move(context);
+  }
+
+  std::shared_ptr<impeller::Context> TakeNativeTeardownContext() {
+    return std::exchange(native_teardown_context_, nullptr);
+  }
+
+  bool RecordNativeTeardownProof(bool safe) {
+    return native_teardown_status_.RecordProof(safe);
+  }
 
   const TaskRunners& GetTaskRunners() const;
 
@@ -153,6 +169,8 @@ class EmbedderEngine {
 #endif
 
  private:
+  impeller::NativeTeardownStatus native_teardown_status_;
+  std::shared_ptr<impeller::Context> native_teardown_context_;
   std::unique_ptr<EmbedderThreadHost> thread_host_;
   TaskRunners task_runners_;
   RunConfiguration run_configuration_;

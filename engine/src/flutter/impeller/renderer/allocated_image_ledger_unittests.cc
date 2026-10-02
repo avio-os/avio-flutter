@@ -79,10 +79,15 @@ TEST(AllocatedImageLedgerTest,
   EXPECT_EQ(ledger->Report(true).raster_thread_allocations, 0u);
   {
     AvioRasterFrameScope frame;
-    auto snapshot = ledger->Register(AvioRenderResourceKind::kLayerRegion, key,
-                                     4u, 8u, IsAvioRasterFrameActive());
+    auto layer = ledger->Register(AvioRenderResourceKind::kLayerRegion, key, 4u,
+                                  8u, IsAvioRasterFrameActive(),
+                                  GetAvioRasterAllocationCause());
+    auto snapshot = ledger->Register(AvioRenderResourceKind::kImageTextures,
+                                     key, 4u, 8u, IsAvioRasterFrameActive(),
+                                     AvioRasterAllocationCause::kSnapshot);
     auto glyph = ledger->Register(AvioRenderResourceKind::kGlyphAtlases, key,
-                                  4u, 8u, IsAvioRasterFrameActive());
+                                  4u, 8u, IsAvioRasterFrameActive(),
+                                  AvioRasterAllocationCause::kGlyphAtlasGrowth);
     std::thread io([&] {
       EXPECT_FALSE(IsAvioRasterFrameActive());
       auto image = ledger->Register(AvioRenderResourceKind::kImageTextures, key,
@@ -90,14 +95,85 @@ TEST(AllocatedImageLedgerTest,
     });
     io.join();
     auto report = ledger->Report(true);
-    EXPECT_EQ(report.raster_thread_allocations, 2u);
+    EXPECT_EQ(report.raster_thread_allocations, 1u);
     EXPECT_EQ(report.snapshot_allocations, 1u);
-    EXPECT_FALSE(report.counters_supported & kAvioCounterGlyphAtlasGrowths);
+    EXPECT_EQ(report.glyph_atlas_growths, 1u);
+    EXPECT_TRUE(report.counters_supported & kAvioCounterGlyphAtlasGrowths);
     EXPECT_TRUE(report.counters_supported & kAvioCounterImageUploads);
     EXPECT_EQ(report.image_uploads, 0u);
-    EXPECT_EQ(ledger->Report(false).raster_thread_allocations, 0u);
+    auto next = ledger->Report(false);
+    EXPECT_EQ(next.raster_thread_allocations, 0u);
+    EXPECT_EQ(next.snapshot_allocations, 0u);
+    EXPECT_EQ(next.glyph_atlas_growths, 0u);
+    // Expected work is excluded from the defect counter, never from census.
+    EXPECT_EQ(Usage(next, AvioRenderResourceKind::kGlyphAtlases).real_bytes,
+              8u);
   }
   EXPECT_FALSE(IsAvioRasterFrameActive());
+}
+
+TEST(AllocatedImageLedgerTest, CausalExclusionsDoNotGuessFromPhysicalKind) {
+  auto ledger = std::make_shared<AllocatedImageLedger>();
+  AvioRasterFrameScope frame;
+  auto ordinary =
+      ledger->Register(AvioRenderResourceKind::kImageTextures, {}, 4u, 8u, true,
+                       GetAvioRasterAllocationCause());
+  {
+    AvioRasterAllocationCauseScope upload(
+        AvioRasterAllocationCause::kImageUpload);
+    auto decoded =
+        ledger->Register(AvioRenderResourceKind::kImageTextures, {}, 4u, 8u,
+                         true, GetAvioRasterAllocationCause());
+    auto report = ledger->Report(false);
+    EXPECT_EQ(report.raster_thread_allocations, 1u);
+    EXPECT_EQ(Usage(report, AvioRenderResourceKind::kImageTextures).entries,
+              2u);
+    EXPECT_EQ(Usage(report, AvioRenderResourceKind::kImageTextures).real_bytes,
+              16u);
+    EXPECT_EQ(report.image_uploads, 0u);  // not an encoded upload yet
+    decoded.RecordImageUpload(true);
+    EXPECT_EQ(ledger->Report(false).image_uploads, 1u);
+  }
+  EXPECT_EQ(GetAvioRasterAllocationCause(),
+            AvioRasterAllocationCause::kFrameWork);
+  // A buffer/scratch created by the glyph operation is excluded too, but
+  // cannot falsely certify that a native atlas grew.
+  auto scratch =
+      ledger->Register(AvioRenderResourceKind::kLayerRegion, {}, 4u, 8u, true,
+                       AvioRasterAllocationCause::kGlyphAtlasGrowth);
+  EXPECT_EQ(ledger->Report(false).glyph_atlas_growths, 0u);
+}
+
+TEST(AllocatedImageLedgerTest, NestedOperationsPreserveSnapshotCauseAndGrowth) {
+  auto ledger = std::make_shared<AllocatedImageLedger>();
+  AvioRasterFrameScope frame;
+  {
+    AvioRasterAllocationCauseScope snapshot(
+        AvioRasterAllocationCause::kSnapshot);
+    {
+      AvioRasterAllocationCauseScope glyph(
+          AvioRasterAllocationCause::kGlyphAtlasGrowth);
+      EXPECT_EQ(GetAvioRasterAllocationCause(),
+                AvioRasterAllocationCause::kSnapshot);
+      auto atlas =
+          ledger->Register(AvioRenderResourceKind::kGlyphAtlases, {}, 4u, 8u,
+                           true, GetAvioRasterAllocationCause());
+      const auto report = ledger->Report(false);
+      EXPECT_EQ(report.raster_thread_allocations, 0u);
+      EXPECT_EQ(report.snapshot_allocations, 1u);
+      EXPECT_EQ(report.glyph_atlas_growths, 1u);
+      {
+        AvioRasterAllocationCauseScope nested(
+            AvioRasterAllocationCause::kFrameWork);
+        EXPECT_EQ(GetAvioRasterAllocationCause(),
+                  AvioRasterAllocationCause::kSnapshot);
+      }
+    }
+    EXPECT_EQ(GetAvioRasterAllocationCause(),
+              AvioRasterAllocationCause::kSnapshot);
+  }
+  EXPECT_EQ(GetAvioRasterAllocationCause(),
+            AvioRasterAllocationCause::kFrameWork);
 }
 
 TEST(AllocatedImageLedgerTest, NestedScopesRestoreAndNeverGuessFromLabels) {
@@ -164,6 +240,26 @@ TEST(AllocatedImageLedgerTest, ConcurrentIntervalsDoNotLoseActualCreations) {
   EXPECT_EQ(Usage(ledger->Report(false), AvioRenderResourceKind::kImageTextures)
                 .entries,
             0u);
+}
+
+TEST(AllocatedImageLedgerTest,
+     PhysicalDescriptorMultiplicityIsAvailableWithoutLeaseInference) {
+  auto ledger = std::make_shared<AllocatedImageLedger>();
+  auto image = ledger->Register(AvioRenderResourceKind::kImageTextures, {}, 4u,
+                                8u, false);
+  const auto report = ledger->Report(false);
+  ASSERT_EQ(report.entries_count, 1u);
+  const auto& entry = report.entries[0];
+  EXPECT_EQ(entry.fields_supported,
+            kAvioResourceFieldCounts | kAvioResourceFieldDescriptorBytes |
+                kAvioResourceFieldActualAllocatedBytes |
+                kAvioResourceFieldDescriptorMultiplicity);
+  EXPECT_FALSE(entry.fields_supported & kAvioResourceFieldLeases);
+  EXPECT_FALSE(entry.fields_supported & kAvioResourceFieldTextureDescriptor);
+  EXPECT_EQ(entry.usage.entries, 1u);
+  EXPECT_EQ(entry.usage.created_entries, 1u);
+  EXPECT_EQ(entry.usage.distinct_keys, 1u);
+  EXPECT_EQ(entry.usage.real_bytes, 8u);
 }
 
 }  // namespace

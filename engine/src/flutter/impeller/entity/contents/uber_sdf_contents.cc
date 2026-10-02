@@ -33,6 +33,10 @@ Scalar ToShaderType(UberSDFParameters::Type type) {
       return 3.0f;
     case UberSDFParameters::Type::kRoundedSuperellipseSymmetric:
       return 4.0f;
+    case UberSDFParameters::Type::kBorderedRoundedRect:
+      return 5.0f;
+    case UberSDFParameters::Type::kArc:
+      return 6.0f;
   }
 }
 
@@ -64,14 +68,18 @@ template <typename FragInfo>
 void SetupCommonFragInfo(const UberSDFParameters& params,
                          Scalar opacity,
                          bool defer_coverage_transform,
+                         bool defer_geometry_coverage,
                          flutter::DlCoverageMode coverage_mode,
                          FragInfo& frag_info) {
+  frag_info.defer_geometry_coverage = defer_geometry_coverage ? 1.f : 0.f;
   frag_info.type = ToShaderType(params.type);
   frag_info.color = params.color.WithAlpha(params.color.alpha * opacity);
   frag_info.center = params.center;
   frag_info.size = params.size;
   frag_info.stroked = params.stroke ? 1.0f : 0.0f;
   frag_info.stroke_width = params.stroke ? params.stroke->width : 0.0f;
+  frag_info.stroke_miter_limit =
+      params.stroke ? params.stroke->miter_limit : 4.f;
   frag_info.stroke_join =
       params.stroke ? ToShaderStrokeJoin(params.stroke->join) : 0.0f;
   frag_info.aa_pixels = UberSDFParameters::kAntialiasPixels;
@@ -83,6 +91,12 @@ void SetupCommonFragInfo(const UberSDFParameters& params,
   frag_info.circle_center_right = params.circle_center_right;
   frag_info.superellipse_scale = params.superellipse_scale;
   frag_info.radii = params.radii;
+  frag_info.inner_center = params.inner_center;
+  frag_info.inner_size = params.inner_size;
+  frag_info.inner_radii = params.inner_radii;
+  frag_info.bordered_radii_y = params.bordered_radii_y;
+  frag_info.inner_radii_y = params.inner_radii_y;
+  frag_info.arc = params.arc;
   frag_info.defer_coverage_transform = defer_coverage_transform ? 1.0f : 0.0f;
   frag_info.external_linear_backdrop =
       coverage_mode == flutter::DlCoverageMode::kExternalLinearBackdrop ? 1.0f
@@ -155,7 +169,7 @@ bool UberSDFContents::RenderTexture(const ContentContext& renderer,
   VS::FrameInfo frame_info;
   FS::FragInfo frag_info;
   SetupCommonFragInfo(params_, GetOpacityFactor(), defer_coverage_transform_,
-                      coverage_mode_, frag_info);
+                      defer_geometry_coverage_, coverage_mode_, frag_info);
 
   std::shared_ptr<Texture> texture;
   raw_ptr<const Sampler> sampler;
@@ -180,6 +194,14 @@ bool UberSDFContents::RenderTexture(const ContentContext& renderer,
   auto geometry_result =
       GetGeometry()->GetPositionBuffer(renderer, entity, pass);
 
+  const bool continuous_geometry =
+      !defer_geometry_coverage_ &&
+      (params_.type == UberSDFParameters::Type::kArc ||
+       params_.type == UberSDFParameters::Type::kBorderedRoundedRect) &&
+      renderer.GetContext()->GetAvioAntialiasingConfig().RequestsContinuous(
+          params_.type == UberSDFParameters::Type::kArc
+              ? AvioContinuousClass::kArc
+              : AvioContinuousClass::kBorderedRoundedRect);
   PipelineBuilderCallback pipeline_callback =
       [&renderer](ContentContextOptions options) {
         return renderer.GetUberSDFPipeline(options);
@@ -189,11 +211,12 @@ bool UberSDFContents::RenderTexture(const ContentContext& renderer,
       this, GetGeometry(), renderer, entity, pass, pipeline_callback,
       frame_info,
       /*bind_fragment_callback=*/
-      [&frag_info, &data_host_buffer, texture = std::move(texture),
-       sampler](RenderPass& pass) {
+      [&frag_info, &data_host_buffer, texture = std::move(texture), sampler,
+       continuous_geometry](RenderPass& pass) {
         FS::BindColorSourceSampler(pass, texture, sampler);
         FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
         pass.SetCommandLabel("UberSDF");
+        pass.SetAvioContinuousGeometry(continuous_geometry);
         return true;
       },
       /*force_stencil=*/false,
@@ -215,7 +238,7 @@ bool UberSDFContents::RenderSSBO(const ContentContext& renderer,
   VS::FrameInfo frame_info;
   FS::FragInfo frag_info;
   SetupCommonFragInfo(params_, GetOpacityFactor(), defer_coverage_transform_,
-                      coverage_mode_, frag_info);
+                      defer_geometry_coverage_, coverage_mode_, frag_info);
 
   std::vector<StopData> color_stops;
   if (params_.gradient.has_value()) {
@@ -237,6 +260,14 @@ bool UberSDFContents::RenderSSBO(const ContentContext& renderer,
   auto geometry_result =
       GetGeometry()->GetPositionBuffer(renderer, entity, pass);
 
+  const bool continuous_geometry =
+      !defer_geometry_coverage_ &&
+      (params_.type == UberSDFParameters::Type::kArc ||
+       params_.type == UberSDFParameters::Type::kBorderedRoundedRect) &&
+      renderer.GetContext()->GetAvioAntialiasingConfig().RequestsContinuous(
+          params_.type == UberSDFParameters::Type::kArc
+              ? AvioContinuousClass::kArc
+              : AvioContinuousClass::kBorderedRoundedRect);
   PipelineBuilderCallback pipeline_callback =
       [&renderer](ContentContextOptions options) {
         return renderer.GetUberSDFSSBOPipeline(options);
@@ -246,10 +277,12 @@ bool UberSDFContents::RenderSSBO(const ContentContext& renderer,
       this, GetGeometry(), renderer, entity, pass, pipeline_callback,
       frame_info,
       /*bind_fragment_callback=*/
-      [&frag_info, &data_host_buffer, &color_buffer](RenderPass& pass) {
+      [&frag_info, &data_host_buffer, &color_buffer,
+       continuous_geometry](RenderPass& pass) {
         FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
         FS::BindColorData(pass, color_buffer);
         pass.SetCommandLabel("UberSDFSSBO");
+        pass.SetAvioContinuousGeometry(continuous_geometry);
         return true;
       },
       /*force_stencil=*/false,

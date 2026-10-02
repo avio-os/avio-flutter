@@ -110,5 +110,46 @@ TEST(SnapshotTest, InvalidLogicalRectsHaveNoReadableCoverageOrUVs) {
   EXPECT_FALSE(snapshot.GetUVTransform());
 }
 
+TEST(SnapshotTest, CapturedOpaqueEvidenceFollowsImmutableOwnerAndExactCrop) {
+  Snapshot snapshot{
+      .texture = std::make_shared<SnapshotTexture>(ISize(128, 256)),
+      .texture_rect = Rect::MakeXYWH(16, 32, 48, 64),
+      .resource_owner = std::make_shared<int>(17),
+      .is_immutable_captured_backdrop = true,
+      .captured_opaque_texels = Rect::MakeXYWH(8, 24, 48, 64)};
+  auto copy = snapshot;
+  EXPECT_EQ(copy.GetCapturedOpaqueRect(), Rect::MakeXYWH(16, 32, 40, 56));
+  snapshot.resource_owner.reset();
+  EXPECT_FALSE(snapshot.GetCapturedOpaqueRect());
+  EXPECT_TRUE(copy.GetCapturedOpaqueRect());
+  copy.opacity = .999f;
+  EXPECT_FALSE(copy.GetCapturedOpaqueRect());
+  copy.opacity = 1.f;
+  copy.texture_rect = Rect::MakeXYWH(80, 160, 32, 32);
+  EXPECT_FALSE(copy.GetCapturedOpaqueRect());
+}
+
+TEST(SnapshotTest, GenericTargetAndOpaqueFormatDoNotCreateCaptureEvidence) {
+  auto texture = std::make_shared<SnapshotTexture>(ISize(128, 256));
+  RenderTarget target;
+  ColorAttachment color;
+  color.texture = texture;
+  color.clear_color = Color::White();
+  target.SetColorAttachment(color, 0u);
+  target.SetResourceOwner(std::make_shared<int>(17));
+  EXPECT_FALSE(Snapshot::FromRenderTarget(target).GetCapturedOpaqueRect());
+}
+
+TEST(SnapshotTest, ImmutableFilterSourceAndOpaqueAlphaAreIndependentFacts) {
+  Snapshot snapshot{
+      .texture = std::make_shared<SnapshotTexture>(ISize(128, 256)),
+      .resource_owner = std::make_shared<int>(17),
+      .is_immutable_captured_backdrop = true};
+  EXPECT_TRUE(snapshot.IsImmutableCapturedBackdrop());
+  EXPECT_FALSE(snapshot.GetCapturedOpaqueRect());
+  snapshot.resource_owner.reset();
+  EXPECT_FALSE(snapshot.IsImmutableCapturedBackdrop());
+}
+
 }  // namespace
 }  // namespace impeller

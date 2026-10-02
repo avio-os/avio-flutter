@@ -103,10 +103,15 @@ static std::optional<QueueIndexVK> PickQueue(const vk::PhysicalDevice& device,
   return std::nullopt;
 }
 
-std::shared_ptr<ContextVK> ContextVK::Create(Settings settings) {
+std::shared_ptr<ContextVK> ContextVK::Create(Settings settings,
+                                             bool* native_teardown_safe) {
   auto context = std::shared_ptr<ContextVK>(new ContextVK(settings.flags));
   context->Setup(std::move(settings));
   if (!context->IsValid()) {
+    context->Shutdown();
+    if (native_teardown_safe) {
+      *native_teardown_safe = context->IsSafeToDestroyNativeResources();
+    }
     return nullptr;
   }
   return context;
@@ -130,9 +135,8 @@ ContextVK::ContextVK(const Flags& flags)
     : Context(flags), hash_(CalculateHash(this)) {}
 
 ContextVK::~ContextVK() {
-  if (device_holder_ && device_holder_->device) {
-    [[maybe_unused]] auto result = device_holder_->device->waitIdle();
-  }
+  Shutdown();
+  const bool safe_native_teardown = native_teardown_safe_;
   // Drop cached transient attachments before tearing down the resource
   // manager and timeline completion tracker that the textures rely on for
   // cleanup.
@@ -142,7 +146,7 @@ ContextVK::~ContextVK() {
   }
   timeline_completion_.reset();
   resource_manager_.reset();
-  if (command_pool_recycler_) {
+  if (safe_native_teardown && command_pool_recycler_) {
     command_pool_recycler_->DestroyThreadLocalPools();
   }
 }
@@ -342,12 +346,19 @@ void ContextVK::Setup(Settings settings) {
   const auto queue_create_infos = GetQueueCreateInfos(
       {graphics_queue.value(), compute_queue.value(), transfer_queue.value()});
 
-  const auto enabled_features =
+  auto enabled_features =
       caps->GetEnabledDeviceFeatures(device_holder->physical_device);
   if (!enabled_features.has_value()) {
     // This shouldn't happen since the device can't be picked if this was not
     // true. But doesn't hurt to check.
     return;
+  }
+  if (settings.embedder_data) {
+    // A physical feature query cannot reveal what an embedder enabled on its
+    // borrowed logical device. Require the exact owner's creation fact.
+    enabled_features->get().features.sampleRateShading =
+        enabled_features->get().features.sampleRateShading &&
+        settings.embedder_data->native_sample_shading_enabled;
   }
 
   vk::DeviceCreateInfo device_info;
@@ -378,6 +389,17 @@ void ContextVK::Setup(Settings settings) {
       !caps->SupportsAvioCoverageResources()) {
     VALIDATION_LOG
         << "Device does not support negotiated native coverage resources.";
+    return;
+  }
+  if ((avio_antialiasing_config_.continuous_requested_classes &
+       ~AvioContinuousSupportedClasses(AvioCoverageBackend::kVulkan)) != 0) {
+    VALIDATION_LOG << "Requested continuous coverage is unsupported on Vulkan.";
+    return;
+  }
+  if (avio_antialiasing_config_.continuous_requested_classes != 0 &&
+      !caps->SupportsAvioContinuousCoverageResources()) {
+    VALIDATION_LOG << "Logical device lacks enabled native sample shading or "
+                      "sampled native-four color prefix support.";
     return;
   }
 
@@ -533,6 +555,9 @@ void ContextVK::Setup(Settings settings) {
   // the ContextVK.
   gpu_tracer_ = std::make_shared<GPUTracerVK>(weak_from_this(),
                                               settings.enable_gpu_tracing);
+  timeline_completion_->SetTeardownDependencies(
+      {allocator_, sampler_library_, resource_manager_, command_pool_recycler_,
+       descriptor_pool_recycler_, gpu_tracer_, raster_message_loop_});
   gpu_tracer_->InitializeQueryPool(*this);
 
   //----------------------------------------------------------------------------
@@ -552,7 +577,7 @@ std::string ContextVK::DescribeGpuModel() const {
 }
 
 bool ContextVK::IsValid() const {
-  return is_valid_;
+  return is_valid_ && timeline_completion_ && timeline_completion_->IsValid();
 }
 
 std::shared_ptr<Allocator> ContextVK::GetResourceAllocator() const {
@@ -639,10 +664,27 @@ const vk::Device& ContextVK::GetDevice() const {
 
 const std::shared_ptr<fml::ConcurrentTaskRunner>
 ContextVK::GetConcurrentWorkerTaskRunner() const {
-  return raster_message_loop_->GetTaskRunner();
+  return raster_message_loop_ ? raster_message_loop_->GetTaskRunner() : nullptr;
 }
 
 void ContextVK::Shutdown() {
+  if (timeline_completion_) {
+    timeline_completion_->StopAccepting();
+  }
+  if (raster_message_loop_) {
+    if (!raster_message_loop_->TerminateAndJoin()) {
+      // A native compilation callback cannot join its own loop. Its exact
+      // loop is already a cold dependency of the bounded completion actor;
+      // retain it until an off-worker caller can prove teardown.
+      if (timeline_completion_) {
+        timeline_completion_->CompleteDeviceTeardown(vk::Result::eErrorUnknown);
+      }
+      native_teardown_safe_ = false;
+      return;
+    }
+    raster_message_loop_.reset();
+  }
+  ShutdownNativeCompletion();
   // There are multiple objects, for example |CommandPoolVK|, that in their
   // destructors make a strong reference to |ContextVK|. Resetting these shared
   // pointers ensures that cleanup happens in a correct order.
@@ -656,13 +698,61 @@ void ContextVK::Shutdown() {
     swapchain_transients_pool_->Reset();
     swapchain_transients_pool_.reset();
   }
-  if (device_holder_ && device_holder_->device) {
-    [[maybe_unused]] auto result = device_holder_->device->waitIdle();
+  // Keep the exact actor for the destructor's final cold teardown attempt if
+  // this idle result was unknown. Its registry remains the fail-closed owner
+  // if that final attempt also cannot prove safe native destruction.
+  if (native_teardown_safe_) {
+    timeline_completion_.reset();
   }
-  timeline_completion_.reset();
   resource_manager_.reset();
+}
 
-  raster_message_loop_->Terminate();
+bool ContextVK::ShutdownNativeCompletion() {
+  if (native_teardown_safe_) {
+    return true;
+  }
+  if (!device_holder_ || !device_holder_->device) {
+    native_teardown_safe_ = true;
+    return true;
+  }
+  if (timeline_completion_) {
+    timeline_completion_->StopAccepting();
+  }
+  // DeviceWaitIdle externally synchronizes every distinct queue. Stop admission
+  // first; a submit which passed its check completes under these same locks.
+  const auto wait_idle = [&] { return device_holder_->device->waitIdle(); };
+  const auto with_transfer = [&] {
+    if (queues_.transfer_queue &&
+        queues_.transfer_queue != queues_.graphics_queue &&
+        queues_.transfer_queue != queues_.compute_queue) {
+      return queues_.transfer_queue->SubmitLocked(
+          [&](const vk::Queue&) { return wait_idle(); });
+    }
+    return wait_idle();
+  };
+  const auto with_compute = [&] {
+    if (queues_.compute_queue &&
+        queues_.compute_queue != queues_.graphics_queue) {
+      return queues_.compute_queue->SubmitLocked(
+          [&](const vk::Queue&) { return with_transfer(); });
+    }
+    return with_transfer();
+  };
+  const auto result =
+      queues_.graphics_queue
+          ? queues_.graphics_queue->SubmitLocked(
+                [&](const vk::Queue&) { return with_compute(); })
+          : with_compute();
+  if (timeline_completion_) {
+    native_teardown_safe_ =
+        timeline_completion_->CompleteDeviceTeardown(result);
+  } else {
+    native_teardown_safe_ = result == vk::Result::eSuccess ||
+                            result == vk::Result::eErrorDeviceLost;
+  }
+  // DestroyThreadLocalPools explicitly destroys even externally-held native
+  // pools. Unknown idle must leave submitted pools in their tracked custody.
+  return native_teardown_safe_;
 }
 
 std::shared_ptr<SurfaceContextVK> ContextVK::CreateSurfaceContext() {
@@ -853,6 +943,8 @@ AvioRenderResourceReport ContextVK::GetAvioRenderResourceReport(
     if (allocator_) {
       report.Merge(static_cast<AllocatorVK&>(*allocator_)
                        .GetAllocatedImageReport(start_new_interval));
+      report.Merge(static_cast<AllocatorVK&>(*allocator_)
+                       .GetAllocatedBufferReport(start_new_interval));
     }
     if (pipeline_library_) {
       report.Merge(

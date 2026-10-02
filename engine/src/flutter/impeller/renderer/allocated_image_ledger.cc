@@ -23,13 +23,14 @@ AllocatedImageLedger::Registration::Registration(
     AvioAllocatedImageKey key,
     size_t nominal_bytes,
     size_t real_bytes,
-    bool raster_frame)
+    bool raster_frame,
+    AvioRasterAllocationCause cause)
     : ledger_(std::move(ledger)),
       kind_(static_cast<AvioRenderResourceKind>(KindIndex(kind) + 1u)),
       key_(key),
       nominal_(nominal_bytes),
       real_(real_bytes) {
-  ledger_->Add(*this, raster_frame);
+  ledger_->Add(*this, raster_frame, cause);
 }
 
 AllocatedImageLedger::Registration::~Registration() {
@@ -83,12 +84,15 @@ AllocatedImageLedger::Registration AllocatedImageLedger::Register(
     AvioAllocatedImageKey key,
     size_t nominal_bytes,
     size_t real_bytes,
-    bool raster_frame) {
+    bool raster_frame,
+    AvioRasterAllocationCause cause) {
   return Registration(shared_from_this(), kind, key, nominal_bytes, real_bytes,
-                      raster_frame);
+                      raster_frame, cause);
 }
 
-void AllocatedImageLedger::Add(Registration& registration, bool raster_frame) {
+void AllocatedImageLedger::Add(Registration& registration,
+                               bool raster_frame,
+                               AvioRasterAllocationCause cause) {
   std::scoped_lock lock(mutex_);
   const size_t index = KindIndex(registration.kind_);
   auto& usage = usage_[index];
@@ -114,11 +118,17 @@ void AllocatedImageLedger::Add(Registration& registration, bool raster_frame) {
   usage.created_real_bytes += registration.real_;
   observed_[index] = true;
   if (raster_frame) {
-    raster_allocations_++;
-    if (registration.kind_ == AvioRenderResourceKind::kOffscreens ||
-        registration.kind_ == AvioRenderResourceKind::kFlipTargets ||
-        registration.kind_ == AvioRenderResourceKind::kLayerRegion) {
+    if (cause == AvioRasterAllocationCause::kFrameWork) {
+      raster_allocations_++;
+    } else if (cause == AvioRasterAllocationCause::kSnapshot) {
       snapshot_allocations_++;
+    }
+    if (registration.kind_ == AvioRenderResourceKind::kGlyphAtlases) {
+      // Actual native atlas storage, including growth during toImage. This
+      // independent owner event must not disappear behind an outer cause.
+      // Appending to existing storage or failing native allocation never
+      // registers a new image and therefore cannot increment this counter.
+      glyph_atlas_growths_++;
     }
   }
 }
@@ -171,15 +181,20 @@ AvioRenderResourceReport AllocatedImageLedger::Report(bool start_new_interval) {
   std::scoped_lock lock(mutex_);
   AvioRenderResourceReport report;
   report.available = true;
-  report.counters_supported = kAvioCounterRasterThreadAllocations |
-                              kAvioCounterSnapshotAllocations |
-                              kAvioCounterImageUploads;
+  report.counters_supported =
+      kAvioCounterRasterThreadAllocations | kAvioCounterSnapshotAllocations |
+      kAvioCounterImageUploads | kAvioCounterGlyphAtlasGrowths;
   report.raster_thread_allocations = raster_allocations_;
   report.snapshot_allocations = snapshot_allocations_;
   report.image_uploads = image_uploads_;
+  report.glyph_atlas_growths = glyph_atlas_growths_;
   for (size_t i = 0; i < usage_.size(); i++) {
     if (observed_[i]) {
-      report.AddEntry(static_cast<uint32_t>(i + 1u), usage_[i]);
+      AvioRenderResourceEntry entry;
+      entry.kind_id = static_cast<uint32_t>(i + 1u);
+      entry.usage = usage_[i];
+      entry.fields_supported |= kAvioResourceFieldDescriptorMultiplicity;
+      report.AddEntry(entry);
     }
     if (start_new_interval) {
       usage_[i].created_entries = 0u;
@@ -189,7 +204,8 @@ AvioRenderResourceReport AllocatedImageLedger::Report(bool start_new_interval) {
     }
   }
   if (start_new_interval) {
-    raster_allocations_ = snapshot_allocations_ = image_uploads_ = 0u;
+    raster_allocations_ = snapshot_allocations_ = image_uploads_ =
+        glyph_atlas_growths_ = 0u;
   }
   return report;
 }

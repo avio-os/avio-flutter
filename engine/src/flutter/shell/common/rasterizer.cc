@@ -971,6 +971,63 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     embedder_root_canvas = external_view_embedder_->GetRootCanvas();
   }
 
+  const auto& frame_facts = layer_tree.avio_frame_facts();
+  if (!frame_facts.IsValid() ||
+      (frame_facts.ground_regions_count &&
+       !frame_facts.IsValidForRoot(
+           layer_tree.frame_size().width / device_pixel_ratio,
+           layer_tree.frame_size().height / device_pixel_ratio)) ||
+      (frame_facts.HasMetadata() &&
+       (!external_view_embedder_ ||
+        !external_view_embedder_->SupportsAvioFrameFacts(frame_facts)))) {
+    if (external_view_embedder_) {
+      external_view_embedder_->RejectAvioFrameFacts(view_id);
+      return DrawSurfaceStatus::kRejected;
+    }
+    return DrawSurfaceStatus::kFailed;
+  }
+
+  if (external_view_embedder_ &&
+      external_view_embedder_->SupportsAvioEmptyFrames()) {
+    // Determine the structural paint fact before acquiring either a surface
+    // frame or an embedder target. Preroll has no raster cache/GPU work here;
+    // this is not a pixel probe or a no-damage inference.
+    auto fact_frame = compositor_context_->AcquireFrame(
+        surface_->GetContext(), embedder_root_canvas,
+        external_view_embedder_.get(), DlMatrix(), false, true,
+        raster_thread_merger_, surface_->GetAiksContext().get());
+    if (!fact_frame) {
+      return DrawSurfaceStatus::kFailed;
+    }
+    layer_tree.Preroll(*fact_frame, true,
+                       DlRect::MakeSize(layer_tree.frame_size()));
+    const bool empty = layer_tree.root_layer() &&
+                       layer_tree.root_layer()->paint_bounds().IsEmpty() &&
+                       !layer_tree.root_layer()->subtree_has_platform_view() &&
+                       layer_tree.avio_compositor_materials().empty() &&
+                       layer_tree.avio_window_previews().empty() &&
+                       !layer_tree.avio_compositor_materials_invalid() &&
+                       !layer_tree.avio_window_previews_invalid();
+    fact_frame.reset();
+    if (empty) {
+      SurfaceFrame::SubmitInfo info;
+      info.presentation_time = presentation_time;
+      info.avio_frame_facts = frame_facts;
+      if (!external_view_embedder_->SubmitAvioEmptyFrame(view_id, info)) {
+        return DrawSurfaceStatus::kRejected;
+      }
+      if (auto context = GetSurfaceImpellerContext()) {
+        context->ReleaseTransientOwner(view_id);
+      }
+      return DrawSurfaceStatus::kSuccess;
+    }
+    // Preroll may have registered platform-view slices. Start their ordinary
+    // recording again so the acquired-target pass sees exactly one traversal.
+    external_view_embedder_->PrepareFlutterView(layer_tree.frame_size(),
+                                                device_pixel_ratio);
+    embedder_root_canvas = external_view_embedder_->GetRootCanvas();
+  }
+
   // On Android, the external view embedder deletes surfaces in `BeginFrame`.
   //
   // Deleting a surface also clears the GL context. Therefore, acquire the
@@ -1014,7 +1071,14 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     std::optional<DlRegion> eve_frame_damage = std::nullopt;
     // when leaf layer tracing is enabled we wish to repaint the whole frame
     // for accurate performance metrics.
-    if (framebuffer_info.supports_partial_repaint) {
+    // Root facts belong to a new content revision. Until the producer has an
+    // explicit same-buffer metadata transaction, changing them must render an
+    // acquired target and publish nonempty buffer damage. Child paint remains
+    // retained by the framework; only this root raster is promoted.
+    const auto* previous_tree = GetLastLayerTree(view_id);
+    const bool root_facts_changed =
+        previous_tree && previous_tree->avio_frame_facts() != frame_facts;
+    if (framebuffer_info.supports_partial_repaint && !root_facts_changed) {
       bool has_external_view_embedder =
           external_view_embedder_ &&
           (!raster_thread_merger_ || raster_thread_merger_->IsMerged());
@@ -1104,6 +1168,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     }
 
     SurfaceFrame::SubmitInfo submit_info;
+    submit_info.avio_frame_facts = frame_facts;
     submit_info.presentation_time = presentation_time;
     submit_info.avio_window_previews = layer_tree.TakeAvioWindowPreviews();
     submit_info.avio_window_previews_invalid =

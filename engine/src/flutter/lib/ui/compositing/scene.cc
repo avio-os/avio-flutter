@@ -53,6 +53,10 @@ Dart_Handle Scene::toImageSync(uint32_t width,
   if (!valid()) {
     return tonic::ToDart("Scene has been disposed.");
   }
+  if (layer_tree_root_layer_->subtree_has_avio_frame_metadata()) {
+    return tonic::ToDart(
+        "View-root frame metadata cannot be rasterized into an image.");
+  }
 
   Scene::RasterizeToImage(width, height, raw_image_handle);
   return Dart_Null();
@@ -65,6 +69,10 @@ Dart_Handle Scene::toImage(uint32_t width,
 
   if (!valid()) {
     return tonic::ToDart("Scene has been disposed.");
+  }
+  if (layer_tree_root_layer_->subtree_has_avio_frame_metadata()) {
+    return tonic::ToDart(
+        "View-root frame metadata cannot be rasterized into an image.");
   }
 
   return Picture::RasterizeLayerTreeToImage(BuildLayerTree(width, height),

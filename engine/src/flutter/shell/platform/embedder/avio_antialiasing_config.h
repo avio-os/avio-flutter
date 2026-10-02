@@ -35,8 +35,8 @@ inline const char* ValidateAvioAntialiasingConfig(
     return "Antialiasing config was truncated.";
   }
   if ((config->continuous_requested_classes &
-       ~impeller::kAvioContinuousSupportedClasses) != 0) {
-    return "Continuous coverage classes are not implemented.";
+       ~impeller::kAvioContinuousKnownClasses) != 0) {
+    return "Continuous coverage class identities are unknown.";
   }
   constexpr uint64_t kMaxSize = std::numeric_limits<size_t>::max();
   // This is an external C ABI enum. Read its representation without loading
@@ -46,7 +46,8 @@ inline const char* ValidateAvioAntialiasingConfig(
   std::memcpy(&policy, &config->policy, sizeof(policy));
   switch (policy) {
     case kFlutterAvioAntialiasingPolicyMsaa4:
-      if (config->layer_sample_count != 4 ||
+      if (config->continuous_requested_classes != 0 ||
+          config->layer_sample_count != 4 ||
           config->coverage_sample_count != 4 ||
           config->coverage_region_max_bytes != 0 ||
           config->layer_region_max_bytes != 0) {
@@ -71,6 +72,46 @@ inline const char* ValidateAvioAntialiasingConfig(
       return "The antialiasing policy was unknown.";
   }
   return nullptr;
+}
+
+// Append-only query transport: each backend tail is independent, and an older
+// caller's absent fields are left untouched. Masks describe this engine's
+// compiled implementations, not the selected logical device's feature support.
+inline void WriteAvioContinuousCapabilities(
+    FlutterAvioExtensionCapabilities& capabilities,
+    uint64_t vulkan,
+    uint64_t gles,
+    uint64_t metal) {
+  const auto has = [&](size_t offset) {
+    return capabilities.struct_size >= offset + sizeof(uint64_t);
+  };
+  if (has(offsetof(FlutterAvioExtensionCapabilities,
+                   continuous_supported_classes))) {
+    capabilities.continuous_supported_classes = vulkan | gles | metal;
+  }
+  if (has(offsetof(FlutterAvioExtensionCapabilities,
+                   continuous_supported_classes_vulkan))) {
+    capabilities.continuous_supported_classes_vulkan = vulkan;
+  }
+  if (has(offsetof(FlutterAvioExtensionCapabilities,
+                   continuous_supported_classes_gles))) {
+    capabilities.continuous_supported_classes_gles = gles;
+  }
+  if (has(offsetof(FlutterAvioExtensionCapabilities,
+                   continuous_supported_classes_metal))) {
+    capabilities.continuous_supported_classes_metal = metal;
+  }
+}
+
+// Device/backend admission follows structural validation. A known identity
+// does not imply an implementation on every backend.
+inline const char* ValidateAvioAntialiasingBackend(
+    const FlutterAvioAntialiasingConfig& config,
+    impeller::AvioCoverageBackend backend) {
+  return (config.continuous_requested_classes &
+          ~impeller::AvioContinuousSupportedClasses(backend)) == 0
+             ? nullptr
+             : "Continuous coverage classes are unsupported by this backend.";
 }
 
 inline impeller::AvioAntialiasingConfig CopyAvioAntialiasingConfig(

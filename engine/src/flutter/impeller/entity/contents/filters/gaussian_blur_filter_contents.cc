@@ -15,6 +15,7 @@
 #include "impeller/entity/texture_fill.frag.h"
 #include "impeller/entity/texture_fill.vert.h"
 #include "impeller/geometry/color.h"
+#include "impeller/renderer/opaque_coverage.h"
 #include "impeller/renderer/render_pass.h"
 #include "impeller/renderer/vertex_buffer_builder.h"
 
@@ -626,6 +627,58 @@ int ScaleBlurRadius(Scalar radius, Scalar scalar) {
   return static_cast<int>(std::round(radius * scalar));
 }
 
+// Exact shader taps, including the hardware linear-filter neighbourhood.
+// The largest positive weight must remain normal in F16 even after both
+// passes. This establishes nonzero alpha, not normalized opaque alpha.
+static std::optional<Vector2> PositiveBlurSampleRadius(
+    const BlurParameters& parameters,
+    ISize physical_input_size) {
+  if (parameters.blur_sigma < kEhCloseEnough) {
+    return Vector2();
+  }
+  const auto kernel = LerpHackKernelSamples(GenerateBlurInfo(parameters));
+  Vector2 radius(.5f, .5f);
+  Scalar largest = 0.f;
+  for (int i = 0; i < kernel.sample_count; i++) {
+    const auto sample = kernel.kernel_samples.sample_data[i];
+    if (!sample.IsFinite() || sample.z < 0.f) {
+      return std::nullopt;
+    }
+    largest = std::max(largest, sample.z);
+    radius.x = std::max(radius.x,
+                        std::abs(sample.x) * physical_input_size.width + .5f);
+    radius.y = std::max(radius.y,
+                        std::abs(sample.y) * physical_input_size.height + .5f);
+  }
+  return largest >= 1.f / 64.f ? std::optional<Vector2>(radius) : std::nullopt;
+}
+
+static std::optional<Rect> PropagatePositiveBlurFootprint(
+    std::optional<Rect> positive_input,
+    const RenderTarget& input,
+    const RenderTarget& output,
+    const BlurParameters& parameters) {
+  if (!positive_input) {
+    return std::nullopt;
+  }
+  if (parameters.blur_sigma < kEhCloseEnough) {
+    return positive_input;
+  }
+  const auto input_size = input.GetRenderTargetTexture()->GetSize();
+  const auto radius = PositiveBlurSampleRadius(parameters, input_size);
+  if (!radius) {
+    return std::nullopt;
+  }
+  const auto input_content =
+      input.GetContentRect().value_or(IRect::MakeSize(input_size));
+  const auto output_content = output.GetContentRect().value_or(
+      IRect::MakeSize(output.GetRenderTargetSize()));
+  const auto uvs =
+      Rect::MakeSize(input_size).Project(Rect::Make(input_content)).GetPoints();
+  return MapOpaqueSamplingFootprint(*positive_input, input_size, uvs,
+                                    output_content, *radius);
+}
+
 Entity ApplyClippedBlurStyle(Entity::ClipOperation clip_operation,
                              const Entity& entity,
                              const std::shared_ptr<FilterInput>& input,
@@ -894,6 +947,49 @@ std::optional<Entity> GaussianBlurFilterContents::RenderFilter(
 
   Quad blur_uvs = {Point(0, 0), Point(1, 0), Point(0, 1), Point(1, 1)};
 
+  std::optional<Rect> positive_footprint;
+  auto input_opaque =
+      bounds_.has_value() && mask_blur_style_ == BlurStyle::kNormal
+          ? input_snapshot->GetCapturedOpaqueRect()
+          : std::nullopt;
+  if (input_opaque && downsample_pass_args.uv_bounds) {
+    const auto& bounds = *downsample_pass_args.uv_bounds;
+    if (bounds[0].y != bounds[1].y || bounds[0].x != bounds[2].x ||
+        bounds[1].x != bounds[3].x || bounds[2].y != bounds[3].y ||
+        bounds[3].x <= bounds[0].x || bounds[3].y <= bounds[0].y) {
+      input_opaque.reset();
+    } else {
+      const auto size = Vector2(input_snapshot->texture->GetSize());
+      input_opaque = input_opaque->Intersection(
+          Rect::MakeLTRB(bounds[0].x * size.x, bounds[0].y * size.y,
+                         bounds[3].x * size.x, bounds[3].y * size.y));
+    }
+  }
+  if (input_opaque && input_snapshot->texture->GetMipCount() == 1u) {
+    // These are the actual offsets in downsample.glsl, plus linear filtering.
+    Scalar edge = downsample_pass_args.effective_scalar.x >= .5f ? 0.f : 1.f;
+    if (downsample_pass_args.effective_scalar.x <= .0625f) {
+      edge = 7.f;
+    } else if (downsample_pass_args.effective_scalar.x <= .125f) {
+      edge = 3.f;
+    }
+    positive_footprint = MapOpaqueSamplingFootprint(
+        *input_opaque, input_snapshot->texture->GetSize(),
+        downsample_pass_args.uvs,
+        pass1_out.value().GetContentRect().value_or(
+            IRect::MakeSize(pass1_out.value().GetRenderTargetSize())),
+        Vector2(edge + .5f, edge + .5f));
+  }
+
+  const BlurParameters vertical_parameters{
+      .blur_uv_offset = Point(0.0, pass1_pixel_size.y),
+      .blur_sigma =
+          blur_info.scaled_sigma.y * downsample_pass_args.effective_scalar.y,
+      .blur_radius = ScaleBlurRadius(blur_info.blur_radius.y,
+                                     downsample_pass_args.effective_scalar.y),
+      .step_size = 1,
+      .apply_unpremultiply = false};
+
   std::shared_ptr<CommandBuffer> command_buffer_2 =
       renderer.GetContext()->CreateCommandBuffer();
   if (!command_buffer_2) {
@@ -902,21 +998,15 @@ std::optional<Entity> GaussianBlurFilterContents::RenderFilter(
 
   fml::StatusOr<RenderTarget> pass2_out = MakeBlurSubpass(
       renderer, command_buffer_2, /*input_pass=*/pass1_out.value(),
-      input_snapshot->sampler_descriptor,
-      BlurParameters{
-          .blur_uv_offset = Point(0.0, pass1_pixel_size.y),
-          .blur_sigma = blur_info.scaled_sigma.y *
-                        downsample_pass_args.effective_scalar.y,
-          .blur_radius = ScaleBlurRadius(
-              blur_info.blur_radius.y, downsample_pass_args.effective_scalar.y),
-          .step_size = 1,
-          .apply_unpremultiply = false,
-      },
+      input_snapshot->sampler_descriptor, vertical_parameters,
       /*destination_target=*/std::nullopt, blur_uvs);
 
   if (!pass2_out.ok()) {
     return std::nullopt;
   }
+  positive_footprint =
+      PropagatePositiveBlurFootprint(positive_footprint, pass1_out.value(),
+                                     pass2_out.value(), vertical_parameters);
 
   Vector2 pass2_pixel_size =
       1.0 / Vector2(pass2_out.value().GetRenderTargetTexture()->GetSize());
@@ -933,23 +1023,25 @@ std::optional<Entity> GaussianBlurFilterContents::RenderFilter(
                                ? std::optional<RenderTarget>(pass1_out.value())
                                : std::optional<RenderTarget>(std::nullopt);
 
+  const BlurParameters horizontal_parameters{
+      .blur_uv_offset = Point(pass2_pixel_size.x, 0.0),
+      .blur_sigma =
+          blur_info.scaled_sigma.x * downsample_pass_args.effective_scalar.x,
+      .blur_radius = ScaleBlurRadius(blur_info.blur_radius.x,
+                                     downsample_pass_args.effective_scalar.x),
+      .step_size = 1,
+      .apply_unpremultiply = bounds_.has_value()};
   fml::StatusOr<RenderTarget> pass3_out = MakeBlurSubpass(
       renderer, command_buffer_3, /*input_pass=*/pass2_out.value(),
-      input_snapshot->sampler_descriptor,
-      BlurParameters{
-          .blur_uv_offset = Point(pass2_pixel_size.x, 0.0),
-          .blur_sigma = blur_info.scaled_sigma.x *
-                        downsample_pass_args.effective_scalar.x,
-          .blur_radius = ScaleBlurRadius(
-              blur_info.blur_radius.x, downsample_pass_args.effective_scalar.x),
-          .step_size = 1,
-          .apply_unpremultiply = bounds_.has_value(),
-      },
+      input_snapshot->sampler_descriptor, horizontal_parameters,
       pass3_destination, blur_uvs);
 
   if (!pass3_out.ok()) {
     return std::nullopt;
   }
+  positive_footprint =
+      PropagatePositiveBlurFootprint(positive_footprint, pass2_out.value(),
+                                     pass3_out.value(), horizontal_parameters);
 
   if (!(renderer.GetContext()->EnqueueCommandBuffer(
             std::move(command_buffer_1)) &&
@@ -972,16 +1064,27 @@ std::optional<Entity> GaussianBlurFilterContents::RenderFilter(
   SamplerDescriptor sampler_desc = MakeSamplerDescriptor(
       MinMagFilter::kLinear, SamplerAddressMode::kClampToEdge);
 
-  Entity blur_output_entity = Entity::FromSnapshot(
-      Snapshot::FromRenderTarget(
-          pass3_out.value(),
-          entity.GetTransform() *                                       //
-              Matrix::MakeScale(1.f / blur_info.source_space_scalar) *  //
-              Matrix::MakeTranslation(-1 * blur_info.source_space_offset) *
-              downsample_pass_args.transform *  //
-              Matrix::MakeScale(1 / downsample_pass_args.effective_scalar),
-          sampler_desc, input_snapshot->opacity, true),
-      entity.GetBlendMode());
+  auto output_snapshot = Snapshot::FromRenderTarget(
+      pass3_out.value(),
+      entity.GetTransform() *                                       //
+          Matrix::MakeScale(1.f / blur_info.source_space_scalar) *  //
+          Matrix::MakeTranslation(-1 * blur_info.source_space_offset) *
+          downsample_pass_args.transform *  //
+          Matrix::MakeScale(1 / downsample_pass_args.effective_scalar),
+      sampler_desc, input_snapshot->opacity, true);
+  output_snapshot.is_immutable_captured_backdrop =
+      input_snapshot->IsImmutableCapturedBackdrop() &&
+      mask_blur_style_ == BlurStyle::kNormal;
+  // Normal F16 Gaussian weights do not establish alpha exactly1. Only the
+  // existing bounded shader's nonzero a/a operation closes alpha to1, and only
+  // when that pass actually ran. No shader or colour semantics change here.
+  if (mask_blur_style_ == BlurStyle::kNormal &&
+      horizontal_parameters.apply_unpremultiply &&
+      horizontal_parameters.blur_sigma >= kEhCloseEnough) {
+    output_snapshot.captured_opaque_texels = positive_footprint;
+  }
+  Entity blur_output_entity =
+      Entity::FromSnapshot(output_snapshot, entity.GetBlendMode());
 
   return ApplyBlurStyle(mask_blur_style_, entity, inputs[0],
                         input_snapshot.value(), std::move(blur_output_entity),

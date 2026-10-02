@@ -25,6 +25,8 @@ enum class PreparedFillMaskStatus {
   kNotApplicable,
   kPrepared,
   kEmpty,
+  // A fixed region claim is busy; no destination mutation has occurred.
+  kDeferred,
   kFailed
 };
 

@@ -21,6 +21,9 @@ Entity Entity::FromSnapshot(const Snapshot& snapshot, BlendMode blend_mode) {
   auto contents = TextureContents::MakeRect(texture_rect);
   contents->SetTexture(snapshot.texture);
   contents->SetResourceOwner(snapshot.resource_owner);
+  contents->SetCapturedOpaqueTexels(snapshot.GetCapturedOpaqueRect());
+  contents->SetImmutableCapturedBackdrop(
+      snapshot.IsImmutableCapturedBackdrop());
   contents->SetStrictSourceRect(texture_rect !=
                                 Rect::MakeSize(snapshot.texture->GetSize()));
   contents->SetSamplerDescriptor(snapshot.sampler_descriptor);

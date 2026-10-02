@@ -321,6 +321,11 @@ class CanvasDlDispatcher : public DlDispatcherBase {
 
   ~CanvasDlDispatcher() = default;
 
+  void SetCoverageDisplayListPlan(
+      std::shared_ptr<const CoverageDisplayListPlan> plan) {
+    canvas_.SetCoverageDisplayListPlan(std::move(plan));
+  }
+
   void SetBackdropData(std::unordered_map<int64_t, BackdropData> backdrop,
                        size_t backdrop_count);
 

@@ -4,6 +4,7 @@
 
 #include "impeller/core/host_buffer.h"
 
+#include <atomic>
 #include <cstring>
 #include <tuple>
 
@@ -28,23 +29,47 @@ std::shared_ptr<HostBuffer> HostBuffer::Create(
                      std::move(submission_tracker)));
 }
 
+std::shared_ptr<HostBuffer> HostBuffer::CreateBounded(
+    const std::shared_ptr<Allocator>& allocator,
+    const std::shared_ptr<const IdleWaiter>& idle_waiter,
+    size_t minimum_uniform_alignment,
+    size_t blocks_per_arena) {
+  if (!allocator || blocks_per_arena == 0 || blocks_per_arena > 64) {
+    return nullptr;
+  }
+  auto result = std::shared_ptr<HostBuffer>(
+      new HostBuffer(allocator, idle_waiter, minimum_uniform_alignment, nullptr,
+                     blocks_per_arena));
+  return result->initialized_ ? result : nullptr;
+}
+
 HostBuffer::HostBuffer(
     const std::shared_ptr<Allocator>& allocator,
     const std::shared_ptr<const IdleWaiter>& idle_waiter,
     size_t minimum_uniform_alignment,
-    std::shared_ptr<const GpuSubmissionTracker> submission_tracker)
+    std::shared_ptr<const GpuSubmissionTracker> submission_tracker,
+    std::optional<size_t> bounded_blocks_per_arena)
     : allocator_(allocator),
       idle_waiter_(idle_waiter),
       submission_tracker_(std::move(submission_tracker)),
-      minimum_uniform_alignment_(minimum_uniform_alignment) {
+      minimum_uniform_alignment_(minimum_uniform_alignment),
+      bounded_(bounded_blocks_per_arena.has_value()) {
   DeviceBufferDescriptor desc;
   desc.size = kAllocatorBlockSize;
   desc.storage_mode = StorageMode::kHostVisible;
+  const auto blocks = bounded_blocks_per_arena.value_or(1u);
   for (auto i = 0u; i < kHostBufferArenaSize; i++) {
-    std::shared_ptr<DeviceBuffer> device_buffer = allocator->CreateBuffer(desc);
-    FML_CHECK(device_buffer) << "Failed to allocate device buffer.";
-    device_buffers_[i].push_back(device_buffer);
+    device_buffers_[i].reserve(blocks);
+    for (size_t block = 0; block < blocks; ++block) {
+      auto device_buffer = allocator->CreateBuffer(desc);
+      if (bounded_ && (!device_buffer || !device_buffer->OnGetContents())) {
+        return;
+      }
+      FML_CHECK(device_buffer) << "Failed to allocate device buffer.";
+      device_buffers_[i].push_back(std::move(device_buffer));
+    }
   }
+  initialized_ = true;
 }
 
 HostBuffer::~HostBuffer() {
@@ -104,6 +129,12 @@ HostBuffer::TestStateQuery HostBuffer::GetStateForTest() {
 }
 
 bool HostBuffer::MaybeCreateNewBuffer() {
+  if (bounded_ &&
+      (arena_blocked_ || exhausted_ ||
+       current_buffer_ + 1 >= device_buffers_[frame_index_].size())) {
+    exhausted_ = true;
+    return false;
+  }
   current_buffer_++;
   if (current_buffer_ >= device_buffers_[frame_index_].size()) {
     DeviceBufferDescriptor desc;
@@ -124,13 +155,17 @@ std::tuple<Range, std::shared_ptr<DeviceBuffer>, DeviceBuffer*>
 HostBuffer::EmplaceInternal(size_t length,
                             size_t align,
                             const EmplaceProc& cb) {
-  if (!cb) {
+  if (!cb || !initialized_ || (bounded_ && (arena_blocked_ || exhausted_))) {
     return {};
   }
 
   // If the requested allocation is bigger than the block size, create a one-off
   // device buffer and write to that.
   if (length > kAllocatorBlockSize) {
+    if (bounded_) {
+      exhausted_ = true;
+      return {};
+    }
     DeviceBufferDescriptor desc;
     desc.size = length;
     desc.storage_mode = StorageMode::kHostVisible;
@@ -150,7 +185,8 @@ HostBuffer::EmplaceInternal(size_t length,
   if (align > 0 && offset_ % align) {
     padding = align - (offset_ % align);
   }
-  if (offset_ + padding + length > kAllocatorBlockSize) {
+  if (padding > kAllocatorBlockSize - offset_ ||
+      length > kAllocatorBlockSize - offset_ - padding) {
     if (!MaybeCreateNewBuffer()) {
       return {};
     }
@@ -165,14 +201,24 @@ HostBuffer::EmplaceInternal(size_t length,
   current_buffer->Flush(output_range);
 
   offset_ += length;
-  return std::make_tuple(output_range, nullptr, current_buffer.get());
+  if (bounded_) {
+    return {output_range, current_buffer, nullptr};
+  }
+  return {output_range, nullptr, current_buffer.get()};
 }
 
 std::tuple<Range, std::shared_ptr<DeviceBuffer>, DeviceBuffer*>
 HostBuffer::EmplaceInternal(const void* buffer, size_t length) {
+  if (!initialized_ || (bounded_ && (arena_blocked_ || exhausted_))) {
+    return {};
+  }
   // If the requested allocation is bigger than the block size, create a one-off
   // device buffer and write to that.
   if (length > kAllocatorBlockSize) {
+    if (bounded_) {
+      exhausted_ = true;
+      return {};
+    }
     DeviceBufferDescriptor desc;
     desc.size = length;
     desc.storage_mode = StorageMode::kHostVisible;
@@ -205,19 +251,24 @@ HostBuffer::EmplaceInternal(const void* buffer, size_t length) {
     current_buffer->Flush(Range{old_length, length});
   }
   offset_ += length;
-  return std::make_tuple(Range{old_length, length}, nullptr,
-                         current_buffer.get());
+  if (bounded_) {
+    return {Range{old_length, length}, current_buffer, nullptr};
+  }
+  return {Range{old_length, length}, nullptr, current_buffer.get()};
 }
 
 std::tuple<Range, std::shared_ptr<DeviceBuffer>, DeviceBuffer*>
 HostBuffer::EmplaceInternal(const void* buffer, size_t length, size_t align) {
+  if (!initialized_ || (bounded_ && (arena_blocked_ || exhausted_))) {
+    return {};
+  }
   if (align == 0 || (GetLength() % align) == 0) {
     return EmplaceInternal(buffer, length);
   }
 
   {
     auto padding = align - (GetLength() % align);
-    if (offset_ + padding < kAllocatorBlockSize) {
+    if (padding < kAllocatorBlockSize - offset_) {
       offset_ += padding;
     } else if (!MaybeCreateNewBuffer()) {
       return {};
@@ -232,6 +283,22 @@ const std::shared_ptr<DeviceBuffer>& HostBuffer::GetCurrentBuffer() const {
 }
 
 void HostBuffer::Reset() {
+  if (bounded_) {
+    offset_ = current_buffer_ = 0u;
+    frame_index_ = (frame_index_ + 1) % kHostBufferArenaSize;
+    exhausted_ = false;
+    // Unlike a submission watermark, strong view ownership also covers CPU
+    // recordings and command buffers not yet submitted to the native queue.
+    // BufferView::TakeBuffer transfers this owner into actual VK tracking.
+    arena_blocked_ =
+        std::any_of(device_buffers_[frame_index_].begin(),
+                    device_buffers_[frame_index_].end(),
+                    [](const auto& buffer) { return buffer.use_count() != 1; });
+    if (!arena_blocked_) {
+      std::atomic_thread_fence(std::memory_order_acquire);
+    }
+    return;
+  }
   // When resetting the host buffer state at the end of the frame, check if
   // there are any unused buffers and remove them.
   while (device_buffers_[frame_index_].size() > current_buffer_ + 1) {

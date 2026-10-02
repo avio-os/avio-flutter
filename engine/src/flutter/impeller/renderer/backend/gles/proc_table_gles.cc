@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "impeller/renderer/backend/gles/proc_table_gles.h"
+#include "impeller/renderer/backend/gles/native_coverage_gles.h"
 
 #include <format>
 #include <sstream>
@@ -87,7 +88,8 @@ static void BindProcAlias(Proc& proc,
 }
 
 ProcTableGLES::ProcTableGLES(  // NOLINT(google-readability-function-size)
-    Resolver resolver) {
+    Resolver resolver,
+    bool avio_coverage) {
   // The reason this constructor has anywhere near enough code to tip off
   // `google-readability-function-size` is the proc macros, so ignore the lint.
 
@@ -187,7 +189,10 @@ ProcTableGLES::ProcTableGLES(  // NOLINT(google-readability-function-size)
     DrawElementsInstancedEXT.Reset();
   }
 
-  capabilities_ = std::make_shared<CapabilitiesGLES>(*this);
+  const bool native_coverage =
+      avio_coverage && ProbeNativeCoverageGLES(resolver, supports_gl3);
+  capabilities_ =
+      std::make_shared<CapabilitiesGLES>(*this, avio_coverage, native_coverage);
 
   is_valid_ = true;
 }

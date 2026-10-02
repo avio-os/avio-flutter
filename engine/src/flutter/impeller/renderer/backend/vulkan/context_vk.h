@@ -81,6 +81,7 @@ class ContextVK final : public Context,
     VkQueue queue;
     std::vector<std::string> instance_extensions;
     std::vector<std::string> device_extensions;
+    bool native_sample_shading_enabled = false;
   };
 
   struct Settings {
@@ -111,7 +112,9 @@ class ContextVK final : public Context,
   /// Visible for testing.
   static size_t ChooseThreadCountForWorkers(size_t hardware_concurrency);
 
-  static std::shared_ptr<ContextVK> Create(Settings settings);
+  static std::shared_ptr<ContextVK> Create(
+      Settings settings,
+      bool* native_teardown_safe = nullptr);
 
   uint64_t GetHash() const { return hash_; }
 
@@ -162,6 +165,10 @@ class ContextVK final : public Context,
 
   // |Context|
   void Shutdown() override;
+
+  bool IsSafeToDestroyNativeResources() const override {
+    return native_teardown_safe_;
+  }
 
   const WorkaroundsVK& GetWorkarounds() const;
 
@@ -285,6 +292,9 @@ class ContextVK final : public Context,
   }
 
  private:
+  bool ShutdownNativeCompletion();
+  bool native_teardown_safe_ = false;
+
   struct DeviceHolderImpl : public DeviceHolderVK {
     // |DeviceHolder|
     const vk::Device& GetDevice() const override { return device.get(); }

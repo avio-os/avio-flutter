@@ -40,12 +40,14 @@ EmbedderRenderTargetImpeller::EmbedderRenderTargetImpeller(
     fml::closure on_release,
     fml::closure framebuffer_destruction_callback,
     TakeRenderCompleteSyncFDCallback take_render_complete_sync_fd_callback,
-    bool supports_partial_msaa)
+    bool supports_partial_msaa,
+    bool requires_render_complete_sync_fd)
     : EmbedderRenderTarget(backing_store, std::move(on_release)),
       aiks_context_(std::move(aiks_context)),
       create_target_(std::move(create_target)),
       target_size_(target_size),
       supports_partial_msaa_(supports_partial_msaa),
+      requires_render_complete_sync_fd_(requires_render_complete_sync_fd),
       framebuffer_destruction_callback_(
           std::move(framebuffer_destruction_callback)),
       take_render_complete_sync_fd_callback_(
@@ -98,10 +100,14 @@ fml::UniqueFD EmbedderRenderTargetImpeller::TakeRenderCompleteSyncFD() {
     return {};
   }
   auto sync_fd = take_render_complete_sync_fd_callback_();
-  if (!sync_fd.is_valid()) {
+  if (!sync_fd.is_valid() && !requires_render_complete_sync_fd_) {
     aiks_context_->GetContext()->GetIdleWaiter()->WaitIdle();
   }
   return sync_fd;
+}
+
+bool EmbedderRenderTargetImpeller::RequiresRenderCompleteSyncFD() const {
+  return requires_render_complete_sync_fd_;
 }
 
 }  // namespace flutter

@@ -12,6 +12,14 @@ TextureSourceVK::TextureSourceVK(TextureDescriptor desc) : desc_(desc) {}
 
 TextureSourceVK::~TextureSourceVK() = default;
 
+void TextureSourceVK::ReleaseCachedFrameData() {
+  frame_data_.clear();
+  // A failed submission can return the exact producer wait to this source.
+  // Release that native handle before a foreign collection callback may drop
+  // its device owner; the OS render-completion FD has no such dependency.
+  returned_acquire_semaphore_.reset();
+}
+
 const TextureDescriptor& TextureSourceVK::GetTextureDescriptor() const {
   return desc_;
 }

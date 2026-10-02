@@ -311,6 +311,11 @@ bool RenderPassVK::IsValid() const {
   return is_valid_;
 }
 
+void RenderPassVK::RetainResource(std::shared_ptr<void> owner) {
+  RenderPass::RetainResource(owner);
+  command_buffer_->RetainResource(std::move(owner));
+}
+
 void RenderPassVK::OnSetLabel(std::string_view label) {
 #ifdef IMPELLER_DEBUG
   ContextVK::Cast(*context_).SetDebugName(render_pass_->Get(), label.data());
@@ -378,11 +383,12 @@ SharedHandleVK<vk::Framebuffer> RenderPassVK::CreateVKFramebuffer(
 
 // |RenderPass|
 void RenderPassVK::SetPipeline(PipelineRef pipeline) {
-  pipeline_ = pipeline;
-  if (!pipeline_) {
+  auto owner = pipeline.Lock();
+  pipeline_ = owner ? pipeline : PipelineRef(nullptr);
+  if (!owner) {
     return;
   }
-  context_->GetPipelineLibrary()->LogPipelineUsage(pipeline->GetDescriptor());
+  context_->GetPipelineLibrary()->LogPipelineUsage(owner->GetDescriptor());
 
   pipeline_uses_input_attachments_ =
       pipeline_->GetDescriptor().GetVertexDescriptor()->UsesInputAttachments();
@@ -528,7 +534,12 @@ bool RenderPassVK::SetIndexBuffer(BufferView index_buffer,
 
 // |RenderPass|
 fml::Status RenderPassVK::Draw() {
-  if (!pipeline_) {
+  if (!HasValidResourceOwners()) {
+    return {fml::StatusCode::kResourceExhausted,
+            "Fixed render-pass custody capacity unavailable"};
+  }
+  auto pipeline_owner = pipeline_.Lock();
+  if (!pipeline_owner) {
     return fml::Status(fml::StatusCode::kCancelled,
                        "No valid pipeline is bound to the RenderPass.");
   }
@@ -559,11 +570,16 @@ fml::Status RenderPassVK::Draw() {
           fml::StatusCode::kAborted,
           "Could not create pipeline variant with immutable sampler.");
     }
-    pipeline_ = raw_ptr(pipeline_variant);
+    pipeline_owner = std::move(pipeline_variant);
+    pipeline_ = raw_ptr(pipeline_owner);
   }
 
+  if (!command_buffer_->TrackPipeline(pipeline_owner)) {
+    return {fml::StatusCode::kResourceExhausted,
+            "Fixed native pipeline custody capacity unavailable"};
+  }
   const auto& context_vk = ContextVK::Cast(*context_);
-  const auto& pipeline_vk = PipelineVK::Cast(*pipeline_);
+  const auto& pipeline_vk = PipelineVK::Cast(*pipeline_owner);
 
   auto descriptor_result = command_buffer_->AllocateDescriptorSets(
       pipeline_vk.GetDescriptorSetLayout(), pipeline_vk.GetPipelineKey(),

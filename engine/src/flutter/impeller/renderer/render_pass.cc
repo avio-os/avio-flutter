@@ -80,7 +80,7 @@ bool RenderPass::AddCommand(Command&& command) {
 }
 
 bool RenderPass::EncodeCommands() const {
-  return OnEncodeCommands(*context_);
+  return HasValidResourceOwners() && OnEncodeCommands(*context_);
 }
 
 const std::shared_ptr<const Context>& RenderPass::GetContext() const {
@@ -121,9 +121,7 @@ void RenderPass::SetScissor(IRect32 scissor) {
 }
 
 void RenderPass::RetainResource(std::shared_ptr<void> owner) {
-  if (owner) {
-    retained_resources_.push_back(std::move(owner));
-  }
+  retained_resources_.Retain(std::move(owner));
 }
 
 void RenderPass::SetElementCount(size_t count) {
@@ -216,6 +214,10 @@ bool RenderPass::ValidateIndexBuffer(const BufferView& index_buffer,
 }
 
 fml::Status RenderPass::Draw() {
+  if (!HasValidResourceOwners()) {
+    return {fml::StatusCode::kResourceExhausted,
+            "Fixed render-pass custody capacity unavailable"};
+  }
   pending_.bound_buffers.offset = bound_buffers_start_.value_or(0u);
   pending_.bound_textures.offset = bound_textures_start_.value_or(0u);
   pending_.vertex_buffers.offset = vertex_buffers_start_.value_or(0u);

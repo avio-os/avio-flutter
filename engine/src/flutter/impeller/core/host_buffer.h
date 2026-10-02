@@ -9,6 +9,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -31,7 +32,10 @@ static const constexpr size_t kHostBufferArenaSize = 4u;
 /// after they were written. Nothing guarantees that few frames are in
 /// flight, so with a [GpuSubmissionTracker] the reuse is made safe. Entries
 /// whose GPU work has not completed by the time they come up for reuse are
-/// kept alive off to the side and replaced with fresh allocations.
+/// kept alive off to the side and replaced with fresh allocations by Create.
+/// CreateBounded instead prewarms fixed storage and refuses a busy ring entry
+/// without replacement, heap growth or a GPU wait. Its views own their buffers
+/// through both unsubmitted recordings and submitted GPU readers.
 class HostBuffer {
  public:
   static std::shared_ptr<HostBuffer> Create(
@@ -39,6 +43,14 @@ class HostBuffer {
       const std::shared_ptr<const IdleWaiter>& idle_waiter,
       size_t minimum_uniform_alignment,
       std::shared_ptr<const GpuSubmissionTracker> submission_tracker = nullptr);
+
+  // A fixed, cold-created arena. Owning views pin every pending/submitted
+  // reader; capacity/busy failure returns an empty view without growth or wait.
+  static std::shared_ptr<HostBuffer> CreateBounded(
+      const std::shared_ptr<Allocator>& allocator,
+      const std::shared_ptr<const IdleWaiter>& idle_waiter,
+      size_t minimum_uniform_alignment,
+      size_t blocks_per_arena);
 
   ~HostBuffer();
 
@@ -171,7 +183,8 @@ class HostBuffer {
       const std::shared_ptr<Allocator>& allocator,
       const std::shared_ptr<const IdleWaiter>& idle_waiter,
       size_t minimum_uniform_alignment,
-      std::shared_ptr<const GpuSubmissionTracker> submission_tracker);
+      std::shared_ptr<const GpuSubmissionTracker> submission_tracker,
+      std::optional<size_t> bounded_blocks_per_arena = std::nullopt);
 
   HostBuffer(const HostBuffer&) = delete;
 
@@ -193,6 +206,10 @@ class HostBuffer {
   size_t offset_ = 0u;
   size_t frame_index_ = 0u;
   size_t minimum_uniform_alignment_ = 0u;
+  bool bounded_ = false;
+  bool initialized_ = false;
+  bool arena_blocked_ = false;
+  bool exhausted_ = false;
 };
 
 }  // namespace impeller

@@ -24,6 +24,21 @@ abstract class ClipPathEngineLayer implements EngineLayer {}
 
 abstract class OpacityEngineLayer implements EngineLayer {}
 
+abstract class AvioItemEffectEngineLayer implements EngineLayer {}
+
+class AvioOutputGroundRegion {
+  const AvioOutputGroundRegion({required this.rect, required this.color});
+  final Rect rect;
+  final Color color;
+}
+
+abstract class AvioOutputGroundEngineLayer implements EngineLayer {}
+
+/// Whether ready root pixels are immutable or remain live.
+enum AvioReadyContentKind { static, live }
+
+abstract class AvioReadyContentEngineLayer implements EngineLayer {}
+
 abstract class ColorFilterEngineLayer implements EngineLayer {}
 
 abstract class ImageFilterEngineLayer implements EngineLayer {}
@@ -34,6 +49,26 @@ abstract class ShaderMaskEngineLayer implements EngineLayer {}
 
 abstract class SceneBuilder {
   factory SceneBuilder() => engine.renderer.createSceneBuilder();
+
+  AvioItemEffectEngineLayer pushAvioItemEffect({
+    required double opacity,
+    int declarationId = 1,
+    Offset offset = Offset.zero,
+    AvioItemEffectEngineLayer? oldLayer,
+  });
+  AvioOutputGroundEngineLayer pushAvioOutputGround({
+    required Color? color,
+    List<AvioOutputGroundRegion> regions = const <AvioOutputGroundRegion>[],
+    Offset offset = Offset.zero,
+    AvioOutputGroundEngineLayer? oldLayer,
+  });
+
+  AvioReadyContentEngineLayer pushAvioReadyContent({
+    required int contentRevision,
+    AvioReadyContentKind kind = AvioReadyContentKind.static,
+    Offset offset = Offset.zero,
+    AvioReadyContentEngineLayer? oldLayer,
+  });
 
   OffsetEngineLayer pushOffset(double dx, double dy, {OffsetEngineLayer? oldLayer});
   TransformEngineLayer pushTransform(Float64List matrix4, {TransformEngineLayer? oldLayer});

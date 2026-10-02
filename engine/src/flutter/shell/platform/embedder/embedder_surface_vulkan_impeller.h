@@ -55,7 +55,9 @@ class EmbedderSurfaceVulkanImpeller final : public EmbedderSurface,
       std::optional<EmbedderVulkanResourceLifecycleConfig>
           resource_lifecycle_config = std::nullopt,
       std::optional<impeller::AvioAntialiasingConfig> avio_antialiasing_config =
-          std::nullopt);
+          std::nullopt,
+      bool native_sample_shading_enabled = false,
+      bool* native_teardown_safe = nullptr);
 
   ~EmbedderSurfaceVulkanImpeller() override;
 

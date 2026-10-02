@@ -70,6 +70,27 @@ TEST(EmbedderRenderTargetImpellerTest, MaterializesOnlyOnce) {
   EXPECT_EQ(creations, 1);
 }
 
+TEST(EmbedderRenderTargetImpellerTest,
+     RequiredMissingSyncFDDoesNotUseUnprovedIdleFallback) {
+  // This context intentionally has no backend. The negotiated path must
+  // return the missing dependency without dereferencing an idle waiter.
+  auto aiks = std::make_shared<impeller::AiksContext>(nullptr, nullptr);
+  int exports = 0;
+  EmbedderRenderTargetImpeller target(
+      {}, aiks, DlISize(800, 600),
+      []() -> std::unique_ptr<impeller::RenderTarget> { return nullptr; },
+      [] {}, [] {},
+      [&]() -> fml::UniqueFD {
+        exports++;
+        return {};
+      },
+      /*supports_partial_msaa=*/true,
+      /*requires_render_complete_sync_fd=*/true);
+  EXPECT_TRUE(target.RequiresRenderCompleteSyncFD());
+  EXPECT_FALSE(target.TakeRenderCompleteSyncFD().is_valid());
+  EXPECT_EQ(exports, 1);
+}
+
 // Exercise the real selected-target metadata and terminal paths. No GPU is
 // needed: a skipped target must never invoke its factory, and a failed factory
 // must prove no submission without falling into Slimpeller's fatal
@@ -116,7 +137,8 @@ void CheckDeferredTerminal(bool unchanged, bool accept_terminal = true) {
           const FlutterBackingStore* backing,
           const FlutterBackingStorePresentInfo*,
           const std::vector<FlutterAvioCompositorMaterial>&, bool,
-          const std::vector<FlutterAvioWindowPreview>&, bool) {
+          const std::vector<FlutterAvioWindowPreview>&, bool,
+          const AvioFrameFacts&) {
         presents++;
         EXPECT_EQ(view, 29);
         EXPECT_EQ(opportunity, 73u);

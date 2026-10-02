@@ -259,6 +259,31 @@ class AvioCompositorMaterialEngineLayer extends _EngineLayerWrapper {
   AvioCompositorMaterialEngineLayer._(super.nativeLayer) : super._();
 }
 
+/// Retained view-root opacity metadata, without an engine opacity saveLayer.
+class AvioItemEffectEngineLayer extends _EngineLayerWrapper {
+  AvioItemEffectEngineLayer._(super.nativeLayer) : super._();
+}
+
+/// A solid fill for an explicit logical view-root region.
+class AvioOutputGroundRegion {
+  const AvioOutputGroundRegion({required this.rect, required this.color});
+  final Rect rect;
+  final Color color;
+}
+
+/// Retained output-ground author, including an explicit ground clear.
+class AvioOutputGroundEngineLayer extends _EngineLayerWrapper {
+  AvioOutputGroundEngineLayer._(super.nativeLayer) : super._();
+}
+
+/// Authored revision and kind of intended ready view-root content.
+/// Whether ready root pixels are immutable or remain live.
+enum AvioReadyContentKind { static, live }
+
+class AvioReadyContentEngineLayer extends _EngineLayerWrapper {
+  AvioReadyContentEngineLayer._(super.nativeLayer) : super._();
+}
+
 /// Builds a [Scene] containing the given visuals.
 ///
 /// A [Scene] can then be rendered using [FlutterView.render].
@@ -495,6 +520,34 @@ abstract class SceneBuilder {
     double cornerRadius = 0,
     bool replaceChildren = false,
     AvioWindowPreviewEngineLayer? oldLayer,
+  });
+
+  /// Authors alpha for the exact view-root content revision. Only a sole-child
+  /// root prefix, including ordinary root offset/scale layers, may contain it.
+  /// Nested or duplicate authors reject the scene before rendering.
+  AvioItemEffectEngineLayer pushAvioItemEffect({
+    required double opacity,
+    int declarationId = 1,
+    Offset offset = Offset.zero,
+    AvioItemEffectEngineLayer? oldLayer,
+  });
+
+  /// Authors the output fill with this exact revision. A null color explicitly
+  /// clears the ground. This uses the same root-only placement as item effects.
+  AvioOutputGroundEngineLayer pushAvioOutputGround({
+    required Color? color,
+    List<AvioOutputGroundRegion> regions = const <AvioOutputGroundRegion>[],
+    Offset offset = Offset.zero,
+    AvioOutputGroundEngineLayer? oldLayer,
+  });
+
+  /// Authors the nonzero revision of intended ready content. Only kind static is sealable.
+  /// Uses the same sole-child root prefix as other root frame facts.
+  AvioReadyContentEngineLayer pushAvioReadyContent({
+    required int contentRevision,
+    AvioReadyContentKind kind = AvioReadyContentKind.static,
+    Offset offset = Offset.zero,
+    AvioReadyContentEngineLayer? oldLayer,
   });
 
   /// Pushes a retained, non-painting material node for an external compositor.
@@ -1010,6 +1063,133 @@ base class _NativeSceneBuilder extends NativeFieldWrapperClass1 implements Scene
     double maskRectBottom,
     int blendMode,
     int filterQualityIndex,
+    EngineLayer? oldLayer,
+  );
+
+  @override
+  AvioItemEffectEngineLayer pushAvioItemEffect({
+    required double opacity,
+    int declarationId = 1,
+    Offset offset = Offset.zero,
+    AvioItemEffectEngineLayer? oldLayer,
+  }) {
+    if (!opacity.isFinite || opacity < 0 || opacity > 1) {
+      throw RangeError.value(opacity, 'opacity', 'Expected a finite alpha from 0 to 1.');
+    }
+    if (declarationId <= 0) {
+      throw RangeError.value(declarationId, 'declarationId');
+    }
+    assert(_debugCheckCanBeUsedAsOldLayer(oldLayer, 'pushAvioItemEffect'));
+    final EngineLayer native = _NativeEngineLayer._();
+    _pushAvioItemEffect(
+      native,
+      opacity,
+      declarationId,
+      offset.dx,
+      offset.dy,
+      oldLayer?._nativeLayer,
+    );
+    final layer = AvioItemEffectEngineLayer._(native);
+    assert(_debugPushLayer(layer));
+    return layer;
+  }
+
+  @Native<Void Function(Pointer<Void>, Handle, Double, Uint64, Double, Double, Handle)>(
+    symbol: 'SceneBuilder::pushAvioItemEffect',
+  )
+  external void _pushAvioItemEffect(
+    EngineLayer layer,
+    double opacity,
+    int declarationId,
+    double dx,
+    double dy,
+    EngineLayer? oldLayer,
+  );
+
+  @override
+  AvioOutputGroundEngineLayer pushAvioOutputGround({
+    required Color? color,
+    List<AvioOutputGroundRegion> regions = const <AvioOutputGroundRegion>[],
+    Offset offset = Offset.zero,
+    AvioOutputGroundEngineLayer? oldLayer,
+  }) {
+    if (regions.length > 4 ||
+        (color != null && regions.isNotEmpty) ||
+        regions.any((AvioOutputGroundRegion r) => !r.rect.isFinite || r.rect.isEmpty)) {
+      throw ArgumentError('Ground must be a color or at most four valid root regions.');
+    }
+    final rects = Float64List(regions.length * 4);
+    final colors = Uint32List(regions.length);
+    for (var i = 0; i < regions.length; i++) {
+      final Rect r = regions[i].rect;
+      rects.setRange(i * 4, i * 4 + 4, <double>[r.left, r.top, r.right, r.bottom]);
+      colors[i] = regions[i].color.toARGB32();
+    }
+    assert(_debugCheckCanBeUsedAsOldLayer(oldLayer, 'pushAvioOutputGround'));
+    final EngineLayer native = _NativeEngineLayer._();
+    _pushAvioOutputGround(
+      native,
+      color != null,
+      color?.toARGB32() ?? 0,
+      rects,
+      colors,
+      offset.dx,
+      offset.dy,
+      oldLayer?._nativeLayer,
+    );
+    final layer = AvioOutputGroundEngineLayer._(native);
+    assert(_debugPushLayer(layer));
+    return layer;
+  }
+
+  @Native<
+    Void Function(Pointer<Void>, Handle, Bool, Uint32, Handle, Handle, Double, Double, Handle)
+  >(symbol: 'SceneBuilder::pushAvioOutputGround')
+  external void _pushAvioOutputGround(
+    EngineLayer layer,
+    bool hasColor,
+    int colorArgb,
+    Float64List regionRects,
+    Uint32List regionColors,
+    double dx,
+    double dy,
+    EngineLayer? oldLayer,
+  );
+
+  @override
+  AvioReadyContentEngineLayer pushAvioReadyContent({
+    required int contentRevision,
+    AvioReadyContentKind kind = AvioReadyContentKind.static,
+    Offset offset = Offset.zero,
+    AvioReadyContentEngineLayer? oldLayer,
+  }) {
+    if (contentRevision <= 0) {
+      throw RangeError.value(contentRevision, 'contentRevision');
+    }
+    assert(_debugCheckCanBeUsedAsOldLayer(oldLayer, 'pushAvioReadyContent'));
+    final EngineLayer native = _NativeEngineLayer._();
+    _pushAvioReadyContent(
+      native,
+      contentRevision,
+      kind.index,
+      offset.dx,
+      offset.dy,
+      oldLayer?._nativeLayer,
+    );
+    final layer = AvioReadyContentEngineLayer._(native);
+    assert(_debugPushLayer(layer));
+    return layer;
+  }
+
+  @Native<Void Function(Pointer<Void>, Handle, Uint64, Uint32, Double, Double, Handle)>(
+    symbol: 'SceneBuilder::pushAvioReadyContent',
+  )
+  external void _pushAvioReadyContent(
+    EngineLayer layer,
+    int contentRevision,
+    int contentKind,
+    double dx,
+    double dy,
     EngineLayer? oldLayer,
   );
 

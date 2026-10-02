@@ -6,10 +6,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <utility>
 
+#include "fml/logging.h"
 #include "impeller/renderer/render_resource_scope.h"
 
 namespace impeller {
@@ -48,7 +51,102 @@ TextureDescriptor Descriptor(ISize size,
 
 }  // namespace
 
+// A claim gets a new shared control block and generation from cold storage.
+// Unlike a standing strong shared_ptr<Lease>, expired weak readers can never
+// lock a newer lease. Their bounded slots remain occupied until final weak
+// destruction. The allocator itself keeps this storage alive after region
+// teardown, without owning State or a standing Lease reference.
+struct AvioCoverageLeaseStorage {
+  static constexpr size_t kSlotBytes = sizeof(AvioCoverageRegion::Lease) + 128;
+  struct Slot {
+    alignas(std::max_align_t) std::array<std::byte, kSlotBytes> bytes;
+    std::atomic_bool occupied = false;
+  };
+  std::array<Slot, AvioCoverageRegion::kMaximumLeaseClaims> slots;
+  size_t cursor = 0;
+
+  std::optional<size_t> Reserve() {
+    for (size_t i = 0; i < slots.size(); i++) {
+      const size_t index = (cursor + i) % slots.size();
+      bool vacant = false;
+      if (slots[index].occupied.compare_exchange_strong(
+              vacant, true, std::memory_order_acquire)) {
+        cursor = (index + 1) % slots.size();
+        return index;
+      }
+    }
+    return std::nullopt;
+  }
+  void Release(size_t index) {
+    slots[index].occupied.store(false, std::memory_order_release);
+  }
+};
+
+template <class T>
+struct AvioCoverageLeaseAllocator {
+  using value_type = T;
+  std::shared_ptr<AvioCoverageLeaseStorage> storage;
+  size_t index;
+
+  AvioCoverageLeaseAllocator(std::shared_ptr<AvioCoverageLeaseStorage> storage,
+                             size_t index)
+      : storage(std::move(storage)), index(index) {}
+  template <class U>
+  AvioCoverageLeaseAllocator(const AvioCoverageLeaseAllocator<U>& other)
+      : storage(other.storage), index(other.index) {}
+
+  T* allocate(size_t count) noexcept {
+    // Rebound shared-control-block layout is proved by the actual standard
+    // library compilation. Reserve happened before any packing/GPU mutation;
+    // this cannot throw on the engine's -fno-exceptions raster path.
+    static_assert(sizeof(T) <= AvioCoverageLeaseStorage::kSlotBytes);
+    static_assert(alignof(T) <= alignof(std::max_align_t));
+    FML_CHECK(count == 1 && storage->slots[index].occupied.load());
+    return reinterpret_cast<T*>(storage->slots[index].bytes.data());
+  }
+  void deallocate(T*, size_t) noexcept { storage->Release(index); }
+  template <class U, class... Args>
+  void construct(U* pointer, Args&&... args) {
+    ::new (static_cast<void*>(pointer)) U(std::forward<Args>(args)...);
+  }
+  template <class U>
+  bool operator==(const AvioCoverageLeaseAllocator<U>& other) const {
+    return storage == other.storage && index == other.index;
+  }
+};
+
 struct AvioCoverageRegion::State {
+  struct LeaseReservation {
+    std::shared_ptr<AvioCoverageLeaseStorage> storage;
+    size_t index;
+    bool committed = false;
+    LeaseReservation(std::shared_ptr<AvioCoverageLeaseStorage> storage,
+                     size_t index)
+        : storage(std::move(storage)), index(index) {}
+    LeaseReservation(const LeaseReservation&) = delete;
+    LeaseReservation(LeaseReservation&& other)
+        : storage(std::move(other.storage)),
+          index(other.index),
+          committed(other.committed) {
+      other.committed = true;
+    }
+    ~LeaseReservation() {
+      if (!committed)
+        storage->Release(index);
+    }
+    std::shared_ptr<Lease> Create(std::shared_ptr<State> state,
+                                  Kind kind,
+                                  uint64_t frame,
+                                  AvioRegionPacking::Allocation allocation,
+                                  bool overflow = false,
+                                  bool clip_mask_scratch = false) {
+      auto result = std::allocate_shared<Lease>(
+          AvioCoverageLeaseAllocator<Lease>(storage, index), std::move(state),
+          kind, frame, allocation, overflow, clip_mask_scratch);
+      committed = true;
+      return result;
+    }
+  };
   struct Resource {
     std::shared_ptr<Texture> texture;
     size_t nominal = 0u;
@@ -75,14 +173,23 @@ struct AvioCoverageRegion::State {
                        this->config.colour_size.height) {}
 
   std::shared_ptr<Allocator> allocator;
+  std::shared_ptr<AvioCoverageLeaseStorage> lease_storage =
+      std::make_shared<AvioCoverageLeaseStorage>();
   AvioCoverageRegionConfig config;
   RenderTarget mask;
   RenderTarget colour;
+  RenderTarget clip_mask_scratch;
+  std::shared_ptr<Texture> colour_seed;
+  std::shared_ptr<Texture> continuous_destination_prefix;
   AvioRegionPacking mask_packing;
   AvioRegionPacking colour_packing;
-  std::array<Resource, 5> coverage_resources = {};
+  std::array<Resource, 7> coverage_resources = {};
   size_t coverage_count = 0u;
   size_t mask_resource_count = 0u;
+  size_t clip_mask_resource = 0u;
+  bool clip_mask_live = false;
+  uint64_t clip_mask_serial = 0u;
+  uint64_t clip_mask_frame = 0u;
   std::array<Layer, AvioRegionPacking::kMaximumAllocations> layers = {};
   size_t warm_layers = 0u;
   size_t layer_count = 0u;
@@ -96,6 +203,13 @@ struct AvioCoverageRegion::State {
   std::atomic_bool colour_initialized = false;
   AvioCoverageRegionUsage interval;
 
+  std::optional<LeaseReservation> ReserveLease() {
+    auto index = lease_storage->Reserve();
+    if (!index)
+      return std::nullopt;
+    return LeaseReservation(lease_storage, *index);
+  }
+
   bool IsLive(Kind kind, uint64_t epoch, AvioRegionPacking::Token token) const {
     if (kind == Kind::kMask) {
       // Static mask caches and logical clips may retain a mask across frames.
@@ -107,6 +221,10 @@ struct AvioCoverageRegion::State {
     return token.index < layer_count && layers[token.index].live &&
            layers[token.index].serial == token.serial &&
            layers[token.index].epoch == epoch;
+  }
+  bool IsClipMaskLive(uint64_t epoch, AvioRegionPacking::Token token) const {
+    return clip_mask_live && clip_mask_frame == epoch &&
+           clip_mask_serial == token.serial;
   }
 
   void Release(Kind kind, uint64_t epoch, AvioRegionPacking::Token token) {
@@ -156,6 +274,19 @@ struct AvioCoverageRegion::State {
     }
   }
 
+  bool CoverageLogicalReader(size_t index) const {
+    if (config.cache_native_masks && index == clip_mask_resource) {
+      return clip_mask_live;
+    }
+    if (index < mask_resource_count) {
+      return mask_packing.LiveCount() > 0u;
+    }
+    const auto stencil = colour.GetStencilAttachment();
+    return colour_packing.LiveCount() > 0u ||
+           (clip_mask_live && stencil &&
+            coverage_resources[index].texture == stencil->texture);
+  }
+
   AvioCoverageRegionUsage CurrentUsage() const {
     AvioCoverageRegionUsage result = interval;
     auto& coverage = result.coverage;
@@ -166,9 +297,7 @@ struct AvioCoverageRegion::State {
         0u;
     layer_usage.leased_entries = layer_usage.peak_leased_nominal_bytes = 0u;
     for (size_t i = 0; i < coverage_count; i++) {
-      AddUsage(coverage, coverage_resources[i],
-               i < mask_resource_count ? mask_packing.LiveCount() > 0u
-                                       : colour_packing.LiveCount() > 0u);
+      AddUsage(coverage, coverage_resources[i], CoverageLogicalReader(i));
     }
     for (size_t i = 0; i < layer_count; i++) {
       AddUsage(layer_usage, layers[i].resource, layers[i].live);
@@ -206,9 +335,7 @@ struct AvioCoverageRegion::State {
     RenderResourceUsage coverage;
     RenderResourceUsage layer_usage;
     for (size_t i = 0; i < coverage_count; i++) {
-      AddUsage(coverage, coverage_resources[i],
-               i < mask_resource_count ? mask_packing.LiveCount() > 0u
-                                       : colour_packing.LiveCount() > 0u);
+      AddUsage(coverage, coverage_resources[i], CoverageLogicalReader(i));
     }
     for (size_t i = 0; i < layer_count; i++) {
       AddUsage(layer_usage, layers[i].resource, layers[i].live);
@@ -246,10 +373,14 @@ struct AvioCoverageRegion::State {
       return fail("Could not allocate a required warm region attachment.");
     }
     texture->SetLabel(label);
-    const size_t real = texture->GetAllocatedByteSize();
-    // This path is negotiated only on Vulkan, which knows its requirements.
-    // Unknown bytes cannot prove that a permanent region fits its hard cap.
-    if (real == 0u || real > remaining_real) {
+    const size_t real = config.require_exact_allocated_bytes
+                            ? texture->GetAllocatedByteSize()
+                            : 0u;
+    // Exact Vulkan requirements must fit. Descriptor-only GLES mode keeps
+    // unknown physical bytes unavailable; the nominal cap above still bounds
+    // renderer-created samples, formats, extents and mip levels.
+    if (config.require_exact_allocated_bytes &&
+        (real == 0u || real > remaining_real)) {
       return fail(
           "Actual region attachment requirements exceed the cap or are "
           "unknown.");
@@ -272,6 +403,9 @@ struct AvioCoverageRegion::State {
       real += coverage_resources[i].real;
     }
     const auto allocate = [&](PixelFormat pixel_format, bool msaa) {
+      if (coverage_count == coverage_resources.size()) {
+        return std::optional<Resource>{};
+      }
       auto result =
           Allocate(Descriptor(size, pixel_format, msaa), "Avio Coverage Region",
                    config.coverage_max_bytes - nominal,
@@ -317,6 +451,91 @@ struct AvioCoverageRegion::State {
     return target.IsValid();
   }
 
+  bool CreateClipMaskScratch(std::string* error) {
+    size_t nominal = 0, real = 0;
+    for (size_t i = 0; i < coverage_count; ++i) {
+      nominal += coverage_resources[i].nominal;
+      real += coverage_resources[i].real;
+    }
+    if (coverage_count == coverage_resources.size()) {
+      return false;
+    }
+    const AvioResourceAllocationScope kind(
+        AvioRenderResourceKind::kCoverageRegion);
+    auto resource = Allocate(
+        Descriptor(config.colour_size, PixelFormat::kR8UNormInt, true),
+        "Avio Clip Sample Lanes Scratch", config.coverage_max_bytes - nominal,
+        config.coverage_max_bytes - real, error);
+    if (!resource) {
+      return false;
+    }
+    ColorAttachment mask;
+    mask.texture = resource->texture;
+    mask.load_action = LoadAction::kClear;
+    mask.store_action = StoreAction::kStore;
+    clip_mask_scratch.SetColorAttachment(mask, 0u);
+    clip_mask_scratch.SetStencilAttachment(*colour.GetStencilAttachment());
+    clip_mask_scratch.SetDepthAttachment(*colour.GetDepthAttachment());
+    // These standing target references borrow the existing D/S allocation;
+    // physical bytes and creation events remain counted exactly once.
+    for (size_t i = 0; i < coverage_count; ++i) {
+      if (coverage_resources[i].texture ==
+          colour.GetStencilAttachment()->texture) {
+        coverage_resources[i].owned_references += 2u;
+      }
+    }
+    clip_mask_resource = coverage_count;
+    coverage_resources[coverage_count++] = *resource;
+    interval.coverage.created_entries++;
+    interval.coverage.created_real_bytes += resource->real;
+    return clip_mask_scratch.IsValid();
+  }
+
+  bool CreateColourSeed(std::string* error) {
+    size_t nominal = 0, real = 0;
+    for (size_t i = 0; i < coverage_count; ++i) {
+      nominal += coverage_resources[i].nominal;
+      real += coverage_resources[i].real;
+    }
+    const AvioResourceAllocationScope kind(
+        AvioRenderResourceKind::kCoverageRegion);
+    auto resource = Allocate(
+        Descriptor(config.colour_size, config.colour_format, false),
+        "Avio GLES Prefix Scratch", config.coverage_max_bytes - nominal,
+        config.coverage_max_bytes - real, error);
+    if (!resource || coverage_count == coverage_resources.size())
+      return false;
+    colour_seed = resource->texture;
+    coverage_resources[coverage_count++] = *resource;
+    interval.coverage.created_entries++;
+    interval.coverage.created_real_bytes += resource->real;
+    return true;
+  }
+
+  bool CreateContinuousDestinationPrefix(std::string* error) {
+    size_t nominal = 0, real = 0;
+    for (size_t i = 0; i < coverage_count; ++i) {
+      nominal += coverage_resources[i].nominal;
+      real += coverage_resources[i].real;
+    }
+    const AvioResourceAllocationScope kind(
+        AvioRenderResourceKind::kCoverageRegion);
+    auto descriptor =
+        Descriptor(config.colour_size, config.colour_format, true);
+    descriptor.usage |= TextureUsage::kShaderRead;
+    auto resource = Allocate(descriptor, "Avio Continuous Native Prefix",
+                             config.coverage_max_bytes - nominal,
+                             config.coverage_max_bytes - real, error);
+    if (!resource || coverage_count == coverage_resources.size()) {
+      return false;
+    }
+    continuous_destination_prefix = resource->texture;
+    coverage_resources[coverage_count++] = *resource;
+    interval.coverage.created_entries++;
+    interval.coverage.created_real_bytes += resource->real;
+    return true;
+  }
+
   bool CreateWarmLayers(std::string* error) {
     const AvioResourceAllocationScope kind_scope(
         AvioRenderResourceKind::kLayerRegion);
@@ -351,14 +570,16 @@ AvioCoverageRegion::Lease::Lease(std::shared_ptr<State> state,
                                  Kind kind,
                                  uint64_t frame,
                                  AvioRegionPacking::Allocation allocation,
-                                 bool overflow)
+                                 bool overflow,
+                                 bool clip_mask_scratch)
     : state_(state),
       kind_(kind),
       frame_(frame),
       token_(allocation.token),
       area_(ToRect(allocation.area)),
       content_(ToRect(allocation.content)),
-      overflow_(overflow) {}
+      overflow_(overflow),
+      clip_mask_scratch_(clip_mask_scratch) {}
 
 AvioCoverageRegion::Lease::~Lease() {
   Release();
@@ -366,7 +587,9 @@ AvioCoverageRegion::Lease::~Lease() {
 
 bool AvioCoverageRegion::Lease::IsValid() const {
   const auto state = state_.lock();
-  return !released_ && state && state->IsLive(kind_, frame_, token_);
+  return !released_ && state &&
+         (clip_mask_scratch_ ? state->IsClipMaskLive(frame_, token_)
+                             : state->IsLive(kind_, frame_, token_));
 }
 
 void AvioCoverageRegion::Lease::Release() {
@@ -374,17 +597,29 @@ void AvioCoverageRegion::Lease::Release() {
     return;
   }
   if (const auto state = state_.lock()) {
-    state->Release(kind_, frame_, token_);
+    if (clip_mask_scratch_) {
+      if (state->IsClipMaskLive(frame_, token_)) {
+        state->clip_mask_live = false;
+      }
+    } else {
+      state->Release(kind_, frame_, token_);
+    }
   }
   released_ = true;
 }
 
 RenderTarget AvioCoverageRegion::Lease::GetRenderTarget() const {
   const auto state = state_.lock();
-  if (released_ || !state || !state->IsLive(kind_, frame_, token_)) {
+  if (!IsValid() || !state) {
     return {};
   }
-  auto target = state->Target(kind_, token_);
+  auto target = clip_mask_scratch_ ? state->clip_mask_scratch
+                                   : state->Target(kind_, token_);
+  if (clip_mask_scratch_) {
+    // Full clear is mandatory, including first use from Undefined layout.
+    // Consumers obtain the explicit sampled content rectangle separately.
+    return target;
+  }
   if (!target.SetRenderArea(area_)) {
     return {};
   }
@@ -424,7 +659,8 @@ std::shared_ptr<AvioCoverageRegion> AvioCoverageRegion::Create(
     return nullptr;
   }
   auto state = std::make_shared<State>(std::move(allocator), config);
-  if (!state->CreateCoverageTarget(state->mask, config.coverage_size,
+  if (config.cache_native_masks &&
+      !state->CreateCoverageTarget(state->mask, config.coverage_size,
                                    PixelFormat::kR8UNormInt,
                                    PixelFormat::kS8UInt, false, error)) {
     return nullptr;
@@ -433,6 +669,10 @@ std::shared_ptr<AvioCoverageRegion> AvioCoverageRegion::Create(
   if (!state->CreateCoverageTarget(
           state->colour, config.colour_size, config.colour_format,
           config.colour_depth_stencil_format, true, error) ||
+      (!config.cache_native_masks && !state->CreateColourSeed(error)) ||
+      (config.cache_native_masks && !state->CreateClipMaskScratch(error)) ||
+      (config.continuous_destination_prefix &&
+       !state->CreateContinuousDestinationPrefix(error)) ||
       !state->CreateWarmLayers(error)) {
     return nullptr;
   }
@@ -523,6 +763,9 @@ AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireCoverage(
       (kind == Kind::kColour && !IsColourInitialized())) {
     return {Status::kNotInitialized, nullptr};
   }
+  auto reservation = state_->ReserveLease();
+  if (!reservation)
+    return {Status::kNeedsFlush, nullptr};
   auto& packing =
       kind == Kind::kMask ? state_->mask_packing : state_->colour_packing;
   auto result = packing.Allocate(size.width, size.height);
@@ -536,8 +779,46 @@ AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireCoverage(
     case AvioRegionPacking::Status::kSuccess:
       break;
   }
-  auto lease = std::shared_ptr<Lease>(
-      new Lease(state_, kind, state_->frame, *result.allocation));
+  auto lease =
+      reservation->Create(state_, kind, state_->frame, *result.allocation);
+  state_->UpdatePeak();
+  return {Status::kSuccess, std::move(lease)};
+}
+
+AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireClipMaskScratch(
+    ISize size) {
+  if (!state_->frame_open) {
+    return {Status::kFrameNotOpen, nullptr};
+  }
+  if (!state_->config.cache_native_masks ||
+      !state_->clip_mask_scratch.HasColorAttachment(0u) ||
+      !IsColourInitialized()) {
+    return {Status::kNotInitialized, nullptr};
+  }
+  if (size.width <= 0 || size.height <= 0 || state_->next_serial == 0u) {
+    return {Status::kInvalid, nullptr};
+  }
+  if (!Fits(size, state_->config.colour_size)) {
+    return {Status::kNeedsTiling, nullptr};
+  }
+  if (state_->clip_mask_live) {
+    return {Status::kNeedsFlush, nullptr};
+  }
+  auto reservation = state_->ReserveLease();
+  if (!reservation) {
+    return {Status::kNeedsFlush, nullptr};
+  }
+  const auto serial = state_->next_serial++;
+  const auto extent = state_->config.colour_size;
+  const AvioRegionPacking::Allocation allocation = {
+      {state_->frame, 0u, serial},
+      {0, 0, extent.width, extent.height},
+      {0, 0, size.width, size.height}};
+  state_->clip_mask_live = true;
+  state_->clip_mask_serial = serial;
+  state_->clip_mask_frame = state_->frame;
+  auto lease = reservation->Create(state_, Kind::kMask, state_->frame,
+                                   allocation, false, true);
   state_->UpdatePeak();
   return {Status::kSuccess, std::move(lease)};
 }
@@ -554,6 +835,9 @@ AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireLayer(
       state_->next_serial == 0u) {
     return {Status::kInvalid, nullptr};
   }
+  auto reservation = state_->ReserveLease();
+  if (!reservation)
+    return {Status::kNeedsFlush, nullptr};
   size_t index = state_->warm_layers;
   int64_t best_area = std::numeric_limits<int64_t>::max();
   if (mip_count == 1) {
@@ -611,8 +895,8 @@ AvioCoverageRegion::Acquisition AvioCoverageRegion::AcquireLayer(
       {state_->frame, index, layer.serial},
       {0, 0, physical_size.width, physical_size.height},
       {0, 0, size.width, size.height}};
-  auto lease = std::shared_ptr<Lease>(
-      new Lease(state_, Kind::kLayer, state_->frame, allocation, overflow));
+  auto lease = reservation->Create(state_, Kind::kLayer, state_->frame,
+                                   allocation, overflow);
   state_->UpdatePeak();
   return {Status::kSuccess, std::move(lease)};
 }
@@ -647,6 +931,12 @@ RenderTarget AvioCoverageRegion::GetCoverageAtlasTarget() const {
   return target;
 }
 
+RenderTarget AvioCoverageRegion::GetClipMaskScratchTarget() const {
+  auto target = state_->clip_mask_scratch;
+  state_->UpdatePeak();
+  return target;
+}
+
 ISize AvioCoverageRegion::GetColourIslandSize() const {
   return state_->config.colour_size;
 }
@@ -676,6 +966,94 @@ AvioCoverageRegionUsage AvioCoverageRegion::ReportUsage(
     state_->interval = {};
   }
   return result;
+}
+
+bool AvioCoverageRegion::HasExactAllocatedBytes() const {
+  return state_->config.require_exact_allocated_bytes;
+}
+
+bool AvioCoverageRegion::CachesNativeMasks() const {
+  return state_->config.cache_native_masks;
+}
+
+std::shared_ptr<Texture> AvioCoverageRegion::GetColourSeedTexture() const {
+  return state_->colour_seed;
+}
+
+std::shared_ptr<Texture> AvioCoverageRegion::GetContinuousDestinationPrefix()
+    const {
+  return state_->continuous_destination_prefix;
+}
+
+std::array<RenderTarget, 5> AvioCoverageRegion::GetWarmLayerTargets() const {
+  std::array<RenderTarget, 5> targets;
+  for (size_t i = 0; i < targets.size(); ++i) {
+    targets[i] = state_->layers[i].target;
+  }
+  return targets;
+}
+
+AvioRenderResourceReport AvioCoverageRegion::GetDescriptorResourceReport(
+    bool start_new_interval) const {
+  AvioRenderResourceReport report;
+  report.available = true;
+  // Lifecycle counts belong to the observed region inventory as a whole,
+  // including an overflow created/released before this report. Descriptor
+  // rows below expose bytes/dimensions once, without pretending each physical
+  // descriptor owns that aggregate interval's creation/destruction events.
+  const auto usage = state_->CurrentUsage();
+  auto add_counts = [&](AvioRenderResourceKind kind,
+                        RenderResourceUsage counts) {
+    counts.nominal_bytes = counts.real_bytes = 0;
+    counts.peak_leased_nominal_bytes = counts.leased_entries = 0;
+    counts.created_real_bytes = counts.orphans_released_real_bytes = 0;
+    AvioRenderResourceEntry entry;
+    entry.kind_id = static_cast<uint32_t>(kind);
+    entry.usage = counts;
+    entry.fields_supported = kAvioResourceFieldCounts;
+    entry.unsupported_reason_id =
+        kAvioResourceReasonPhysicalAllocationUnavailable;
+    report.AddEntry(entry);
+  };
+  add_counts(AvioRenderResourceKind::kCoverageRegion, usage.coverage);
+  add_counts(AvioRenderResourceKind::kLayerRegion, usage.layers);
+  if (start_new_interval) {
+    for (auto* interval :
+         {&state_->interval.coverage, &state_->interval.layers}) {
+      interval->created_entries = interval->orphans_released_entries = 0;
+      interval->created_real_bytes = interval->orphans_released_real_bytes = 0;
+    }
+  }
+  auto add = [&](AvioRenderResourceKind kind, const State::Resource& resource) {
+    if (!resource.texture)
+      return;
+    const auto& desc = resource.texture->GetTextureDescriptor();
+    AvioRenderResourceEntry entry;
+    entry.kind_id = static_cast<uint32_t>(kind);
+    entry.usage.entries = 1;
+    entry.usage.nominal_bytes = resource.nominal;
+    entry.fields_supported =
+        kAvioResourceFieldDescriptorBytes | kAvioResourceFieldTextureDescriptor;
+    if (state_->config.require_exact_allocated_bytes) {
+      entry.fields_supported |= kAvioResourceFieldActualAllocatedBytes;
+      entry.usage.real_bytes = resource.real;
+    } else {
+      entry.unsupported_reason_id =
+          kAvioResourceReasonPhysicalAllocationUnavailable;
+    }
+    entry.descriptor_width = desc.size.width;
+    entry.descriptor_height = desc.size.height;
+    entry.descriptor_sample_count = static_cast<uint32_t>(desc.sample_count);
+    entry.descriptor_format_id = static_cast<uint32_t>(desc.format);
+    report.AddEntry(entry);
+  };
+  for (size_t i = 0; i < state_->coverage_count; ++i) {
+    add(AvioRenderResourceKind::kCoverageRegion, state_->coverage_resources[i]);
+  }
+  for (size_t i = 0; i < state_->layer_count; ++i) {
+    add(AvioRenderResourceKind::kLayerRegion, state_->layers[i].resource);
+  }
+  return report;
 }
 
 }  // namespace impeller

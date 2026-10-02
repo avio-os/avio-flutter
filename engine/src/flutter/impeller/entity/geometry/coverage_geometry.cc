@@ -75,6 +75,14 @@ std::optional<CoverageConvexQuad4> CoverageConvexQuad4::Make(const Quad& quad) {
   return CoverageConvexQuad4(lines, Rect::MakePointBounds(quad).value());
 }
 
+CoverageConvexQuad4 CoverageConvexQuad4::Translated(Vector2 offset) const {
+  auto lines = lines_;
+  for (auto& line : lines.vec) {
+    line.z -= line.x * offset.x + line.y * offset.y;
+  }
+  return CoverageConvexQuad4(lines, bounds_.Shift(offset));
+}
+
 std::optional<ClipSampleMask4> CoverageConvexQuad4::GetSampleMask(
     Point pixel_origin,
     const ClipSampleLocations4& locations) const {

@@ -28,6 +28,10 @@ class CommandBufferVK final
   // |CommandBuffer|
   ~CommandBufferVK() override;
 
+  bool TrackPipeline(std::shared_ptr<void> pipeline) {
+    return IsValid() && tracked_objects_->TrackPipeline(std::move(pipeline));
+  }
+
   // Encoder Functionality
 
   /// @brief Ensure that [object] is kept alive until this command buffer

@@ -5,6 +5,11 @@
 import("//flutter/vulkan/config.gni")
 import("../../../tools/impeller.gni")
 
+source_set("native_coverage_probe") {
+  sources = [ "native_coverage_gles.h" ]
+  public_configs = [ "//flutter:config" ]
+}
+
 config("gles_config") {
   # Generic GL/GLES/EGL/Vulkan headers. Any will do. We just pick one from Angle
   # because they are there.
@@ -30,6 +35,7 @@ impeller_component("gles_unittests") {
     "buffer_bindings_gles_unittests.cc",
     "command_buffer_gles_unittests.cc",
     "device_buffer_gles_unittests.cc",
+    "native_coverage_gles_unittests.cc",
     "render_pass_gles_unittests.cc",
     "test/capabilities_unittests.cc",
     "test/formats_gles_unittests.cc",
@@ -82,6 +88,7 @@ impeller_component("gles") {
     "gpu_tracer_gles.h",
     "handle_gles.cc",
     "handle_gles.h",
+    "native_coverage_gles.h",
     "pipeline_compile_queue_gles.cc",
     "pipeline_compile_queue_gles.h",
     "pipeline_gles.cc",

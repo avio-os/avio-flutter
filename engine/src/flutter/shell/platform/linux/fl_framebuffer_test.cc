@@ -215,3 +215,28 @@ TEST_F(FlFramebufferTest, IncompleteMultisampleFallsBackToSingleSample) {
   EXPECT_EQ(fl_framebuffer_get_resolved_id(framebuffer),
             fl_framebuffer_get_id(framebuffer));
 }
+
+TEST_F(FlFramebufferTest,
+       CoverageBackingStoreIsExactlyColorOnlyAndNeverMultisampled) {
+  EXPECT_CALL(epoxy, glGenRenderbuffers).Times(0);
+  EXPECT_CALL(epoxy, glRenderbufferStorageMultisample).Times(0);
+  EXPECT_CALL(epoxy, glRenderbufferStorageMultisampleEXT).Times(0);
+  EXPECT_CALL(epoxy, glCheckFramebufferStatus)
+      .WillRepeatedly(::testing::Return(GL_FRAMEBUFFER_COMPLETE));
+  g_autoptr(FlFramebuffer) framebuffer =
+      fl_framebuffer_new_color_only(GL_RGBA, 100, 200, FALSE);
+  ASSERT_NE(framebuffer, nullptr);
+  EXPECT_EQ(fl_framebuffer_get_samples(framebuffer), 1);
+  EXPECT_EQ(fl_framebuffer_get_resolved_id(framebuffer),
+            fl_framebuffer_get_id(framebuffer));
+  EXPECT_EQ(fl_framebuffer_get_sized_format(framebuffer), GL_RGBA8);
+}
+
+TEST_F(FlFramebufferTest, IncompleteCoverageColorOnlyBackingStoreFailsClosed) {
+  EXPECT_CALL(epoxy, glGenRenderbuffers).Times(0);
+  EXPECT_CALL(epoxy, glCheckFramebufferStatus)
+      .WillRepeatedly(::testing::Return(GL_FRAMEBUFFER_UNSUPPORTED));
+  EXPECT_CALL(epoxy, glDeleteFramebuffers);
+  EXPECT_CALL(epoxy, glDeleteTextures);
+  EXPECT_EQ(fl_framebuffer_new_color_only(GL_RGBA, 100, 200, FALSE), nullptr);
+}

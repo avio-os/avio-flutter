@@ -52,7 +52,7 @@ bool PipelineLibraryVK::IsValid() const {
 std::unique_ptr<ComputePipelineVK> PipelineLibraryVK::CreateComputePipeline(
     const ComputePipelineDescriptor& desc,
     PipelineKey pipeline_key,
-    bool first_use) {
+    AvioPipelineCreationOrigin origin) {
   TRACE_EVENT0("flutter", __FUNCTION__);
   vk::ComputePipelineCreateInfo pipeline_info;
 
@@ -156,7 +156,7 @@ std::unique_ptr<ComputePipelineVK> PipelineLibraryVK::CreateComputePipeline(
       std::move(pipeline),               //
       std::move(pipeline_layout.value),  //
       std::move(descs_layout),           //
-      pipeline_key, first_use);
+      pipeline_key, origin);
 }
 
 // |PipelineLibrary|
@@ -185,9 +185,8 @@ PipelineFuture<PipelineDescriptor> PipelineLibraryVK::GetPipeline(
   auto weak_this = weak_from_this();
 
   PipelineKey next_key = pipeline_key_++;
-  const bool first_use = IsAvioRasterFrameActive();
-  auto generation_task = [descriptor, weak_this, promise, next_key,
-                          first_use]() {
+  const auto origin = AvioPipelineCreationOrigin::Capture();
+  auto generation_task = [descriptor, weak_this, promise, next_key, origin]() {
     auto thiz = weak_this.lock();
     if (!thiz) {
       promise->set_value(nullptr);
@@ -199,7 +198,7 @@ PipelineFuture<PipelineDescriptor> PipelineLibraryVK::GetPipeline(
         PipelineLibraryVK::Cast(*thiz).device_holder_.lock(),  //
         weak_this,                                             //
         next_key,                                              //
-        {}, first_use                                          //
+        {}, origin                                             //
         ));
   };
 
@@ -240,9 +239,8 @@ PipelineFuture<ComputePipelineDescriptor> PipelineLibraryVK::GetPipeline(
   auto weak_this = weak_from_this();
 
   PipelineKey next_key = pipeline_key_++;
-  const bool first_use = IsAvioRasterFrameActive();
-  auto generation_task = [descriptor, weak_this, promise, next_key,
-                          first_use]() {
+  const auto origin = AvioPipelineCreationOrigin::Capture();
+  auto generation_task = [descriptor, weak_this, promise, next_key, origin]() {
     auto self = weak_this.lock();
     if (!self) {
       promise->set_value(nullptr);
@@ -252,7 +250,7 @@ PipelineFuture<ComputePipelineDescriptor> PipelineLibraryVK::GetPipeline(
     }
 
     auto pipeline = PipelineLibraryVK::Cast(*self).CreateComputePipeline(
-        descriptor, next_key, first_use);
+        descriptor, next_key, origin);
     if (!pipeline) {
       promise->set_value(nullptr);
       VALIDATION_LOG << "Could not create pipeline: " << descriptor.GetLabel();

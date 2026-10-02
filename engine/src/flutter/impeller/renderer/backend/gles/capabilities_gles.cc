@@ -61,7 +61,9 @@ static const constexpr char* kAppleTextureMaxLevelExt =
 static const constexpr char* kTextureFilterAnisotropicExt =
     "GL_EXT_texture_filter_anisotropic";
 
-CapabilitiesGLES::CapabilitiesGLES(const ProcTableGLES& gl) {
+CapabilitiesGLES::CapabilitiesGLES(const ProcTableGLES& gl,
+                                   bool avio_coverage,
+                                   bool native_coverage_supported) {
   {
     GLint value = 0;
     gl.GetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &value);
@@ -177,6 +179,13 @@ CapabilitiesGLES::CapabilitiesGLES(const ProcTableGLES& gl) {
     gl.GetIntegerv(GL_MAX_SAMPLES, &value);
     supports_offscreen_msaa_ = value >= 4;
   }
+  if (avio_coverage) {
+    // A separate resolve texture is mandatory for fixed tile copyback. The
+    // render-to-texture extension would silently resolve a different image.
+    supports_implicit_msaa_ = false;
+    supports_avio_coverage_resources_ = native_coverage_supported;
+    supports_offscreen_msaa_ = native_coverage_supported;
+  }
   is_es_ = desc->IsES();
   is_angle_ = desc->IsANGLE();
 
@@ -229,6 +238,10 @@ CapabilitiesGLES::CapabilitiesGLES(const ProcTableGLES& gl) {
     // but is always an integer in practice, so floor it.
     max_sampler_anisotropy_ = static_cast<uint32_t>(std::max(value, 2.0f));
   }
+}
+
+bool CapabilitiesGLES::SupportsAvioCoverageResources() const {
+  return supports_avio_coverage_resources_;
 }
 
 bool CapabilitiesGLES::IsES() const {

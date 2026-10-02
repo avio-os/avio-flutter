@@ -23,6 +23,7 @@ enum class AvioRenderResourceKind : uint32_t {
   kPipelines = 6,
   kCoverageRegion = 7,
   kLayerRegion = 8,
+  kDeviceBuffers = 9,
 };
 
 inline constexpr uint64_t kAvioCounterRasterThreadAllocations = 1u << 0;
@@ -34,9 +35,25 @@ inline constexpr uint64_t kAvioCounterCoverageFlushes = 1u << 5;
 // One availability bit covers overflow event count and allocated real bytes.
 inline constexpr uint64_t kAvioCounterLayerRegionOverflows = 1u << 6;
 
+inline constexpr uint64_t kAvioResourceFieldCounts = 1u << 0;
+inline constexpr uint64_t kAvioResourceFieldDescriptorBytes = 1u << 1;
+inline constexpr uint64_t kAvioResourceFieldActualAllocatedBytes = 1u << 2;
+inline constexpr uint64_t kAvioResourceFieldTextureDescriptor = 1u << 3;
+inline constexpr uint64_t kAvioResourceFieldDescriptorMultiplicity = 1u << 4;
+inline constexpr uint64_t kAvioResourceFieldLeases = 1u << 5;
+inline constexpr uint32_t kAvioResourceReasonPhysicalAllocationUnavailable = 1u;
+
 struct AvioRenderResourceEntry {
   uint32_t kind_id = 0u;
   RenderResourceUsage usage;
+  uint64_t fields_supported = kAvioResourceFieldCounts |
+                              kAvioResourceFieldDescriptorBytes |
+                              kAvioResourceFieldActualAllocatedBytes;
+  uint32_t unsupported_reason_id = 0u;
+  uint32_t descriptor_width = 0u;
+  uint32_t descriptor_height = 0u;
+  uint32_t descriptor_sample_count = 0u;
+  uint32_t descriptor_format_id = 0u;
 };
 
 struct AvioCoverageReasonUsage {
@@ -50,6 +67,24 @@ enum class AvioCoverageReason : uint32_t {
   kCachedFillMask = 2u,
   kCachedClipMask = 3u,
   kAnalyticQuadClip = 4u,
+  // DisplayList pre-pass facts, distinct from the execution routes above.
+  kClassPathFill = 16u,
+  kClassPathStroke = 17u,
+  kClassFractionalClip = 18u,
+  kClassNonRectClip = 19u,
+  kClassArc = 20u,
+  kClassBorder = 21u,
+  kClassEllipticalRoundRect = 22u,
+  kClassRejectedBlend = 23u,
+  kClassNoAntialias = 24u,
+  kClassImageEdge = 25u,
+  kClassRejectedSource = 26u,
+  kClassDestinationRead = 27u,
+  // Peak simultaneous nominal colour pixels, never real allocated bytes.
+  kClassLayerPeakDemand = 28u,
+  // Classification incomplete; conservative rendering remains mandatory.
+  kClassCapacityOverflow = 29u,
+  kClassStorageUnavailable = 30u,
 };
 
 // Fixed storage: reading this report never grows a container on the raster
@@ -83,7 +118,7 @@ struct AvioRenderResourceReport {
                 other.coverage_reasons_count > other.coverage_reasons.size();
     for (size_t i = 0; i < other.entries_count && i < other.entries.size();
          i++) {
-      AddEntry(other.entries[i].kind_id, other.entries[i].usage);
+      AddEntry(other.entries[i]);
     }
     for (size_t i = 0;
          i < other.coverage_reasons_count && i < other.coverage_reasons.size();
@@ -116,6 +151,14 @@ struct AvioRenderResourceReport {
     counters_supported |= other.counters_supported;
   }
 
+  constexpr bool AddEntry(AvioRenderResourceEntry entry) {
+    if (entries_count >= entries.size()) {
+      truncated = true;
+      return false;
+    }
+    entries[entries_count++] = entry;
+    return true;
+  }
   constexpr bool AddEntry(uint32_t kind_id, RenderResourceUsage usage) {
     if (entries_count >= entries.size()) {
       truncated = true;

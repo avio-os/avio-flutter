@@ -29,7 +29,8 @@ class ContextGLES final : public Context,
       std::unique_ptr<ProcTableGLES> gl,
       const std::vector<std::shared_ptr<fml::Mapping>>& shader_libraries,
       bool enable_gpu_tracing,
-      std::shared_ptr<fml::BasicTaskRunner> io_task_runner = nullptr);
+      std::shared_ptr<fml::BasicTaskRunner> io_task_runner = nullptr,
+      std::optional<AvioAntialiasingConfig> antialiasing_config = std::nullopt);
 
   // |Context|
   ~ContextGLES() override;
@@ -38,6 +39,10 @@ class ContextGLES final : public Context,
   BackendType GetBackendType() const override;
 
   const std::shared_ptr<ReactorGLES>& GetReactor() const;
+
+  const AvioAntialiasingConfig& GetAvioAntialiasingConfig() const override;
+  AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool reset_interval) const override;
 
   std::optional<ReactorGLES::WorkerID> AddReactorWorker(
       const std::shared_ptr<ReactorGLES::Worker>& worker);
@@ -66,13 +71,15 @@ class ContextGLES final : public Context,
   // a reference.
   std::shared_ptr<const Capabilities> device_capabilities_;
   bool is_valid_ = false;
+  const AvioAntialiasingConfig antialiasing_config_;
 
   ContextGLES(
       const Flags& flags,
       std::unique_ptr<ProcTableGLES> gl,
       const std::vector<std::shared_ptr<fml::Mapping>>& shader_libraries,
       bool enable_gpu_tracing,
-      std::shared_ptr<fml::BasicTaskRunner> io_task_runner = nullptr);
+      std::shared_ptr<fml::BasicTaskRunner> io_task_runner = nullptr,
+      std::optional<AvioAntialiasingConfig> antialiasing_config = std::nullopt);
 
   // |Context|
   std::string DescribeGpuModel() const override;

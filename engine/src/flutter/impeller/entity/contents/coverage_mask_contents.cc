@@ -6,6 +6,7 @@
 
 #include <cmath>
 
+#include "impeller/entity/contents/clip_operation_scope.h"
 #include "impeller/entity/contents/color_source_contents.h"
 #include "impeller/entity/contents/content_context.h"
 #include "impeller/entity/contents/contents.h"
@@ -262,6 +263,7 @@ bool CoverageMaskContents::RenderClip(const ContentContext& renderer,
                                       std::span<const CoverageMaskTile> masks,
                                       uint32_t clip_depth,
                                       ClipOperation operation) {
+  AvioClipOperationScope clip_operation(pass);
   auto shader_depth =
       std::nextafterf(Entity::GetShaderClipDepth(clip_depth + 1), 0.0f);
   if (!PrepareStencil(renderer, pass, masks, shader_depth)) {
@@ -285,6 +287,7 @@ bool CoverageMaskContents::RenderQuadClip(const ContentContext& renderer,
                                           const CoverageConvexQuad4& quad,
                                           uint32_t clip_depth,
                                           ClipOperation operation) {
+  AvioClipOperationScope clip_operation(pass);
 #ifndef IMPELLER_ENABLE_VULKAN
   return false;
 #else

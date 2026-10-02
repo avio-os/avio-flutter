@@ -7,6 +7,7 @@
 #include "flutter/fml/trace_event.h"
 #include "impeller/base/config.h"
 #include "impeller/renderer/backend/gles/context_gles.h"
+#include "impeller/renderer/backend/gles/native_coverage_gles.h"
 #include "impeller/renderer/backend/gles/texture_gles.h"
 
 namespace impeller {
@@ -24,6 +25,13 @@ std::unique_ptr<Surface> SurfaceGLES::WrapFBO(
   }
 
   const auto& gl_context = ContextGLES::Cast(*context);
+  if (gl_context.GetAvioAntialiasingConfig().UsesCoverage() &&
+      (color_format != PixelFormat::kR8G8B8A8UNormInt ||
+       !gl_context.GetReactor()->CanReactOnCurrentThread() ||
+       !ValidateCoverageFramebufferGLES(gl_context.GetReactor()->GetProcTable(),
+                                        fbo))) {
+    return nullptr;
+  }
 
   TextureDescriptor color0_tex;
   color0_tex.type = TextureType::kTexture2D;
@@ -67,8 +75,10 @@ std::unique_ptr<Surface> SurfaceGLES::WrapFBO(
   RenderTarget render_target_desc;
 
   render_target_desc.SetColorAttachment(color0, 0u);
-  render_target_desc.SetDepthAttachment(depth0);
-  render_target_desc.SetStencilAttachment(stencil0);
+  if (!gl_context.GetAvioAntialiasingConfig().UsesCoverage()) {
+    render_target_desc.SetDepthAttachment(depth0);
+    render_target_desc.SetStencilAttachment(stencil0);
+  }
 
 #ifdef IMPELLER_DEBUG
   gl_context.GetGPUTracer()->RecordRasterThread();

@@ -39,6 +39,9 @@ struct _FlFramebuffer {
   // reaches it by implicit or explicit resolve.
   GLuint texture_id;
 
+  // Coverage backing stores have no full-size depth/stencil attachment.
+  gboolean color_only;
+
   // Stencil buffer associated with this framebuffer.
   GLuint depth_stencil;
 
@@ -134,6 +137,10 @@ static void attach_single_sample(FlFramebuffer* self) {
   glBindFramebuffer(GL_FRAMEBUFFER, self->framebuffer_id);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                          self->texture_id, 0);
+
+  if (self->color_only) {
+    return;
+  }
 
   glGenRenderbuffers(1, &self->depth_stencil);
   glBindRenderbuffer(GL_RENDERBUFFER, self->depth_stencil);
@@ -294,16 +301,18 @@ FlFramebuffer* fl_framebuffer_new(GLint format,
   return fl_framebuffer_new_multisampled(format, width, height, shareable, 1);
 }
 
-FlFramebuffer* fl_framebuffer_new_multisampled(GLint format,
-                                               size_t width,
-                                               size_t height,
-                                               gboolean shareable,
-                                               GLsizei samples) {
+static FlFramebuffer* new_configured_framebuffer(GLint format,
+                                                 size_t width,
+                                                 size_t height,
+                                                 gboolean shareable,
+                                                 GLsizei samples,
+                                                 gboolean color_only) {
   FlFramebuffer* self =
       FL_FRAMEBUFFER(g_object_new(fl_framebuffer_get_type(), nullptr));
 
   self->width = width;
   self->height = height;
+  self->color_only = color_only;
 
   // Both the resolve and the format follow from the sample count, so settle
   // them before anything is allocated.
@@ -369,7 +378,28 @@ FlFramebuffer* fl_framebuffer_new_multisampled(GLint format,
     attach_single_sample(self);
   }
 
+  if (color_only &&
+      glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    g_object_unref(self);
+    return nullptr;
+  }
   return self;
+}
+
+FlFramebuffer* fl_framebuffer_new_multisampled(GLint format,
+                                               size_t width,
+                                               size_t height,
+                                               gboolean shareable,
+                                               GLsizei samples) {
+  return new_configured_framebuffer(format, width, height, shareable, samples,
+                                    FALSE);
+}
+
+FlFramebuffer* fl_framebuffer_new_color_only(GLint format,
+                                             size_t width,
+                                             size_t height,
+                                             gboolean shareable) {
+  return new_configured_framebuffer(format, width, height, shareable, 1, TRUE);
 }
 
 gboolean fl_framebuffer_get_shareable(FlFramebuffer* self) {

@@ -27,7 +27,7 @@ class ComputePipelineVK final
                     vk::UniquePipelineLayout layout,
                     vk::UniqueDescriptorSetLayout descriptor_set_layout,
                     PipelineKey pipeline_key,
-                    bool first_use = false);
+                    AvioPipelineCreationOrigin origin = {});
 
   // |Pipeline|
   ~ComputePipelineVK() override;

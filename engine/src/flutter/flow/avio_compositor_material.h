@@ -139,7 +139,7 @@ inline bool IsValidAvioCompositorMaterial(
     case AvioCompositorMaterialRecipe::kExplicit:
       return !material.uses_default_corner;
     case AvioCompositorMaterialRecipe::kTiered:
-      return material.tier <= 3u;
+      return material.tier <= 4u;
   }
   return false;
 }

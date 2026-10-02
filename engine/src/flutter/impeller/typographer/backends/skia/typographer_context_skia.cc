@@ -553,6 +553,8 @@ std::shared_ptr<GlyphAtlas> TypographerContextSkia::CreateGlyphAtlas(
     HostBuffer& data_host_buffer,
     const std::shared_ptr<GlyphAtlasContext>& atlas_context,
     const std::vector<RenderableText>& renderable_texts) const {
+  const AvioRasterAllocationCauseScope glyph_operation(
+      AvioRasterAllocationCause::kGlyphAtlasGrowth);
   TRACE_EVENT0("impeller", __FUNCTION__);
   if (!IsValid()) {
     return nullptr;

@@ -18,15 +18,19 @@ CommandBuffer::CommandBuffer(std::weak_ptr<const Context> context)
 CommandBuffer::~CommandBuffer() = default;
 
 void CommandBuffer::RetainResource(std::shared_ptr<void> owner) {
-  if (owner && std::find(retained_resources_.begin(), retained_resources_.end(),
-                         owner) == retained_resources_.end()) {
-    retained_resources_.push_back(std::move(owner));
+  TryRetainResource(std::move(owner));
+}
+
+bool CommandBuffer::TryRetainResource(std::shared_ptr<void> owner) {
+  if (!resource_owners_valid_) {
+    return false;
   }
+  return resource_owners_valid_ = retained_resources_.Retain(std::move(owner));
 }
 
 bool CommandBuffer::SubmitCommands(bool block_on_schedule,
                                    const CompletionCallback& callback) {
-  if (!IsValid()) {
+  if (!IsValid() || !HasValidResourceOwners()) {
     // Already committed or was never valid. Either way, this is caller error.
     if (callback) {
       callback(Status::kError);
@@ -50,6 +54,9 @@ void CommandBuffer::WaitUntilScheduled() {
 
 std::shared_ptr<RenderPass> CommandBuffer::CreateRenderPass(
     const RenderTarget& render_target) {
+  if (!IsValid() || !HasValidResourceOwners()) {
+    return nullptr;
+  }
   auto pass = OnCreateRenderPass(render_target);
   if (pass && pass->IsValid()) {
     pass->SetLabel("RenderPass");
@@ -59,6 +66,9 @@ std::shared_ptr<RenderPass> CommandBuffer::CreateRenderPass(
 }
 
 std::shared_ptr<BlitPass> CommandBuffer::CreateBlitPass() {
+  if (!IsValid() || !HasValidResourceOwners()) {
+    return nullptr;
+  }
   auto pass = OnCreateBlitPass();
   if (pass && pass->IsValid()) {
     pass->SetLabel("BlitPass");
@@ -68,7 +78,7 @@ std::shared_ptr<BlitPass> CommandBuffer::CreateBlitPass() {
 }
 
 std::shared_ptr<ComputePass> CommandBuffer::CreateComputePass() {
-  if (!IsValid()) {
+  if (!IsValid() || !HasValidResourceOwners()) {
     return nullptr;
   }
   auto pass = OnCreateComputePass();

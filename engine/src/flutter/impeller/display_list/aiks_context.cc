@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "impeller/display_list/aiks_context.h"
+#include "impeller/display_list/coverage_classifier.h"
 
 #include "impeller/typographer/typographer_context.h"
 
@@ -24,6 +25,10 @@ AiksContext::AiksContext(
                                           : nullptr);
   if (!content_context_->IsValid()) {
     return;
+  }
+  if (content_context_->UsesAvioCoverage()) {
+    content_context_->SetCoverageClassifierStorage(
+        std::make_shared<CoverageDisplayListPlan>(Rect{}, 4u));
   }
 
   is_valid_ = true;

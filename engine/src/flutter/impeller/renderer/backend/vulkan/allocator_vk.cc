@@ -429,7 +429,8 @@ class AllocatedTextureSourceVK final : public TextureSourceVK {
         GetAvioResourceAllocationKind(), key,
         desc.GetByteSizeOfAllMipLevels() *
             static_cast<size_t>(desc.sample_count) * ToArrayLayerCount(desc),
-        static_cast<size_t>(allocation_info.size), IsAvioRasterFrameActive());
+        static_cast<size_t>(allocation_info.size), IsAvioRasterFrameActive(),
+        GetAvioRasterAllocationCause());
 
     vk::ImageViewCreateInfo view_info = {};
     view_info.image = image;
@@ -599,6 +600,11 @@ AvioRenderResourceReport AllocatorVK::GetAllocatedImageReport(
   return allocated_image_ledger_->Report(start_new_interval);
 }
 
+AvioRenderResourceReport AllocatorVK::GetAllocatedBufferReport(
+    bool start_new_interval) {
+  return allocated_buffer_ledger_->Report(start_new_interval);
+}
+
 // |Allocator|
 std::shared_ptr<DeviceBuffer> AllocatorVK::OnCreateBuffer(
     const DeviceBufferDescriptor& desc) {
@@ -635,16 +641,19 @@ std::shared_ptr<DeviceBuffer> AllocatorVK::OnCreateBuffer(
                                              &buffer_allocation_info  //
                                              )};
 
-  auto type = memory_properties_.memoryTypes[buffer_allocation_info.memoryType];
-  bool is_host_coherent =
-      !!(type.propertyFlags & vk::MemoryPropertyFlagBits::eHostCoherent);
-
   if (result != vk::Result::eSuccess) {
     VALIDATION_LOG << "Unable to allocate a device buffer: "
                    << vk::to_string(result);
     return {};
   }
 
+  const auto type =
+      memory_properties_.memoryTypes[buffer_allocation_info.memoryType];
+  const bool is_host_coherent =
+      !!(type.propertyFlags & vk::MemoryPropertyFlagBits::eHostCoherent);
+  auto registration = allocated_buffer_ledger_->Register(
+      desc.size, buffer_allocation_info.size, IsAvioRasterFrameActive(),
+      GetAvioRasterAllocationCause());
   return std::make_shared<DeviceBufferVK>(
       desc,                                            //
       context_,                                        //
@@ -652,7 +661,7 @@ std::shared_ptr<DeviceBuffer> AllocatorVK::OnCreateBuffer(
                                 buffer_allocation,     //
                                 vk::Buffer{buffer}}},  //
       buffer_allocation_info,                          //
-      is_host_coherent);
+      is_host_coherent, std::move(registration));
 }
 
 Bytes AllocatorVK::DebugGetHeapUsage() const {

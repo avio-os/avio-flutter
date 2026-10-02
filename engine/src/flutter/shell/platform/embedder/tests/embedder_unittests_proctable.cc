@@ -87,10 +87,18 @@ TEST(EmbedderProcTable, ReportsAvioSemanticCapabilities) {
       kFlutterAvioExtensionFeatureTypedRenderTargetAcquisition |
       kFlutterAvioExtensionFeatureRenderDeadline |
       kFlutterAvioExtensionFeatureAtomicWindowPreviews |
-      kFlutterAvioExtensionFeaturePreSubmitFailure;
+      kFlutterAvioExtensionFeaturePreSubmitFailure |
+      kFlutterAvioExtensionFeatureEmptyFrame |
+      kFlutterAvioExtensionFeatureItemEffects |
+      kFlutterAvioExtensionFeatureOutputGround |
+      kFlutterAvioExtensionFeatureReadyContent;
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
-  expected_features |= kFlutterAvioExtensionFeatureResourceLifecycleConfig |
-                       kFlutterAvioExtensionFeatureRenderResourceReport;
+  expected_features |= kFlutterAvioExtensionFeatureResourceLifecycleConfig;
+#endif
+#if FML_OS_LINUX &&                                               \
+    (defined(SHELL_ENABLE_VULKAN) || defined(SHELL_ENABLE_GL)) && \
+    IMPELLER_SUPPORTS_RENDERING
+  expected_features |= kFlutterAvioExtensionFeatureRenderResourceReport;
   if (impeller::kAvioCoveragePolicyImplemented) {
     expected_features |= kFlutterAvioExtensionFeatureAntialiasingPolicy;
   }
@@ -98,10 +106,18 @@ TEST(EmbedderProcTable, ReportsAvioSemanticCapabilities) {
   EXPECT_EQ(capabilities.supported_features, expected_features);
   EXPECT_NE(procs.SetAvioViewVisibility, nullptr);
   EXPECT_NE(procs.RequestAvioRenderResourceReport, nullptr);
-  EXPECT_EQ(capabilities.continuous_supported_classes, 0u);
+  uint64_t expected_vulkan = 0;
+#if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
+  expected_vulkan = impeller::AvioContinuousSupportedClasses(
+      impeller::AvioCoverageBackend::kVulkan);
+#endif
+  EXPECT_EQ(capabilities.continuous_supported_classes_vulkan, expected_vulkan);
+  EXPECT_EQ(capabilities.continuous_supported_classes_gles, 0u);
+  EXPECT_EQ(capabilities.continuous_supported_classes_metal, 0u);
+  EXPECT_EQ(capabilities.continuous_supported_classes, expected_vulkan);
 }
 
-TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion8) {
+TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion9) {
   FlutterEngineProcTable procs = {};
   procs.struct_size = sizeof(procs);
   ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
@@ -109,9 +125,17 @@ TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion8) {
   FlutterAvioExtensionCapabilities capabilities = {};
   capabilities.struct_size = sizeof(capabilities);
   ASSERT_EQ(procs.GetAvioExtensionCapabilities(&capabilities), kSuccess);
-  EXPECT_EQ(capabilities.minimum_version, 8u);
-  EXPECT_EQ(capabilities.maximum_version, 8u);
-  EXPECT_EQ(capabilities.continuous_supported_classes, 0u);
+  EXPECT_EQ(capabilities.minimum_version, 9u);
+  EXPECT_EQ(capabilities.maximum_version, 9u);
+  uint64_t expected_vulkan = 0;
+#if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
+  expected_vulkan = impeller::AvioContinuousSupportedClasses(
+      impeller::AvioCoverageBackend::kVulkan);
+#endif
+  EXPECT_EQ(capabilities.continuous_supported_classes_vulkan, expected_vulkan);
+  EXPECT_EQ(capabilities.continuous_supported_classes_gles, 0u);
+  EXPECT_EQ(capabilities.continuous_supported_classes_metal, 0u);
+  EXPECT_EQ(capabilities.continuous_supported_classes, expected_vulkan);
 }
 
 TEST(EmbedderProcTable, AppendedCapabilityHonorsCallerStructSize) {

@@ -34,7 +34,8 @@ class PipelineVK final
       const std::weak_ptr<PipelineLibrary>& weak_library,
       PipelineKey pipeline_key,
       std::shared_ptr<SamplerVK> immutable_sampler = {},
-      bool first_use = IsAvioRasterFrameActive());
+      AvioPipelineCreationOrigin origin =
+          AvioPipelineCreationOrigin::Capture());
 
   // |Pipeline|
   ~PipelineVK() override;
@@ -82,7 +83,7 @@ class PipelineVK final
              vk::UniqueDescriptorSetLayout descriptor_set_layout,
              PipelineKey pipeline_key,
              std::shared_ptr<SamplerVK> immutable_sampler,
-             bool first_use);
+             AvioPipelineCreationOrigin origin);
 
   // |Pipeline|
   bool IsValid() const override;

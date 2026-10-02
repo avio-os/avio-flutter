@@ -16,6 +16,7 @@ class ContextGLES;
 }  // namespace impeller
 
 #include "impeller/base/flags.h"
+#include "impeller/core/antialiasing_policy.h"
 
 namespace flutter {
 namespace testing {
@@ -34,7 +35,9 @@ class EmbedderSurfaceGLImpeller final : public EmbedderSurface,
       bool fbo_reset_after_present,
       std::shared_ptr<EmbedderExternalViewEmbedder> external_view_embedder,
       std::shared_ptr<fml::BasicTaskRunner> io_task_runner,
-      impeller::Flags impeller_flags = {});
+      impeller::Flags impeller_flags = {},
+      std::optional<impeller::AvioAntialiasingConfig> antialiasing_config =
+          std::nullopt);
 
   ~EmbedderSurfaceGLImpeller() override;
 

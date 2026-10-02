@@ -40,6 +40,10 @@ namespace impeller::testing {
 
 class CanvasBlendTestPeer {
  public:
+  static std::optional<Rect> GetOpaquePrefix(Canvas& canvas) {
+    return canvas.render_passes_.back().GetOpaqueCoverage().GetOpaqueRect();
+  }
+
   static void DrawScreen(Canvas& canvas,
                          std::shared_ptr<Contents> contents,
                          bool previous_fetch_path) {
@@ -396,6 +400,42 @@ TEST_P(AiksTest, ScreenImageFiltersAndVerticesMatchCpuOracleWithoutOffscreen) {
 class ScreenVulkanComparisonTest : public AiksTest {};
 INSTANTIATE_VULKAN_PLAYGROUND_SUITE(ScreenVulkanComparisonTest);
 
+// Authored native fixture: a declared Load is not alpha evidence even when
+// the attachment's clear metadata says opaque. Only the real overwrite may
+// establish it; subsequent SrcOver preserves actual output alpha.
+TEST_P(ScreenVulkanComparisonTest, OpaquePrefixRequiresActualOwningOverwrite) {
+  AiksContext renderer(GetContext(), nullptr);
+  RenderTargetAllocator allocator(GetContext()->GetResourceAllocator());
+  const ISize size(32, 32);
+  auto target = allocator.CreateOffscreen(*GetContext(), size, 1);
+  ASSERT_TRUE(target.IsValid());
+  auto attachment = target.GetColorAttachment(0u);
+  attachment.load_action = LoadAction::kClear;
+  attachment.clear_color = Color::White();
+  target.SetColorAttachment(attachment, 0u);
+  const auto initialize = GetContext()->CreateCommandBuffer();
+  ASSERT_TRUE(initialize);
+  const auto clear = initialize->CreateRenderPass(target);
+  ASSERT_TRUE(clear);
+  ASSERT_TRUE(clear->EncodeCommands());
+  ASSERT_TRUE(GetContext()->EnqueueCommandBuffer(initialize));
+  attachment.load_action = LoadAction::kLoad;
+  target.SetColorAttachment(attachment, 0u);
+  Canvas canvas(renderer.GetContentContext(), target, false, false);
+  EXPECT_FALSE(CanvasBlendTestPeer::GetOpaquePrefix(canvas));
+  canvas.DrawPaint({.color = Color::White()});
+  EXPECT_EQ(CanvasBlendTestPeer::GetOpaquePrefix(canvas), Rect::MakeSize(size));
+  canvas.DrawPaint({.color = Color(0, 0, 0, .5f)});
+  EXPECT_EQ(CanvasBlendTestPeer::GetOpaquePrefix(canvas), Rect::MakeSize(size));
+  ASSERT_TRUE(canvas.EndReplay());
+  const auto pixels =
+      ReadBackdropPixels(GetContext(), target.GetRenderTargetTexture());
+  ASSERT_EQ(pixels.size(), 32u * 32u * 4u);
+  for (size_t i = 3; i < pixels.size(); i += 4) {
+    EXPECT_EQ(pixels[i], 255u);
+  }
+}
+
 // Comparison golden, not a look-approval test: per-sample fixed blending is
 // observably different from the old fetch shader's averaged destination.
 // The paired images and recorded deltas feed the explicit look gate in the DN.
@@ -508,6 +548,10 @@ TEST_P(ScreenVulkanComparisonTest,
       RecordProperty(prefix + "MaxInteriorDelta", max_interior_delta);
       RecordProperty(prefix + "MaxUncoveredDelta", max_uncovered_delta);
       EXPECT_EQ(max_uncovered_delta, 0);
+      // Interior pixels are outside the declared coverage-edge mask. Recording
+      // their delta is not a conformance check: any changed interior byte
+      // fails.
+      EXPECT_EQ(max_interior_delta, 0);
       golden.DrawImage(DlImageImpeller::Make(previous), DlPoint(0, golden_y),
                        {});
       golden.DrawImage(DlImageImpeller::Make(pipeline),

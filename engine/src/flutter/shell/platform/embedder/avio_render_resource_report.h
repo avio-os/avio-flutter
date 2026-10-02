@@ -49,7 +49,13 @@ inline void DeliverAvioRenderResourceReport(
                   u.orphans_released_entries,
                   u.orphans_released_real_bytes,
                   u.created_entries,
-                  u.created_real_bytes};
+                  u.created_real_bytes,
+                  entry.fields_supported,
+                  entry.unsupported_reason_id,
+                  entry.descriptor_width,
+                  entry.descriptor_height,
+                  entry.descriptor_sample_count,
+                  entry.descriptor_format_id};
   }
   for (size_t i = 0; i < reason_count; i++) {
     const auto& reason = source.coverage_reasons[i];

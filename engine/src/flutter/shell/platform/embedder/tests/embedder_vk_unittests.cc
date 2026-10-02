@@ -1634,7 +1634,8 @@ size_t CountPartiallyCoveredPixels(
 // regression is to look at the pixels along an edge only multisampling can
 // cover partially.
 void CheckPreservedTargetMultisampling(EmbedderTestContextVulkan& context,
-                                       bool external_handoff) {
+                                       bool external_handoff,
+                                       bool coverage = false) {
   EmbedderConfigBuilder builder(context);
   builder.AddCommandLineArgument("--enable-impeller");
   builder.SetDartEntrypoint("render_selected_target_ready");
@@ -1645,8 +1646,34 @@ void CheckPreservedTargetMultisampling(EmbedderTestContextVulkan& context,
       CREATE_NATIVE_ENTRY(
           [&dart_ready](Dart_NativeArguments args) { dart_ready.Signal(); }));
   builder.SetSurface(DlISize(800, 600));
+  const auto coverage_features =
+      kFlutterAvioExtensionFeatureAntialiasingPolicy |
+      kFlutterAvioExtensionFeatureRenderResourceReport |
+      kFlutterAvioExtensionFeatureResourceLifecycleConfig;
   builder.SetRootRenderTargetCompositor(
-      /*avoid_backing_store_cache=*/false, kExactSelectedTargetFeatures);
+      /*avoid_backing_store_cache=*/false,
+      kExactSelectedTargetFeatures | (coverage ? coverage_features : 0u));
+  FlutterAvioAntialiasingConfig antialiasing = {
+      .struct_size = sizeof(FlutterAvioAntialiasingConfig),
+      .policy = kFlutterAvioAntialiasingPolicyCoverage,
+      .layer_sample_count = 1,
+      .coverage_sample_count = 4,
+      .continuous_requested_classes = 0,
+      .coverage_region_max_bytes = 8u * 1024u * 1024u,
+      .layer_region_max_bytes = 4u * 1024u * 1024u,
+  };
+  FlutterAvioResourceLifecycleConfig resources = {
+      .struct_size = sizeof(FlutterAvioResourceLifecycleConfig),
+      .transient_max_entries = 0,
+      .transient_max_bytes = 0,
+      .pipeline_cache_policy = kFlutterAvioPipelineCacheDisabled,
+      .pipeline_cache_directory_fd = -1,
+      .pipeline_cache_max_bytes = 0,
+  };
+  if (coverage) {
+    builder.GetProjectArgs().avio_antialiasing_config = &antialiasing;
+    builder.GetProjectArgs().avio_resource_lifecycle_config = &resources;
+  }
   builder.SetRenderTargetType(
       EmbedderTestBackingStoreProducer::RenderTargetType::kVulkanImage);
 
@@ -1775,6 +1802,16 @@ TEST_F(EmbedderTest, SelectedTargetDamageKeepsPreservedTargetMultisampled) {
 TEST_F(EmbedderTest, SelectedTargetWithoutLayoutHandoffKeepsFullMSAARepaint) {
   CheckPreservedTargetMultisampling(
       GetEmbedderContext<EmbedderTestContextVulkan>(), false);
+}
+
+TEST_F(EmbedderTest, CoverageSelectedTargetDamageKeepsNativeFourEdge) {
+  CheckPreservedTargetMultisampling(
+      GetEmbedderContext<EmbedderTestContextVulkan>(), true, true);
+}
+
+TEST_F(EmbedderTest, CoverageSelectedTargetWithoutHandoffKeepsNativeFourEdge) {
+  CheckPreservedTargetMultisampling(
+      GetEmbedderContext<EmbedderTestContextVulkan>(), false, true);
 }
 
 }  // namespace testing

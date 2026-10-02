@@ -39,7 +39,8 @@ void CommandBufferVK::SetLabel(std::string_view label) const {
 }
 
 bool CommandBufferVK::IsValid() const {
-  return true;
+  return HasValidResourceOwners() && tracked_objects_ &&
+         tracked_objects_->IsValid();
 }
 
 bool CommandBufferVK::OnSubmitCommands(bool block_on_schedule,
@@ -103,7 +104,7 @@ std::shared_ptr<ComputePass> CommandBufferVK::OnCreateComputePass() {
 }
 
 bool CommandBufferVK::EndCommandBuffer() const {
-  if (external_images_finalized_) {
+  if (!IsValid() || external_images_finalized_) {
     return false;
   }
   ReleaseExternalImages();

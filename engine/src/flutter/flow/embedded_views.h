@@ -502,6 +502,17 @@ class ExternalViewEmbedder {
       const std::shared_ptr<impeller::AiksContext>& aiks_context) {
     return std::nullopt;
   }
+  virtual bool SupportsAvioEmptyFrames() const { return false; }
+  virtual bool SupportsAvioFrameFacts(const AvioFrameFacts& facts) const {
+    return !facts.HasMetadata();
+  }
+  // Exact empty-content submissions have no SurfaceFrame or backing-store
+  // lease. Their callbacks own the same opportunity terminal as a pixel frame.
+  virtual bool SubmitAvioEmptyFrame(int64_t view_id,
+                                    const SurfaceFrame::SubmitInfo& info) {
+    return false;
+  }
+  virtual void RejectAvioFrameFacts(int64_t view_id) {}
 
   enum class RootRenderTargetAcquisition {
     kGranted,

@@ -222,6 +222,11 @@ class TextureSourceVK {
 
   explicit TextureSourceVK(TextureDescriptor desc);
 
+  // External-image sources must drop their native framebuffer/render-pass
+  // cache before returning the embedder's image/view and backing-store baton.
+  // Invoke only during final source destruction, after native readers retire.
+  void ReleaseCachedFrameData();
+
  private:
   struct CachedFrameDataEntry {
     SampleCount sample_count;

@@ -10,8 +10,19 @@
 #include <utility>
 
 #include "impeller/renderer/render_resource_report.h"
+#include "impeller/renderer/render_resource_scope.h"
 
 namespace impeller {
+// Capture at the cache-miss request, before a compile job changes threads.
+// Native creation and interval reporting never reconstruct caller provenance
+// from the compiler thread's TLS or from descriptor/resource-kind guesses.
+struct AvioPipelineCreationOrigin {
+  bool raster_frame = false;
+  AvioRasterAllocationCause cause = AvioRasterAllocationCause::kFrameWork;
+  static AvioPipelineCreationOrigin Capture() {
+    return {IsAvioRasterFrameActive(), GetAvioRasterAllocationCause()};
+  }
+};
 
 // The native driver does not expose allocation sizes for VkPipeline. This
 // ledger counts successful native objects, including sampler variants and
@@ -22,10 +33,11 @@ class PipelineResourceLedger final {
   class Registration final {
    public:
     Registration() = default;
-    Registration(std::shared_ptr<PipelineResourceLedger> ledger, bool first_use)
+    Registration(std::shared_ptr<PipelineResourceLedger> ledger,
+                 AvioPipelineCreationOrigin origin)
         : ledger_(std::move(ledger)) {
       if (ledger_) {
-        ledger_->Created(first_use);
+        ledger_->Created(origin);
       }
     }
     ~Registration() { Release(); }
@@ -58,22 +70,38 @@ class PipelineResourceLedger final {
     RenderResourceUsage usage;
     usage.entries = live_;
     usage.created_entries = created_;
-    report.AddEntry(AvioRenderResourceKind::kPipelines, usage);
-    report.counters_supported = kAvioCounterFirstUseCompiles;
+    report.AddEntry(
+        {.kind_id = static_cast<uint32_t>(AvioRenderResourceKind::kPipelines),
+         .usage = usage,
+         .fields_supported = kAvioResourceFieldCounts,
+         .unsupported_reason_id =
+             kAvioResourceReasonPhysicalAllocationUnavailable});
+    report.counters_supported = kAvioCounterFirstUseCompiles |
+                                kAvioCounterRasterThreadAllocations |
+                                kAvioCounterSnapshotAllocations;
+    report.raster_thread_allocations = raster_allocations_;
+    report.snapshot_allocations = snapshot_allocations_;
     report.first_use_compiles = first_use_;
     if (start_new_interval) {
       created_ = 0u;
       first_use_ = 0u;
+      raster_allocations_ = snapshot_allocations_ = 0u;
     }
     return report;
   }
 
  private:
-  void Created(bool first_use) {
+  void Created(AvioPipelineCreationOrigin origin) {
     std::lock_guard lock(mutex_);
     live_++;
     created_++;
-    first_use_ += first_use;
+    first_use_ += origin.raster_frame;
+    if (origin.raster_frame) {
+      raster_allocations_ +=
+          origin.cause == AvioRasterAllocationCause::kFrameWork;
+      snapshot_allocations_ +=
+          origin.cause == AvioRasterAllocationCause::kSnapshot;
+    }
   }
   void Destroyed() {
     std::lock_guard lock(mutex_);
@@ -83,6 +111,8 @@ class PipelineResourceLedger final {
   size_t live_ = 0u;
   size_t created_ = 0u;
   uint64_t first_use_ = 0u;
+  uint64_t raster_allocations_ = 0u;
+  uint64_t snapshot_allocations_ = 0u;
 };
 
 }  // namespace impeller

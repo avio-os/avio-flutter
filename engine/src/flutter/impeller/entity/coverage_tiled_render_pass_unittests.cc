@@ -4,6 +4,7 @@
 
 #include "impeller/entity/coverage_tiled_render_pass.h"
 
+#include <cstring>
 #include <limits>
 
 #include "gtest/gtest.h"
@@ -17,6 +18,10 @@ namespace impeller {
 // the region allocator to claim measured GPU allocations. Tests below exercise
 // typed packet custody and terminal encode failure, not GPU rasterization.
 struct CoverageTiledRenderPassTestPeer {
+  static void SetContinuousBuffer(ContentContext& renderer,
+                                  std::shared_ptr<HostBuffer> buffer) {
+    renderer.continuous_data_host_buffer_ = std::move(buffer);
+  }
   static std::shared_ptr<CoverageTiledRenderPass> Make(
       const ContentContext& renderer,
       RenderTarget parent,
@@ -24,9 +29,13 @@ struct CoverageTiledRenderPassTestPeer {
       std::shared_ptr<CommandBuffer> command,
       bool tiled = true,
       std::shared_ptr<AvioCoverageRegion> region = nullptr) {
-    return std::shared_ptr<CoverageTiledRenderPass>(new CoverageTiledRenderPass(
-        renderer, parent, std::move(island), std::move(region),
-        std::move(command), tiled));
+    if (!renderer.coverage_recorder_storage_) {
+      const_cast<ContentContext&>(renderer).coverage_recorder_storage_ =
+          CoverageTiledRenderPass::CreateStorage();
+    }
+    return CoverageTiledRenderPass::Claim(renderer, parent, std::move(island),
+                                          std::move(region), std::move(command),
+                                          tiled);
   }
   static const auto& Packets(const CoverageTiledRenderPass& pass) {
     return pass.packets_;
@@ -88,6 +97,16 @@ class RecorderPipeline final : public Pipeline<PipelineDescriptor> {
     result.SetColorAttachmentDescriptor(0, colour);
     return result;
   }
+};
+
+class RecorderMappedBuffer : public MockDeviceBuffer {
+ public:
+  explicit RecorderMappedBuffer(DeviceBufferDescriptor desc)
+      : MockDeviceBuffer(desc), bytes_(desc.size) {}
+  uint8_t* OnGetContents() const override { return bytes_.data(); }
+
+ private:
+  mutable std::vector<uint8_t> bytes_;
 };
 
 class RecorderPreparationBlit : public MockBlitPass {
@@ -349,7 +368,7 @@ TEST_F(CoverageTiledRenderPassTest,
             Matrix::MakeOrthographic(ISize(127, 89)));
 }
 
-TEST_F(CoverageTiledRenderPassTest, AtlasCustodySurvivesRecordingCallerDrop) {
+TEST_F(CoverageTiledRenderPassTest, UnencodedAtlasCustodyEndsWithRecorder) {
   auto owner = std::make_shared<int>(17);
   std::weak_ptr<int> weak = owner;
   pass->RetainResource(owner);
@@ -357,13 +376,11 @@ TEST_F(CoverageTiledRenderPassTest, AtlasCustodySurvivesRecordingCallerDrop) {
   RecordDraw();
   EXPECT_FALSE(weak.expired());
   pass.reset();
-  EXPECT_FALSE(weak.expired());
-  command.reset();
   EXPECT_TRUE(weak.expired());
 }
 
 TEST_F(CoverageTiledRenderPassTest,
-       ParentCustodySurvivesRecorderBeforeEnqueue) {
+       EncodedParentCustodySurvivesRecorderUntilCommandDrop) {
   auto owner = std::make_shared<int>(23);
   std::weak_ptr<int> weak = owner;
   parent.SetResourceOwner(owner);
@@ -371,6 +388,14 @@ TEST_F(CoverageTiledRenderPassTest,
                                                command, false);
   parent.SetResourceOwner(nullptr);
   owner.reset();
+  using ::testing::_;
+  using ::testing::Return;
+  auto actual =
+      std::make_shared<::testing::NiceMock<MockRenderPass>>(context, parent);
+  ON_CALL(*actual, IsValid()).WillByDefault(Return(true));
+  EXPECT_CALL(*actual, OnEncodeCommands(_)).WillOnce(Return(true));
+  EXPECT_CALL(*command, OnCreateRenderPass(_)).WillOnce(Return(actual));
+  ASSERT_TRUE(pass->EncodeCommands());
   pass.reset();
   EXPECT_FALSE(weak.expired());
   command.reset();
@@ -717,6 +742,200 @@ TEST_F(CoverageTiledRenderPassTest,
   EXPECT_CALL(*command, OnCreateBlitPass()).Times(0);
   EXPECT_TRUE(pass->EncodeCommands());
   EXPECT_EQ(region->ReportUsage(false).coverage_flushes, 0u);
+}
+
+TEST_F(CoverageTiledRenderPassTest,
+       ContinuousColourDrawRefusesUnavailableColdArenaBeforeRecording) {
+  auto state = std::make_shared<AvioContinuousClipExpression>();
+  state->count = 1;
+  pass->SetAvioContinuousClip(state);
+  pass->SetPipeline(pipeline);
+  pass->SetElementCount(3);
+  EXPECT_FALSE(pass->Draw().ok());
+  EXPECT_FALSE(pass->IsValid());
+  EXPECT_TRUE(CoverageTiledRenderPassTestPeer::Packets(*pass).empty());
+}
+
+TEST_F(CoverageTiledRenderPassTest,
+       FixedClipUploadCacheRejects129thStateWithoutStorageGrowth) {
+  using ::testing::_;
+  EXPECT_CALL(*allocator, OnCreateBuffer(_))
+      .Times(8)
+      .WillRepeatedly([](const auto& desc) {
+        return std::make_shared<RecorderMappedBuffer>(desc);
+      });
+  auto arena = HostBuffer::CreateBounded(allocator, nullptr, 16, 2);
+  ASSERT_TRUE(arena);
+  CoverageTiledRenderPassTestPeer::SetContinuousBuffer(*renderer, arena);
+  std::array<std::shared_ptr<AvioContinuousClipExpression>, 129> states;
+  for (auto& state : states) {
+    state = std::make_shared<AvioContinuousClipExpression>();
+    state->count = 1;
+  }
+  for (size_t i = 0; i < states.size(); ++i) {
+    pass->SetAvioContinuousClip(states[i]);
+    pass->SetPipeline(pipeline);
+    pass->SetElementCount(3);
+    EXPECT_EQ(pass->Draw().ok(), i < 128);
+  }
+  const auto& packets = CoverageTiledRenderPassTestPeer::Packets(*pass);
+  ASSERT_EQ(packets.size(), 128u);
+  EXPECT_EQ(packets.front().continuous_clip, states.front());
+  EXPECT_EQ(packets.back().continuous_clip, states[127]);
+  EXPECT_FALSE(pass->IsValid());
+  EXPECT_EQ(arena->GetStateForTest().total_buffer_count, 2u);
+}
+
+TEST_F(CoverageTiledRenderPassTest,
+       ContinuousClipStatesRetainExactOwnersAndGeometryFlagDoesNotLeak) {
+  auto first = std::make_shared<AvioContinuousClipExpression>();
+  auto second = std::make_shared<AvioContinuousClipExpression>();
+  first->count = 1;
+  second->count = 2;
+  auto depth = std::make_shared<RecorderPipeline>(true);
+  pass->SetAvioContinuousClip(first);
+  pass->SetAvioContinuousGeometry(true);
+  pass->SetPipeline(depth);
+  pass->SetElementCount(3);
+  ASSERT_TRUE(pass->Draw().ok());
+  pass->SetAvioContinuousClip(second);
+  pass->SetPipeline(depth);
+  pass->SetElementCount(3);
+  ASSERT_TRUE(pass->Draw().ok());
+  pass->SetAvioContinuousClip(nullptr);
+  pass->SetPipeline(depth);
+  pass->SetElementCount(3);
+  ASSERT_TRUE(pass->Draw().ok());
+  const auto& packets = CoverageTiledRenderPassTestPeer::Packets(*pass);
+  ASSERT_EQ(packets.size(), 3u);
+  EXPECT_EQ(packets[0].continuous_clip, first);
+  EXPECT_EQ(packets[1].continuous_clip, second);
+  EXPECT_FALSE(packets[2].continuous_clip);
+  EXPECT_TRUE(packets[0].continuous_geometry);
+  EXPECT_FALSE(packets[1].continuous_geometry);
+  EXPECT_FALSE(packets[2].continuous_geometry);
+  EXPECT_FALSE(packets[0].continuous_expression_buffer);
+  EXPECT_LT(sizeof(packets[0]), sizeof(AvioContinuousClipExpression));
+}
+
+TEST_F(CoverageTiledRenderPassTest, ExpiredWeakControlsNeverRenewIdentity) {
+  std::array<std::weak_ptr<CoverageTiledRenderPass>, 64> old;
+  pass.reset();
+  for (auto& weak : old) {
+    auto claim =
+        CoverageTiledRenderPass::MakeDirect1x(*renderer, parent, command);
+    ASSERT_TRUE(claim);
+    weak = claim;
+    claim.reset();
+    EXPECT_TRUE(weak.expired());
+  }
+  EXPECT_FALSE(
+      CoverageTiledRenderPass::MakeDirect1x(*renderer, parent, command));
+  old[13].reset();
+  auto current =
+      CoverageTiledRenderPass::MakeDirect1x(*renderer, parent, command);
+  ASSERT_TRUE(current);
+  EXPECT_TRUE(current->IsValid());
+  for (const auto& weak : old) {
+    EXPECT_FALSE(weak.lock());
+  }
+}
+
+TEST_F(CoverageTiledRenderPassTest, LiveRecorderPinsAggregatePacketGeneration) {
+  pass->SetStencilReference(17);
+  RecordDraw();
+  auto reader = pass;
+  pass.reset();
+  for (int i = 0; i < 128; i++) {
+    auto other =
+        CoverageTiledRenderPass::MakeDirect1x(*renderer, parent, command);
+    ASSERT_TRUE(other);
+    other->SetPipeline(pipeline);
+    other->SetStencilReference(99);
+    other->SetElementCount(3);
+    ASSERT_TRUE(other->Draw().ok());
+  }
+  ASSERT_EQ(CoverageTiledRenderPassTestPeer::Packets(*reader).size(), 1u);
+  EXPECT_EQ(
+      CoverageTiledRenderPassTestPeer::Packets(*reader)[0].stencil_reference,
+      17u);
+  reader.reset();
+  auto fresh =
+      CoverageTiledRenderPass::MakeDirect1x(*renderer, parent, command);
+  ASSERT_TRUE(fresh);
+  EXPECT_TRUE(CoverageTiledRenderPassTestPeer::Packets(*fresh).empty());
+}
+
+TEST_F(CoverageTiledRenderPassTest, PacketCapacityRefusesWithoutAppending) {
+  for (size_t i = 0; i < 8192; i++) {
+    pass->SetPipeline(pipeline);
+    pass->SetElementCount(3);
+    pass->SetStencilReference(static_cast<uint32_t>(i));
+    ASSERT_TRUE(pass->Draw().ok());
+  }
+  pass->SetPipeline(pipeline);
+  pass->SetElementCount(3);
+  EXPECT_EQ(pass->Draw().code(), fml::StatusCode::kResourceExhausted);
+  const auto& packets = CoverageTiledRenderPassTestPeer::Packets(*pass);
+  ASSERT_EQ(packets.size(), 8192u);
+  for (size_t i = 0; i < packets.size(); i += 63) {
+    EXPECT_EQ(packets[i].stencil_reference, i);
+  }
+  pass.reset();
+  auto fresh =
+      CoverageTiledRenderPass::MakeDirect1x(*renderer, parent, command);
+  ASSERT_TRUE(fresh);
+  fresh->SetPipeline(pipeline);
+  fresh->SetElementCount(3);
+  EXPECT_TRUE(fresh->Draw().ok());
+}
+
+TEST_F(CoverageTiledRenderPassTest,
+       CompleteClipAndOperationFactsPersistExactly) {
+  pass->SetAvioSample4Clip(nullptr, false);
+  pass->SetAvioClipOperation(true);
+  RecordDraw();
+  pass->SetAvioSample4Clip(nullptr, true);
+  pass->SetAvioClipOperation(false);
+  RecordDraw();
+  const auto& packets = CoverageTiledRenderPassTestPeer::Packets(*pass);
+  EXPECT_FALSE(packets[0].sample4_clip_complete);
+  EXPECT_TRUE(packets[0].clip_operation);
+  EXPECT_TRUE(packets[1].sample4_clip_complete);
+  EXPECT_FALSE(packets[1].clip_operation);
+}
+
+TEST_F(CoverageTiledRenderPassTest, RepeatedLogicalReaderUsesOneStandingSlot) {
+  auto owner = std::make_shared<int>(17);
+  for (int draw = 0; draw < 128; ++draw) {
+    pass->RetainResource(owner);
+    RecordDraw();
+  }
+  EXPECT_TRUE(pass->IsValid());
+  EXPECT_EQ(CoverageTiledRenderPassTestPeer::Packets(*pass).size(), 128u);
+}
+
+TEST_F(CoverageTiledRenderPassTest,
+       SourceProofBelongsToExactlyOneAcceptedDraw) {
+  auto clip = std::make_shared<AvioSample4ClipDescriptor>();
+  clip->segment_token = 91;
+  pass->SetAvioSample4Clip(clip, true);
+  ASSERT_EQ(pass->GetAvioSample4Clip(), clip.get());
+  pass->SetAvioSample4SourceProof(
+      AvioSample4SourceProof{.segment_token = 91,
+                             .uniform_samples = true,
+                             .full_clip_geometry = true,
+                             .source_is_opaque = true,
+                             .captured_backdrop = true});
+  RecordDraw();
+  RecordDraw();
+  const auto& packets = CoverageTiledRenderPassTestPeer::Packets(*pass);
+  ASSERT_EQ(packets.size(), 2u);
+  ASSERT_TRUE(packets[0].sample4_source_proof);
+  EXPECT_TRUE(packets[0].sample4_source_proof->Matches(91));
+  EXPECT_TRUE(packets[0].sample4_source_proof->captured_backdrop);
+  EXPECT_FALSE(packets[1].sample4_source_proof);
+  EXPECT_EQ(packets[1].sample4_clip, clip);
 }
 
 }  // namespace
