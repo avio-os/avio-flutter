@@ -1587,7 +1587,7 @@ queued asynchronously from their original default descriptors before any source
 join, then the same keys and required replay derivatives are validated during
 controlled initialization. A failed queue or compile keeps public readiness
 false. The manual clip family retains its exact no-colour-write default
-descriptor for that queue. The typical 146 Coverage visitor entries count source
+descriptor for that queue. The typical 160 Coverage visitor entries count source
 keys, not native PSOs or measured pipeline memory; mask/default futures and
 required derivatives are separate. Four production visitor tests execute the
 queue-before-join and failure/readiness contract. The upstream legacy-set and
@@ -1645,8 +1645,29 @@ canonical four lane masks; source sampling, strict crop and nonlinear transfer
 retain their original ordering. A coefficient 1x image route requires separate
 encoded-source and correlation proof; unproven varying/translucent sources keep
 native lane geometry. Analytic legacy SDF-only scope admission follows the real
-owner's `use_sdfs` eligibility rather than replacing mixed or clipped geometry
-with an unsupported scalar mask.
+owner's `use_sdfs` eligibility. Source selection and target routing are separate:
+mixed or clipped scopes keep the original UberSDF, complex-superellipse and
+circle source shaders in bounded native4 replay, including their existing
+alpha/gamma and gradient behavior. The complete unclipped scope proof alone
+permits the existing SDF source to render at 1x. Circle retains its original
+eligibility independently of the EN50 flag. Candidate SDF eligibility never
+proves equal samples for a neighboring clip segment.
+
+With an explicitly requested continuous clip, Circle and complex-superellipse
+variants export their original normalized signed distance before coverage and
+use sample-qualified geometry inputs. The wrapper combines that own distance
+with the retained clip expression before one coverage evaluation. Their default
+shader bodies remain unchanged. The native4 source keys are cold-warmed for the
+actual geometry/operator forms; a registered mixed glyph/clip/SDF/gradient
+fixture checks first-frame compilation when run on a Vulkan device. The source
+fixture has been compiled here, but that device execution remains pending.
+
+Native tile raster origins remain aligned to eight pixels. This preserves the
+original ordered-dither modulo-eight indices and derivative-quad phase when
+original gradient source shaders are translated into scratch tiles. Replay
+refuses an unaligned translated origin before binding or drawing. Production
+planner tests cover negative/fractional bounds and odd scratch capacities;
+neither those tests nor source compilation establishes native pixel parity.
 
 A cold aggregate CPU bank holds at most 64 recorder controls, 8,192 packets,
 32,768 bindings and 32,768 vertex views. Pending resources and names use fixed

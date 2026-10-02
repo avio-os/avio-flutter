@@ -13,7 +13,7 @@
 namespace impeller {
 
 // The parent and island raster grids have identical sample and derivative
-// phases. Eight also preserves the derivative quads used by image sampling.
+// phases. Eight preserves ordered-dither indices and derivative quads.
 inline constexpr int64_t kCoverageTileAlignment = 8;
 
 struct CoverageAtlasTile {
@@ -42,6 +42,13 @@ class CoverageTilePlan {
 
 class CoverageAtlas {
  public:
+  // Original fragments may use gl_FragCoord for ordered 8x8 dithering. A
+  // translated viewport preserves that phase only at these integer origins.
+  static constexpr bool PreservesOriginalRasterPhase(IPoint origin) {
+    return origin.x % kCoverageTileAlignment == 0 &&
+           origin.y % kCoverageTileAlignment == 0;
+  }
+
   // coverage is already expanded for any source/filter support. destination
   // is the writable parent extent. A zero-size/invalid plan is rejected;
   // disjoint coverage produces a valid empty iterator. Capacity is the content

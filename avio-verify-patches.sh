@@ -896,6 +896,22 @@ need "required missing completion fd settles a failed frame" \
   "$F/shell/platform/embedder/embedder_external_view_embedder.cc" 'RequiresRenderCompleteSyncFD\(\)'
 need "actual native-cache callback regression remains registered" \
   "$F/shell/platform/embedder/BUILD.gn" 'embedder_external_resource_custody_unittests.cc'
+need "legacy analytic source choice is independent of target routing" \
+  "$F/impeller/display_list/canvas.cc" 'UseLegacySdfSource'
+need "legacy analytic mixed-scope source contract remains registered" \
+  "$F/impeller/display_list/BUILD.gn" 'legacy_analytic_source_unittests.cc'
+need "mixed analytic native source keys are cold-warmed" \
+  "$F/impeller/entity/contents/avio_pipeline_prewarm_unittests.cc" 'MixedNativePassesKeepTheirAnalyticSourceKeys'
+need "mixed glyph clip and SDF native fixture remains authored" \
+  "$F/impeller/golden_tests/avio_coverage_goldens_vk.cc" 'MixedAnalyticSourcesUseColdNativeKeys'
+need "continuous Circle exports original distance before coverage" \
+  "$F/impeller/entity/shaders/circle.frag" 'avio_geometry_distance = sdf_distance'
+need "continuous complex superellipse exports original distance" \
+  "$F/impeller/entity/shaders/complex_rse.frag" 'avio_geometry_distance = sdf /'
+need "translated native replay preserves original raster phase" \
+  "$F/impeller/entity/coverage_tiled_render_pass.cc" 'PreservesOriginalRasterPhase\(origin\)'
+need "native dither and derivative tile phase are tested" \
+  "$F/impeller/entity/contents/coverage_atlas_unittests.cc" 'NativeDitherAndDerivativePhaseSurviveEveryTile'
 
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"

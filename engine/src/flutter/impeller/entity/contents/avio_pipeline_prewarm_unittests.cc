@@ -266,8 +266,6 @@ TEST(AvioPipelinePrewarmTest, DeviceFlagsSelectExistingShaderFamilies) {
   for (const auto& key : native) {
     EXPECT_NE(key.family, Family::kConicalGradient);
     EXPECT_NE(key.family, Family::kSweepGradient);
-    EXPECT_NE(key.family, Family::kCircle);
-    EXPECT_NE(key.family, Family::kComplexRse);
     if (key.family == Family::kLinearGradient ||
         key.family == Family::kRadialGradient) {
       EXPECT_EQ(key.storage, Storage::kSsbo);
@@ -306,6 +304,37 @@ TEST(AvioPipelinePrewarmTest, GlesDecalDownsampleWarmsOnlyAdmittedSubpasses) {
         return true;
       }));
   EXPECT_EQ(fallbacks, 1u);
+}
+TEST(AvioPipelinePrewarmTest, MixedNativePassesKeepTheirAnalyticSourceKeys) {
+  const auto enabled = Catalogue(true);
+  const auto disabled = Catalogue(true, false);
+  ContentContextOptions options;
+  options.sample_count = SampleCount::kCount4;
+  options.color_attachment_pixel_format = PixelFormat::kB8G8R8A8UNormInt;
+  options.depth_compare = CompareFunction::kGreaterEqual;
+  options.primitive_type = PrimitiveType::kTriangleStrip;
+  for (auto blend : {BlendMode::kSrcOver, BlendMode::kSrc, BlendMode::kScreen,
+                     BlendMode::kDstOut}) {
+    options.blend_mode = blend;
+    options.depth_write_enabled = blend == BlendMode::kSrc;
+    EXPECT_TRUE(Has(enabled, Family::kUberSdf, options));
+    EXPECT_TRUE(Has(enabled, Family::kComplexRse, options));
+    EXPECT_FALSE(Has(disabled, Family::kUberSdf, options));
+    EXPECT_FALSE(Has(disabled, Family::kComplexRse, options));
+    EXPECT_TRUE(Has(disabled, Family::kCircle, options));
+  }
+  for (auto blend : {BlendMode::kClear, BlendMode::kDstIn}) {
+    options.blend_mode = blend;
+    options.depth_write_enabled = false;
+    EXPECT_TRUE(Has(disabled, Family::kCircle, options));
+    EXPECT_FALSE(Has(enabled, Family::kUberSdf, options));
+  }
+  options.sample_count = SampleCount::kCount1;
+  options.has_depth_stencil_attachments = false;
+  options.blend_mode = BlendMode::kSrcOver;
+  EXPECT_FALSE(Has(enabled, Family::kCircle, options));
+  EXPECT_FALSE(Has(enabled, Family::kComplexRse, options));
+  EXPECT_TRUE(Has(enabled, Family::kUberSdf, options));
 }
 TEST(AvioPipelinePrewarmTest, NegotiatedSdfCutsDoNotDependOnEn50Flag) {
   bool uber_clear = false;
@@ -369,8 +398,14 @@ TEST(AvioPipelinePrewarmTest, NoUnsupportedFanOrUnadmittedPassCrossProduct) {
           EXPECT_NE(family, Family::kRadialGradient);
           EXPECT_EQ(options.stencil_mode, Stencil::kIgnore);
         }
-        if (family == Family::kUberSdf || family == Family::kComplexRse) {
-          EXPECT_EQ(options.sample_count, SampleCount::kCount1);
+        if (family == Family::kUberSdf || family == Family::kComplexRse ||
+            family == Family::kCircle) {
+          EXPECT_EQ(options.primitive_type, PrimitiveType::kTriangleStrip);
+          EXPECT_EQ(options.stencil_mode, Stencil::kIgnore);
+          EXPECT_EQ(options.depth_compare, CompareFunction::kGreaterEqual);
+          if (family != Family::kUberSdf) {
+            EXPECT_EQ(options.sample_count, SampleCount::kCount4);
+          }
         }
         return true;
       }));

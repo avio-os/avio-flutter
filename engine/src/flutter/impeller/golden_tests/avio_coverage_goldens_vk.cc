@@ -509,6 +509,94 @@ TEST(AvioCoverageGoldenVKStandalone, NoPipelineCompileOnFirstFrameAfterInit) {
   }
 }
 
+// The source families remain original analytic shaders even when text, a
+// native clip or gradients forbid the whole-root 1x proof. This fixture renders
+// the real source/filter calls; the CPU catalogue is not substituted for them.
+TEST(AvioCoverageGoldenVKStandalone, MixedAnalyticSourcesUseColdNativeKeys) {
+  for (bool use_sdfs : {false, true}) {
+    SCOPED_TRACE(use_sdfs);
+    auto context =
+        MakeHeadlessGoldenContextVK(AvioGoldenPolicyVK::kCoverage, use_sdfs);
+    ASSERT_TRUE(context && context->IsValid());
+    std::unique_ptr<AiksContext> renderer;
+    const fml::ScopedCleanupClosure shutdown([&] {
+      renderer.reset();
+      context->Shutdown();
+    });
+    renderer = std::make_unique<AiksContext>(
+        context, TypographerContextSkia::Make(),
+        MakeGoldenAllocatorVK(context, AvioGoldenPolicyVK::kCoverage));
+    ASSERT_TRUE(renderer->IsValid());
+    DisplayListBuilder builder;
+    DlPaint background;
+    background.setColor(DlColor(0xFF152235u));
+    builder.DrawPaint(background);
+    builder.ClipRoundRect(
+        DlRoundRect::MakeRectRadius(DlRect::MakeXYWH(5.25, 6.75, 220, 220), 17),
+        DlClipOp::kIntersect, true);
+    DlPaint ink;
+    ink.setAntiAlias(true).setColor(DlColor(0xCEEDB65Cu));
+    const auto bounds = DlRect::MakeXYWH(18.25, 22.75, 125.5, 96.5);
+    builder.DrawRoundRect(DlRoundRect::MakeRectRadius(bounds, 17), ink);
+    builder.DrawRoundSuperellipse(
+        DlRoundSuperellipse::MakeRectRadii(bounds.Shift(16, 31),
+                                           {.top_left = {8, 11},
+                                            .top_right = {19, 17},
+                                            .bottom_left = {13, 21},
+                                            .bottom_right = {25, 16}}),
+        ink);
+    const std::array<DlColor, 2> colors = {DlColor(0xB84087ECu),
+                                           DlColor(0xE090D5A2u)};
+    const float stops[] = {0, 1};
+    auto gradient = ink;
+    gradient.setColorSource(
+        DlColorSource::MakeLinear(bounds.GetLeftTop(), bounds.GetRightBottom(),
+                                  2, colors.data(), stops, DlTileMode::kClamp));
+    builder.DrawOval(bounds.Shift(21, 15), gradient);
+    gradient.setDrawStyle(DlDrawStyle::kStroke).setStrokeWidth(2.25);
+    gradient.setBlendMode(DlBlendMode::kScreen);
+    builder.DrawRect(bounds.Shift(11, 25), gradient);
+    builder.DrawLine({24.25, 30.75}, {188.5, 182.25}, gradient);
+    for (auto mode :
+         {DlBlendMode::kSrcOver, DlBlendMode::kSrc, DlBlendMode::kClear,
+          DlBlendMode::kDstIn, DlBlendMode::kDstOut, DlBlendMode::kScreen}) {
+      ink.setBlendMode(mode);
+      builder.DrawCircle({168.25, 162.75}, 11.5, ink);
+    }
+    auto font_data =
+        flutter::testing::OpenFixtureAsSkData("Roboto-Regular.ttf");
+    auto manager = txt::GetDefaultFontManager();
+    ASSERT_TRUE(font_data && manager);
+    auto typeface = manager->makeFromData(font_data);
+    ASSERT_TRUE(typeface);
+    auto blob = SkTextBlob::MakeFromString("Mixed Avio", SkFont(typeface, 18));
+    ASSERT_TRUE(blob);
+    ink.setBlendMode(DlBlendMode::kSrcOver);
+    builder.DrawText(DlTextImpeller::MakeFromBlob(blob), 34, 204, ink);
+    auto list = builder.Build();
+    ASSERT_TRUE(list);
+    {
+      auto proof = ClassifyCoverageDisplayList(
+          list, renderer->GetContentContext().GetCoverageClassifierStorage(),
+          Rect::MakeSize(ISize{240, 240}), 4u, use_sdfs);
+      ASSERT_TRUE(proof);
+      ASSERT_FALSE(proof->GetRoot().can_render_direct_1x);
+    }
+    const auto initial = context->GetAvioRenderResourceReport(true);
+    ASSERT_TRUE(initial.available);
+    ASSERT_NE(initial.counters_supported & kAvioCounterFirstUseCompiles, 0u);
+    std::shared_ptr<Texture> output;
+    {
+      const AvioRasterFrameScope frame;
+      output = RenderGoldenDisplayListVK(*renderer, list, {240, 240},
+                                         AvioGoldenPolicyVK::kCoverage);
+    }
+    ASSERT_TRUE(output);
+    EXPECT_EQ(context->GetAvioRenderResourceReport(true).first_use_compiles,
+              0u);
+  }
+}
+
 // These sources have no full-size background/clip/filter hiding the positive
 // proof. The actual classifier and Canvas select the direct1x source factory,
 // rather than this test calling the cold visitor or swapping pipeline options.

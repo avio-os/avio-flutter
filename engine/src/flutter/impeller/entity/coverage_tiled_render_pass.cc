@@ -148,6 +148,12 @@ bool CoverageTiledRenderPass::ReplayPacket(
     std::optional<AvioCoveragePipelineVariant> variant,
     const AvioSample4ClipDescriptor* clip_override) const {
   const auto origin = translate_to_raster ? raster_rect.GetOrigin() : IPoint{};
+  if (translate_to_raster &&
+      !CoverageAtlas::PreservesOriginalRasterPhase(origin)) {
+    // Refuse a future unaligned caller before source binding/drawing can
+    // silently change the original ordered-dither or derivative phase.
+    return false;
+  }
   auto clipped = GetPacketScissor(packet, raster_rect);
   if (!clipped) {
     return true;

@@ -39,7 +39,11 @@ frag_info;
 
 out vec4 frag_color;
 
+#ifdef AVIO_CONTINUOUS_COVERAGE
+sample in highp vec2 v_position;
+#else
 highp in vec2 v_position;
+#endif
 
 float distanceFromCircle(vec2 p, float radius) {
   return length(p) - radius;
@@ -273,7 +277,15 @@ void main() {
   float sdf = sdf_and_pixel_size.x;
   float pixel_size = sdf_and_pixel_size.y;
 
+#ifdef AVIO_CONTINUOUS_COVERAGE
+  // Keep all original quadrant/stroke distance math, delaying only the
+  // coverage evaluation until it is combined with the retained clip.
+  avio_geometry_distance = sdf / max(pixel_size, 0.00001);
+  avio_has_geometry_distance = true;
+  float alpha = 1.0;
+#else
   float alpha = SDFAlpha(sdf, pixel_size, 1.0);
+#endif
 
   frag_color = vec4(frag_info.color.rgb, frag_info.color.a * alpha);
   frag_color = IPPremultiply(frag_color);

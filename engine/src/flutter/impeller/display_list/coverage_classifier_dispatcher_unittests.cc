@@ -3,8 +3,16 @@
 // found in the LICENSE file.
 
 #include "flutter/display_list/dl_builder.h"
+#include "flutter/display_list/effects/dl_color_source.h"
+#include "flutter/testing/testing.h"
 #include "gtest/gtest.h"
+#include "impeller/display_list/canvas.h"
 #include "impeller/display_list/coverage_classifier.h"
+#include "impeller/display_list/dl_text_impeller.h"
+#include "impeller/display_list/legacy_analytic_source.h"
+#include "impeller/typographer/backends/skia/text_frame_skia.h"
+#include "third_party/skia/include/core/SkFont.h"
+#include "txt/platform.h"
 
 namespace impeller {
 namespace {
@@ -135,12 +143,85 @@ TEST(CoverageDisplayListPrepass, SdfCandidateOutsideClipUsesNativeFringeFacts) {
         ClassifyCoverageDisplayList(builder.Build(), storage, bounds, 4, true);
     ASSERT_TRUE(plan);
     ASSERT_EQ(plan->GetClips().size(), 1u);
-    // Actual Canvas selection is native4 for this clipped root even though
-    // each rectangular operation could use SDF in a proven unclipped scope.
+    // Actual Canvas selection is native4 for this clipped root. Keeping an
+    // analytic source does not certify the complete sample/clip correlation.
     EXPECT_TRUE(plan->GetRoot().requires_legacy_sdf);
     EXPECT_FALSE(plan->GetRoot().can_render_direct_1x);
     EXPECT_FALSE(plan->GetClips()[0].no_external_fringe_correlation);
   }
+}
+
+TEST(CoverageDisplayListPrepass, ShellTextAndClipRetainNativeAnalyticSource) {
+  auto data = flutter::testing::OpenFixtureAsSkData("Roboto-Regular.ttf");
+  ASSERT_TRUE(data);
+  auto manager = txt::GetDefaultFontManager();
+  ASSERT_TRUE(manager);
+  auto typeface = manager->makeFromData(data);
+  ASSERT_TRUE(typeface);
+  auto blob = SkTextBlob::MakeFromString("Settings", SkFont(typeface, 14));
+  ASSERT_TRUE(blob);
+  auto frame = MakeTextFrameFromTextBlobSkia(blob);
+  ASSERT_TRUE(frame);
+  ASSERT_FALSE(frame->GetBounds().IsEmpty());
+
+  flutter::DisplayListBuilder builder;
+  const flutter::DlPaint paint;
+  builder.DrawRoundRect(flutter::DlRoundRect::MakeRectRadius(
+                            Rect::MakeLTRB(4.25, 4.25, 195.75, 75.75), 8),
+                        paint);
+  builder.DrawText(flutter::DlTextImpeller::Make(frame), 20, 40, paint);
+  builder.Save();
+  builder.ClipRect(Rect::MakeLTRB(10.25, 10.25, 189.75, 69.75),
+                   flutter::DlClipOp::kIntersect, true);
+  builder.DrawCircle({175, 40}, 6, paint);
+  builder.Restore();
+  auto storage = std::make_shared<CoverageDisplayListPlan>(Rect{}, 4);
+  const auto plan = ClassifyCoverageDisplayList(builder.Build(), storage,
+                                                Rect::MakeWH(200, 80), 4, true);
+  ASSERT_TRUE(plan);
+  ASSERT_EQ(plan->GetRoot().draw_count, 3u);
+  ASSERT_EQ(plan->GetClips().size(), 1u);
+  EXPECT_FALSE(plan->GetRoot().can_render_direct_1x);
+  EXPECT_TRUE(plan->GetRoot().requires_legacy_sdf);
+  AvioAntialiasingConfig config;
+  config.policy = AvioAntialiasingPolicy::kCoverage;
+  EXPECT_EQ(SelectLegacyAnalyticSourceRoute(
+                config, true, Canvas::IsCompatibleWithSDFRendering(Paint{}),
+                plan->GetRoot().can_render_direct_1x),
+            LegacyAnalyticSourceRoute::kCoverageNative4);
+}
+
+TEST(CoverageDisplayListPrepass,
+     En50GradientAndStrokeKeepNativeAnalyticSource) {
+  const Rect bounds = Rect::MakeWH(100, 100);
+  flutter::DisplayListBuilder builder;
+  const flutter::DlColor colors[] = {flutter::DlColor::kWhite(),
+                                     flutter::DlColor::kBlack()};
+  const float stops[] = {0, 1};
+  flutter::DlPaint gradient;
+  gradient.setColorSource(flutter::DlColorSource::MakeLinear(
+      {0, 0}, {100, 100}, 2, colors, stops, flutter::DlTileMode::kClamp));
+  builder.DrawRoundRect(flutter::DlRoundRect::MakeRectRadius(bounds, 8),
+                        gradient);
+  flutter::DlPaint stroke;
+  stroke.setDrawStyle(flutter::DlDrawStyle::kStroke);
+  stroke.setStrokeWidth(1.4);
+  builder.DrawRoundRect(
+      flutter::DlRoundRect::MakeRectRadius(Rect::MakeLTRB(20, 20, 80, 70), 2),
+      stroke);
+  builder.DrawLine({40, 80}, {60, 80}, stroke);
+  auto storage = std::make_shared<CoverageDisplayListPlan>(Rect{}, 4);
+  const auto plan =
+      ClassifyCoverageDisplayList(builder.Build(), storage, bounds, 4, true);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->GetRoot().draw_count, 3u);
+  EXPECT_FALSE(plan->GetRoot().can_render_direct_1x);
+  AvioAntialiasingConfig config;
+  config.policy = AvioAntialiasingPolicy::kCoverage;
+  EXPECT_EQ(SelectLegacyAnalyticSourceRoute(
+                config, true, Canvas::IsCompatibleWithSDFRendering(Paint{}),
+                plan->GetRoot().can_render_direct_1x),
+            LegacyAnalyticSourceRoute::kCoverageNative4);
 }
 }  // namespace
 }  // namespace impeller

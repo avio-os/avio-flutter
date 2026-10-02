@@ -375,9 +375,9 @@ class CoverageDispatcher final : public flutter::IgnoreAttributeDispatchHelper,
     facts.uses_legacy_sdf = legacy_sdf_geometry &&
                             CanRenderLegacySdfAt1x(facts, matrix_, use_sdfs_);
     facts.direct_1x_eligible = facts.uses_legacy_sdf;
-    // This is a candidate for the whole-scope SDF route. A mixed/clipped
-    // scope instead renders native AA geometry, so candidate eligibility
-    // cannot certify equal samples for earlier/later fringe correlation.
+    // This is a candidate for the whole-scope one-sample target. Mixed/clipped
+    // scopes retain their original analytic source in native4 replay. Source
+    // eligibility alone cannot certify sample equality or fringe correlation.
     if (kind == CoverageGeometryKind::kRect && !stroke &&
         facts.uniform_source && matrix_.IsFinite() && matrix_.IsAffine()) {
       auto points = local.GetPoints();

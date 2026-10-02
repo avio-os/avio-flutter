@@ -70,6 +70,16 @@ bool WarmRect(const AvioPipelinePrewarmCallback& create,
   return Warm(create, family, options, storage);
 }
 
+// UberSDF and complex RSE shade one original quad. CircleContents uses the
+// native circle generator's strip. None requests path stencil/overdraw keys.
+bool WarmNativeAnalytic(const AvioPipelinePrewarmCallback& create,
+                        Family family,
+                        ContentContextOptions options) {
+  options.primitive_type = PrimitiveType::kTriangleStrip;
+  options.depth_write_enabled = options.blend_mode == BlendMode::kSrc;
+  return Warm(create, family, options);
+}
+
 bool WarmFastGradient(const AvioPipelinePrewarmCallback& create,
                       ContentContextOptions options) {
   // FastLinearGradient constructs a triangle list, including the cover draw.
@@ -148,11 +158,18 @@ bool PrewarmAvioPipelineKeys(const AvioPipelinePrewarmConfig& config,
         !Warm(create, Family::kShadowVertices, options)) {
       return false;
     }
-    // Ordinary UberSDF is only used by the proven 1x route. Negotiated arcs and
-    // bordered rounded rectangles instead record native4 before continuous
-    // replay, independently of EN50.
-    if (config.continuous_sdf_cuts &&
-        !WarmRect(create, Family::kUberSdf, options)) {
+    // Preserve the original analytic source in mixed/clipped roots. A direct
+    // 1x proof changes the target, not the owning source family or edge shader.
+    if ((config.use_sdfs || config.continuous_sdf_cuts) &&
+        !WarmNativeAnalytic(create, Family::kUberSdf, options)) {
+      return false;
+    }
+    if (config.use_sdfs &&
+        !WarmNativeAnalytic(create, Family::kComplexRse, options)) {
+      return false;
+    }
+    // Circle's original fast path also runs when EN50 is disabled.
+    if (!WarmNativeAnalytic(create, Family::kCircle, options)) {
       return false;
     }
     for (auto storage :
@@ -194,9 +211,21 @@ bool PrewarmAvioPipelineKeys(const AvioPipelinePrewarmConfig& config,
       }
     }
   }
-  if (config.continuous_sdf_cuts) {
-    cut.blend_mode = BlendMode::kClear;
-    if (!WarmRect(create, Family::kUberSdf, cut)) {
+  for (auto blend : {BlendMode::kClear, BlendMode::kDstIn, BlendMode::kDstOut,
+                     BlendMode::kScreen}) {
+    cut.blend_mode = blend;
+    if (!WarmNativeAnalytic(create, Family::kCircle, cut)) {
+      return false;
+    }
+    const bool legacy_compatible =
+        blend == BlendMode::kDstOut || blend == BlendMode::kScreen;
+    if (((config.use_sdfs && legacy_compatible) ||
+         (config.continuous_sdf_cuts && blend != BlendMode::kDstIn)) &&
+        !WarmNativeAnalytic(create, Family::kUberSdf, cut)) {
+      return false;
+    }
+    if (config.use_sdfs && legacy_compatible &&
+        !WarmNativeAnalytic(create, Family::kComplexRse, cut)) {
       return false;
     }
   }

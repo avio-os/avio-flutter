@@ -402,6 +402,8 @@ class Canvas {
 
   bool HasAvioDirect1xScopeProof() const;
 
+  bool UseLegacySdfSource(const Paint& paint) const;
+
   void RetainSample4Clip(AvioSample4ClipNode node,
                          const CoverageClipDecision* decision,
                          RenderPass& pass);

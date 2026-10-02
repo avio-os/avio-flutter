@@ -57,6 +57,39 @@ TEST(CoverageAtlasTest, PreservesGlobalPhaseAtNegativeAndFractionalOrigin) {
   ASSERT_EQ(total_area, 26 * 11);
 }
 
+TEST(CoverageAtlasTest, NativeDitherAndDerivativePhaseSurviveEveryTile) {
+  for (auto capacity : {ISize{19, 25}, ISize{223, 227}}) {
+    auto plan =
+        CoverageAtlas::PlanTiles(Rect::MakeLTRB(-13.5, -11.25, 513.75, 367.5),
+                                 IRect::MakeLTRB(-15, -13, 519, 373), capacity);
+    ASSERT_TRUE(plan);
+    size_t tiles = 0;
+    while (auto tile = plan->Next()) {
+      const auto origin = tile->raster_rect.GetOrigin();
+      ASSERT_TRUE(CoverageAtlas::PreservesOriginalRasterPhase(origin));
+      ASSERT_LE(tile->raster_rect.GetWidth(), capacity.width);
+      ASSERT_LE(tile->raster_rect.GetHeight(), capacity.height);
+      // Check each ordered-dither index and both derivative-quad phases.
+      // Padding and negative parent positions must not reset either grid.
+      for (int64_t y = 0; y < 8; ++y) {
+        for (int64_t x = 0; x < 8; ++x) {
+          EXPECT_EQ(((origin.x + x) % 8 + 8) % 8, x);
+          EXPECT_EQ(((origin.y + y) % 8 + 8) % 8, y);
+          EXPECT_EQ(((origin.x + x) % 2 + 2) % 2, x % 2);
+          EXPECT_EQ(((origin.y + y) % 2 + 2) % 2, y % 2);
+        }
+      }
+      tiles++;
+    }
+    EXPECT_GT(tiles, 1u);
+  }
+}
+TEST(CoverageAtlasTest, RejectsUnalignedTranslatedReplayOrigin) {
+  EXPECT_TRUE(CoverageAtlas::PreservesOriginalRasterPhase({-16, 24}));
+  EXPECT_TRUE(CoverageAtlas::PreservesOriginalRasterPhase({0, 0}));
+  EXPECT_FALSE(CoverageAtlas::PreservesOriginalRasterPhase({-15, 24}));
+  EXPECT_FALSE(CoverageAtlas::PreservesOriginalRasterPhase({0, 2}));
+}
 TEST(CoverageAtlasTest, EmptyCoverageDoesNotAcquireStorage) {
   auto plan =
       CoverageAtlas::PlanTiles(Rect::MakeLTRB(100, 100, 200, 200),

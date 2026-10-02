@@ -29,6 +29,7 @@
 #include "impeller/display_list/dl_image_impeller.h"
 #include "impeller/display_list/dl_vertices_geometry.h"
 #include "impeller/display_list/image_filter.h"
+#include "impeller/display_list/legacy_analytic_source.h"
 #include "impeller/display_list/skia_conversions.h"
 #include "impeller/entity/avio_coverage_region.h"
 #include "impeller/entity/contents/atlas_contents.h"
@@ -639,6 +640,15 @@ bool Canvas::HasAvioDirect1xScopeProof() const {
          !transform_stack_.back().continuous_clip;
 }
 
+bool Canvas::UseLegacySdfSource(const Paint& paint) const {
+  return SelectLegacyAnalyticSourceRoute(
+             renderer_.GetContext()->GetAvioAntialiasingConfig(),
+             renderer_.GetContext()->GetFlags().use_sdfs,
+             IsCompatibleWithSDFRendering(paint),
+             HasAvioDirect1xScopeProof()) !=
+         LegacyAnalyticSourceRoute::kGeometry;
+}
+
 void Canvas::RetainSample4Clip(AvioSample4ClipNode node,
                                const CoverageClipDecision* decision,
                                RenderPass& pass) {
@@ -887,9 +897,15 @@ bool Canvas::AttemptColorFilterOptimization(
 bool Canvas::AttemptDrawAntialiasedCircle(const Point& center,
                                           Scalar radius,
                                           const Paint& paint) {
-  if (renderer_.UsesAvioCoverage() || paint.HasColorFilter() ||
-      paint.image_filter || paint.invert_colors || paint.color_source ||
-      paint.mask_blur_descriptor.has_value()) {
+  // The original source is retained in native4 replay. The opt-in continuous
+  // wrapper exports its raw distance before combining shape and clip coverage.
+  const bool compatible = !paint.HasColorFilter() && !paint.image_filter &&
+                          !paint.invert_colors && !paint.color_source &&
+                          !paint.mask_blur_descriptor.has_value();
+  if (SelectLegacyAnalyticSourceRoute(
+          renderer_.GetContext()->GetAvioAntialiasingConfig(),
+          /*source_enabled=*/true, compatible, HasAvioDirect1xScopeProof()) ==
+      LegacyAnalyticSourceRoute::kGeometry) {
     return false;
   }
 
@@ -1142,9 +1158,7 @@ bool Canvas::AttemptDrawLineSDF(const Point& p0,
                                 const Point& p1,
                                 const Paint& paint,
                                 bool reuse_depth) {
-  if ((renderer_.UsesAvioCoverage() && !HasAvioDirect1xScopeProof()) ||
-      !renderer_.GetContext()->GetFlags().use_sdfs ||
-      !IsCompatibleWithSDFRendering(paint)) {
+  if (!UseLegacySdfSource(paint)) {
     return false;
   }
   // Draw the line as a filled rectangle with width=line_length and
@@ -1282,9 +1296,7 @@ void Canvas::DrawRect(const Rect& rect, const Paint& paint) {
     }
   }
 
-  if ((!renderer_.UsesAvioCoverage() || HasAvioDirect1xScopeProof()) &&
-      renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint)) {
+  if (UseLegacySdfSource(paint)) {
     Rect effective_rect = rect;
     Color effective_color = paint.color;
 
@@ -1356,9 +1368,7 @@ void Canvas::DrawOval(const Rect& rect, const Paint& paint) {
   entity.SetTransform(GetCurrentTransform());
   entity.SetBlendMode(paint.blend_mode);
 
-  if ((!renderer_.UsesAvioCoverage() || HasAvioDirect1xScopeProof()) &&
-      renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint)) {
+  if (UseLegacySdfSource(paint)) {
     UberSDFParameters params;
 
     if (paint.style == Paint::Style::kStroke) {
@@ -1455,9 +1465,7 @@ void Canvas::DrawRoundRect(const RoundRect& round_rect, const Paint& paint) {
 
   const RoundingRadii& radii = round_rect.GetRadii();
 
-  if ((!renderer_.UsesAvioCoverage() || HasAvioDirect1xScopeProof()) &&
-      renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint) && radii.AreAllCornersCircular()) {
+  if (UseLegacySdfSource(paint) && radii.AreAllCornersCircular()) {
     Color effective_color = paint.color;
     Rect bounds = round_rect.GetBounds();
 
@@ -1552,9 +1560,7 @@ void Canvas::DrawRoundSuperellipse(const RoundSuperellipse& round_superellipse,
   entity.SetTransform(GetCurrentTransform());
   entity.SetBlendMode(paint.blend_mode);
 
-  if ((!renderer_.UsesAvioCoverage() || HasAvioDirect1xScopeProof()) &&
-      renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint)) {
+  if (UseLegacySdfSource(paint)) {
     auto round_superellipse_params = RoundSuperellipseParam::MakeBoundsRadii(
         round_superellipse.GetBounds(), round_superellipse.GetRadii());
 
@@ -1621,9 +1627,7 @@ void Canvas::DrawCircle(const Point& center,
     }
   }
 
-  if ((!renderer_.UsesAvioCoverage() || HasAvioDirect1xScopeProof()) &&
-      renderer_.GetContext()->GetFlags().use_sdfs &&
-      IsCompatibleWithSDFRendering(paint)) {
+  if (UseLegacySdfSource(paint)) {
     auto params = UberSDFParameters::MakeCircle(
         /*color=*/paint.color, /*center=*/center, /*radius=*/radius,
         /*stroke=*/paint.GetStroke());
