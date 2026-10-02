@@ -472,6 +472,21 @@ need "UberSDF dithers a gradient before coverage" \
 need "UberSDF uncovered gradient pixels stay transparent guard" \
   $F/impeller/display_list/aiks_dl_sdf_gradient_unittests.cc \
   'SdfGradientLeavesUncoveredQuadPixelsTransparent'
+need "SDF contexts prewarm their variants at construction" \
+  $F/impeller/entity/contents/content_context.cc \
+  'PrewarmPipelineVariant\(variant\)'
+need "prewarmed variants derive from the default descriptor asynchronously" \
+  $F/impeller/entity/contents/content_context.cc \
+  'std::make_unique<PipelineHandleT>\(context, desc, /\*async=\*/true\)'
+need "prewarm covers patch 52's single-sample snapshots" \
+  $F/impeller/entity/contents/content_context.cc \
+  'PassOptions\(SampleCount::kCount1, targets.offscreen_format'
+need "prewarm set equals what the draw sites compute" \
+  $F/impeller/entity/contents/content_context_prewarm_unittests.cc \
+  'SetIsWhatTheDrawSitesCompute'
+need "first use finds the prewarmed variant guard" \
+  $F/impeller/entity/contents/content_context_prewarm_unittests.cc \
+  'FirstUseFindsThePrewarmedVariant'
 need "Slimpeller low-memory path trims idle Impeller caches" \
   $F/shell/common/rasterizer.cc 'TrimIdleResourceCaches'
 need "explicit transient profiles bypass environment policy" \
@@ -708,7 +723,7 @@ need "renderer ledger/report contracts are in GN" \
 need "standalone production coverage contracts are in GN" \
   "$F/shell/platform/embedder/BUILD.gn" 'avio_coverage_contract_tests'
 need "coverage design and honest packaging gates" \
-  AVIO_PATCHES.md 'Patch 55: explicit coverage policy and resource census'
+  AVIO_PATCHES.md 'Patch 55b: explicit coverage policy and resource census'
 
 
 

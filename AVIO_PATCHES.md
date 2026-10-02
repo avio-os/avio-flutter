@@ -85,16 +85,18 @@ already ancestors of the selected main target under their original commits.
 | 47 | RenderTargetCache complete keys and miss telemetry | upstreamable bugfix + diagnostics (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 53 | Backport single-sample backdrop restore safety and shared-backdrop content depth | temporary backport — drop when rebasing past flutter#193306 and #193176 | merged upstream: flutter/flutter#193306, #193176 |
 | 54 | Screen is a coefficient blend | upstreamable memory/performance correction | submit upstream |
-| 55 | Explicit coverage AA policy, bounded coverage/layer regions, and typed resource reports | permanent opt-in ABI/rendering contract (v8); integrated source capability enabled, native release checks pending | none |
+| 55b | Explicit coverage AA policy, bounded coverage/layer regions, and typed resource reports | permanent opt-in ABI/rendering contract (ABI9, introduced in v8); integrated source capability enabled, native release checks pending | none |
 | 56 | Exact bufferless empty content, root revision opacity and bounded output ground | permanent opt-in ABI9/scene/framework contract | none |
 | 57 | Ready Static/Live content identity with explicit Static-only sealing | permanent opt-in ABI9/scene/framework contract | none |
 | 58 | GTK/GLES bounded native-four-sample Coverage with honest descriptor-only accounting | permanent negotiated backend contract; source checks, native/GPU release checks pending | none |
 | 59 | Headless Linux Vulkan goldens and strict native4/Coverage/aliased1 edge comparisons | test-only TL3 renderer and fixtures; source/CPU checks, full native/GPU execution pending | none |
 | 60 | Opt-in continuous classes with joint shape/clip coverage and native4 destination prefixes | permanent explicit Vulkan class contract; default mask zero, native/GPU approval gates pending | none |
+| 61 | Exact clip segments, full native recipes, bounded typed recording and native submission custody | permanent bounded rendering/lifetime contract; source and CPU checks, native/GPU release checks pending | none |
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
 | 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
+| 55a | Prewarm the pipelines Avio's SDF and single-sample patches use | permanent startup-latency extension (tied to patches 48, 50 and 52) | none — upstream compiles every variant on first use |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -893,6 +895,74 @@ renders with SDFs (`Playground::EnsureContextUsesSDFs`, patch 52)
 `UnsupportedColorSourceStillBlends`, `SdfGradientEdgesMatchMaskedComposite`,
 `SdfGradientLeavesUncoveredQuadPixelsTransparent`.
 
+### Patch 55a: asynchronous prewarm of the variants Avio's SDF and single-sample paths draw with
+
+`ContentContext` compiles each pipeline's default asynchronously at
+construction, but almost no draw uses a default: `OptionsFromPass` selects
+depth compare `kGreaterEqual`, while every default is built with
+`ContentContextOptions`' `kAlways` (and mostly `kTriangle`). Every draw is
+therefore a variant, and `CreateIfNeeded` compiles a missing variant
+synchronously on the calling thread (`CreateVariant(/*async=*/false)` after
+waiting for the default). With the persistent pipeline cache (patch 35) warm
+this is a cache hit; after an engine update that changes a shader it is a
+full compile on the raster thread. Patch 50 changed every UberSDF shader and
+moved all SDF draws to the storage-buffer variant, and patch 52 moved its
+snapshots to single-sample targets without depth/stencil, so after Build 2
+those variants compiled on the raster thread at their first use, for the
+masked path during an interaction (a snap preview, a dock reveal).
+
+On a legacy-policy context that renders with SDFs, the
+constructor queues the variants these paths draw with, behind the
+defaults, on the same asynchronous path the defaults take.
+`Variants::Prewarm` derives each descriptor from the default descriptor with
+the options applied, exactly what `CreateIfNeeded` would derive, and labels it
+`"<label> V#<n> Prewarmed"`. The first use finds the handle and waits for, or
+takes over, its job. This legacy loop does not join in the constructor;
+first-use latency still depends on actual compilation and worker progress. `MakeAvioPrewarmVariants(MakeAvioPrewarmTargets(capabilities))`
+is the set (27 variants on Avio's Vulkan engines):
+
+- Passes Canvas draws into, multisampled with depth/stencil when the context
+  supports offscreen MSAA, in the offscreen format (save layers) and in Avio's
+  root format `kB8G8R8A8UNormInt` (DRM ARGB8888 dma-bufs; offscreens are
+  `kR8G8B8A8UNormInt` on Vulkan): UberSDF srcOver (patch 50; the
+  storage-buffer variant where the backend has SSBOs), the masked composite
+  as a srcOver texture (patch 52 b), the backdrop restored after a Flip as a
+  kSrc texture without depth write (patch 48's path), and patch 52 (a)'s
+  direct color source draws: tiled texture, fast gradient (`kTriangle`) and
+  the storage-buffer linear and radial gradients, srcOver and opaque kSrc
+  with depth write.
+- Patch 52 (b)'s single-sample offscreens without depth/stencil: the UberSDF
+  mask snapshot, the "Pipeline Blend Filter" texture draws (kSrc, then
+  kSrcIn), and the linear and radial gradient snapshots for a gradient
+  UberSDF cannot shade.
+
+Patch 48 adds no variant of its own: `Flip` swaps only the resolve texture,
+so the pass keeps its multisampled attachment, sample count and format
+(`RenderTarget::GetRenderTargetPixelFormat` reads the resolve texture, which
+patch 48 allocates in the same format). Legacy contexts without SDFs keep the
+stock startup. Coverage, including negotiated GTK/GLES, uses the separate
+caller catalogue and controlled queue-all/validate barrier described in patch
+61; it does not enqueue these legacy pass keys. Not prewarmed by the legacy
+27-key catalogue: runtime effect
+pipelines (keyed by shader, created through
+`GetCachedRuntimeEffectPipeline`), conical and sweep gradients (no Avio Dart
+source uses them), uniform and ramp-texture gradients (Avio's SDF users have
+SSBOs), the single-sample root fallback of patch 32, and every other stock
+variant. The root format is Avio's contract, not something the engine learns
+before the first frame; if Avio's root fourcc changes, change
+`kAvioRootColorFormat`. Regressions (`impeller_unittests`):
+`ContentContextPrewarmSetTest.*` (the set's passes, sample counts, blend
+filter, Flip restore and color source variants, backends without SSBOs or
+MSAA, a root in the offscreen format), GPU-free
+`ContentContextPrewarmOptionsTest.SetIsWhatTheDrawSitesCompute` (over render
+targets built as Canvas and `MakeSubpass` build them, the set equals the
+options the draw sites compute from `OptionsFromPass`) and
+`AvioTargetsComeFromTheCapabilities`, and on every playground
+`ContentContextPrewarmTest.FirstUseFindsThePrewarmedVariant` (SDF backends:
+each draw site's getter returns the prewarmed pipeline, built for exactly
+its pass; a variant outside the set still compiles on first use) and
+`ContextsWithoutSDFsDoNotPrewarm`.
+
 ## Known baseline debt
 
 - ~~Generic embedder compositor and platform-view tests required broad
@@ -1100,7 +1170,7 @@ comparison fixtures remain available but their presence is not executed GPU
 evidence. The standalone CPU oracle
 checks the coefficient math only; it is not an Impeller build or GPU result.
 
-#### Starting coverage-antialiasing audit (before patch 55)
+#### Starting coverage-antialiasing audit (before patch 55b)
 
 Patch 54 alone did not authorize lowering any sample count. At that point the
 code still had coupled layer/coverage sample policy and depth/stencil consumers:
@@ -1109,15 +1179,15 @@ code still had coupled layer/coverage sample policy and depth/stencil consumers:
   boolean. `Contents::SnapshotOptions` defaulted that boolean to true;
   `ExternalCoverageContents` (patch 45's geometric foreground mask) used that
   default. Lowering the capability alone would have removed its multisample
-  edge mask. Patch 55 adds explicit layer and coverage requests instead.
+  edge mask. Patch 55b adds explicit layer and coverage requests instead.
 - `ClipContents::Render` wrote depth for difference clips and used stencil
   preparation plus depth-writing cover draws for other clips. The Canvas
   assigned clip depth to normal draws and replayed it after backdrop reads;
-  `InlinePassContext::GetRenderPass` required both depth and stencil. Patch 55
+  `InlinePassContext::GetRenderPass` required both depth and stencil. Patch 55b
   retains that legacy route and adds sample4 mask replay and bounded native4
   islands over a color-only 1x parent for the explicit coverage policy.
 - Path NonZero/EvenOdd fills and overdraw-preventing geometry consumed stencil
-  modes in `ContentContextOptions`. Patch 55 moves those stencil consumers to
+  modes in `ContentContextOptions`. Patch 55b moves those stencil consumers to
   its bounded native4 path atlas or draw islands instead of deleting their
   fill/stroke semantics with the root attachments.
 - `EntityPassClipStack::RecordClip` retained the fractional-rect 0.124-pixel
@@ -1126,7 +1196,7 @@ code still had coupled layer/coverage sample policy and depth/stencil consumers:
   retains its existing rounding behavior.
 - Patch 53 removed the single-sample self-restore feedback hazard. On its own
   it did not provide bounded scratch or separate layer/coverage regions.
-  Patch 55 adds those regions and frozen prefix snapshots for deferred
+  Patch 55b adds those regions and frozen prefix snapshots for deferred
   backdrop readers; advanced blend operators retain their existing semantics.
 
 The old Vulkan/ANV path rendered an 8-bit MSAA source snapshot, averaged all
@@ -1143,7 +1213,7 @@ executed comparisons. Continuous analytic coverage remains unsupported and
 would require a separate contract and validation before advertisement.
 
 Known follow-up: upstream `63768f5568` (flutter#192988, offscreen
-advanced-blend texture coordinates) is not backported here. Patch 55 prewarms
+advanced-blend texture coordinates) is not backported here. Patch 55a prewarms
 the common coverage pipelines and reports successful first-use compiles, but
 application-specific runtime compilation and its device cost remain
 unmeasured. Removal of unused normal-route Screen advanced pipelines remains
@@ -1171,19 +1241,23 @@ cached shared snapshot. The GLES fixture exercises the legacy depth/stencil
 route; patch 53 alone does not enable color-only roots. On its own this
 prerequisite leaves root/layer MSAA and the negotiated embedder ABI unchanged.
 Full engine tests and Vulkan/GLES captures are required
-before packaging that prerequisite on its own. For the combined patch 55
+before packaging that prerequisite on its own. For the combined patch 55b
 iteration the user waived the visual-comparison campaign; native build and
 correctness gates remain explicit below.
 
-### Patch 55: explicit coverage policy and resource census (EG-1 through EG-5)
+### Patch 55b: explicit coverage policy and resource census (EG-1 through EG-5)
 
-**Design note and scope.** Coverage is an explicit Vulkan Impeller policy, not
-an environment switch or an allocation-pressure fallback. The appended ABI v8
+**Design note and scope.** Coverage is an explicit negotiated Impeller policy
+on Vulkan or supported GLES3, not an environment switch or an
+allocation-pressure fallback. The appended config, introduced in ABI8 and
+carried by the current ABI9 contract,
 `FlutterAvioAntialiasingConfig` selects legacy `msaa4` or coverage with 1x color
 layers and native 4x masks, requests continuous classes, and gives separate
 bounded coverage/layer regions. The Avio starting profile is 8 MiB coverage and
-4 MiB layers. Continuous classes currently advertise no support; requesting
-one fails instead of silently changing edge behavior. The legacy policy keeps
+4 MiB layers. Vulkan advertises the implemented opt-in continuous classes
+listed in patch 60; GLES and Metal advertise zero. The host request remains
+zero. Unsupported backend or logical-device requests fail instead of silently
+changing edge behavior. The legacy policy keeps
 4x/4x and no region budgets. Legacy transient budgets must be positive;
 coverage requires both legacy transient caps to be zero.
 
