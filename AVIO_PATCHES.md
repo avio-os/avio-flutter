@@ -87,6 +87,7 @@ already ancestors of the selected main target under their original commits.
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
 | 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
+| 55 | Prewarm the pipelines Avio's SDF and single-sample patches use | permanent startup-latency extension (tied to patches 48, 50 and 52) | none — upstream compiles every variant on first use |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -884,6 +885,71 @@ renders with SDFs (`Playground::EnsureContextUsesSDFs`, patch 52)
 `SdfRadialGradientCircleUnderNonUniformScaleAllocatesNoOffscreen`,
 `UnsupportedColorSourceStillBlends`, `SdfGradientEdgesMatchMaskedComposite`,
 `SdfGradientLeavesUncoveredQuadPixelsTransparent`.
+
+### Patch 55: prewarm the variants Avio's SDF and single-sample paths draw with
+
+`ContentContext` compiles each pipeline's default asynchronously at
+construction, but almost no draw uses a default: `OptionsFromPass` selects
+depth compare `kGreaterEqual`, while every default is built with
+`ContentContextOptions`' `kAlways` (and mostly `kTriangle`). Every draw is
+therefore a variant, and `CreateIfNeeded` compiles a missing variant
+synchronously on the calling thread (`CreateVariant(/*async=*/false)` after
+waiting for the default). With the persistent pipeline cache (patch 35) warm
+this is a cache hit; after an engine update that changes a shader it is a
+full compile on the raster thread. Patch 50 changed every UberSDF shader and
+moved all SDF draws to the storage-buffer variant, and patch 52 moved its
+snapshots to single-sample targets without depth/stencil, so after Build 2
+those variants compiled on the raster thread at their first use, for the
+masked path during an interaction (a snap preview, a dock reveal).
+
+On a context that renders with SDFs (Avio's Shell and greeter), the
+constructor now queues the variants these paths draw with, behind the
+defaults, on the same asynchronous path the defaults take.
+`Variants::Prewarm` derives each descriptor from the default descriptor with
+the options applied, exactly what `CreateIfNeeded` would derive, and labels it
+`"<label> V#<n> Prewarmed"`. The first use finds the handle and waits for, or
+takes over, its job; nothing in the constructor waits, so the first frame is
+never delayed. `MakeAvioPrewarmVariants(MakeAvioPrewarmTargets(capabilities))`
+is the set (27 variants on Avio's Vulkan engines):
+
+- Passes Canvas draws into, multisampled with depth/stencil when the context
+  supports offscreen MSAA, in the offscreen format (save layers) and in Avio's
+  root format `kB8G8R8A8UNormInt` (DRM ARGB8888 dma-bufs; offscreens are
+  `kR8G8B8A8UNormInt` on Vulkan): UberSDF srcOver (patch 50; the
+  storage-buffer variant where the backend has SSBOs), the masked composite
+  as a srcOver texture (patch 52 b), the backdrop restored after a Flip as a
+  kSrc texture without depth write (patch 48's path), and patch 52 (a)'s
+  direct color source draws: tiled texture, fast gradient (`kTriangle`) and
+  the storage-buffer linear and radial gradients, srcOver and opaque kSrc
+  with depth write.
+- Patch 52 (b)'s single-sample offscreens without depth/stencil: the UberSDF
+  mask snapshot, the "Pipeline Blend Filter" texture draws (kSrc, then
+  kSrcIn), and the linear and radial gradient snapshots for a gradient
+  UberSDF cannot shade.
+
+Patch 48 adds no variant of its own: `Flip` swaps only the resolve texture,
+so the pass keeps its multisampled attachment, sample count and format
+(`RenderTarget::GetRenderTargetPixelFormat` reads the resolve texture, which
+patch 48 allocates in the same format). Contexts without SDFs (the GTK
+engine, stock Flutter) keep the stock startup. Not prewarmed: runtime effect
+pipelines (keyed by shader, created through
+`GetCachedRuntimeEffectPipeline`), conical and sweep gradients (no Avio Dart
+source uses them), uniform and ramp-texture gradients (Avio's SDF users have
+SSBOs), the single-sample root fallback of patch 32, and every other stock
+variant. The root format is Avio's contract, not something the engine learns
+before the first frame; if Avio's root fourcc changes, change
+`kAvioRootColorFormat`. Regressions (`impeller_unittests`):
+`ContentContextPrewarmSetTest.*` (the set's passes, sample counts, blend
+filter, Flip restore and color source variants, backends without SSBOs or
+MSAA, a root in the offscreen format), GPU-free
+`ContentContextPrewarmOptionsTest.SetIsWhatTheDrawSitesCompute` (over render
+targets built as Canvas and `MakeSubpass` build them, the set equals the
+options the draw sites compute from `OptionsFromPass`) and
+`AvioTargetsComeFromTheCapabilities`, and on every playground
+`ContentContextPrewarmTest.FirstUseFindsThePrewarmedVariant` (SDF backends:
+each draw site's getter returns the prewarmed pipeline, built for exactly
+its pass; a variant outside the set still compiles on first use) and
+`ContextsWithoutSDFsDoNotPrewarm`.
 
 ## Known baseline debt
 

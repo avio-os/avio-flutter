@@ -5,11 +5,13 @@
 #ifndef FLUTTER_IMPELLER_ENTITY_CONTENTS_CONTENT_CONTEXT_H_
 #define FLUTTER_IMPELLER_ENTITY_CONTENTS_CONTENT_CONTEXT_H_
 
+#include <cstdint>
 #include <initializer_list>
 #include <memory>
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "flutter/display_list/image/dl_image.h"
 #include "flutter/fml/logging.h"
@@ -116,6 +118,57 @@ enum ConicalKind {
   kStrip,
   kStripAndRadial,
 };
+
+/// A pipeline variant that `ContentContext` compiles asynchronously when it is
+/// constructed, so that its first use does not compile it synchronously on the
+/// raster thread. Every draw computes options that differ from its pipeline's
+/// default (the default compares depth with `kAlways`; `OptionsFromPass`
+/// selects `kGreaterEqual`), so without this the first use of each variant
+/// compiles it on the calling thread.
+struct PrewarmVariant {
+  enum class Pipeline : uint8_t {
+    kUberSDF,
+    kUberSDFSSBO,
+    kTexture,
+    kTiledTexture,
+    kFastGradient,
+    kLinearGradientSSBOFill,
+    kRadialGradientSSBOFill,
+  };
+
+  Pipeline pipeline = Pipeline::kTexture;
+  ContentContextOptions options;
+
+  bool operator==(const PrewarmVariant& other) const {
+    return pipeline == other.pipeline &&
+           options.ToKey() == other.options.ToKey();
+  }
+};
+
+/// The render targets whose pipeline variants are prewarmed.
+struct PrewarmTargets {
+  /// Save layers, snapshots and filter targets
+  /// (`Capabilities::GetDefaultColorFormat`).
+  PixelFormat offscreen_format = PixelFormat::kUnknown;
+  /// The embedder's root targets.
+  PixelFormat root_format = PixelFormat::kUnknown;
+  /// Whether save layers and the root pass are multisampled
+  /// (`Capabilities::SupportsOffscreenMSAA`).
+  bool multisampled_passes = false;
+  /// Whether UberSDF and gradients read their stops from a storage buffer
+  /// (`Capabilities::SupportsSSBO`).
+  bool supports_ssbo = false;
+};
+
+/// The targets Avio renders into on a context with `capabilities`: its
+/// offscreens, and roots that are DRM ARGB8888 images (`kB8G8R8A8UNormInt`).
+PrewarmTargets MakeAvioPrewarmTargets(const Capabilities& capabilities);
+
+/// The pipeline variants that Avio's UberSDF (patch 50), SDF color source
+/// (patch 52) and backdrop Flip (patch 48) paths draw with into `targets`.
+/// Contexts that render with SDFs compile these at construction.
+std::vector<PrewarmVariant> MakeAvioPrewarmVariants(
+    const PrewarmTargets& targets);
 
 class Tessellator;
 class RenderTargetCache;
@@ -345,6 +398,10 @@ class ContentContext {
   /// The workload includes initializing commonly used but not default
   /// shader variants, as well as forcing driver initialization.
   void InitializeCommonlyUsedShadersIfNeeded() const;
+
+  /// Starts the asynchronous compile of `variant`. Must run after the
+  /// pipeline's default is created.
+  void PrewarmPipelineVariant(const PrewarmVariant& variant);
 
   struct RuntimeEffectPipelineKey {
     std::string unique_entrypoint_name;

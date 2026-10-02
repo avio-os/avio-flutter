@@ -4,9 +4,11 @@
 
 #include "impeller/entity/contents/content_context.h"
 
+#include <algorithm>
 #include <format>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "flutter/display_list/image/dl_image.h"
 #include "fml/trace_event.h"
@@ -135,6 +137,23 @@ class Variants : public GenericVariants {
 
   PipelineHandleT* Get(const ContentContextOptions& options) const {
     return static_cast<PipelineHandleT*>(GenericVariants::Get(options));
+  }
+
+  /// Compiles the variant for `options` asynchronously, ahead of its first
+  /// use. Its descriptor is the default descriptor with `options` applied,
+  /// the same one `CreateIfNeeded` derives from the compiled default, so the
+  /// first use finds this handle instead of compiling the variant on the
+  /// calling thread. The label marks it as prewarmed.
+  void Prewarm(const Context& context, const ContentContextOptions& options) {
+    if (!desc_.has_value() || IsDefault(options) || Get(options) != nullptr) {
+      return;
+    }
+    PipelineDescriptor desc = desc_.value();
+    options.ApplyToPipelineDescriptor(desc);
+    desc.SetLabel(
+        std::format("{} V#{} Prewarmed", desc.GetLabel(), GetPipelineCount()));
+    Set(options,
+        std::make_unique<PipelineHandleT>(context, desc, /*async=*/true));
   }
 
   PipelineHandleT* GetDefault(const Context& context) {
@@ -532,6 +551,125 @@ std::array<std::vector<Scalar>, 15> GetPorterDuffSpecConstants(
   }};
 }
 
+namespace {
+
+// Avio's root targets are DRM ARGB8888 images, which the embedder wraps as
+// kB8G8R8A8UNormInt, while offscreens use the context's default color format
+// (kR8G8B8A8UNormInt on Vulkan). A variant drawn in both needs both.
+constexpr PixelFormat kAvioRootColorFormat = PixelFormat::kB8G8R8A8UNormInt;
+
+// What `OptionsFromPass` starts every draw from in a pass with these
+// attachments.
+ContentContextOptions PassOptions(SampleCount sample_count,
+                                  PixelFormat format,
+                                  bool has_depth_stencil_attachments) {
+  return ContentContextOptions{
+      .sample_count = sample_count,
+      .depth_compare = CompareFunction::kGreaterEqual,
+      .stencil_mode = ContentContextOptions::StencilMode::kIgnore,
+      .color_attachment_pixel_format = format,
+      .has_depth_stencil_attachments = has_depth_stencil_attachments,
+  };
+}
+
+}  // namespace
+
+PrewarmTargets MakeAvioPrewarmTargets(const Capabilities& capabilities) {
+  return PrewarmTargets{
+      .offscreen_format = capabilities.GetDefaultColorFormat(),
+      .root_format = kAvioRootColorFormat,
+      .multisampled_passes = capabilities.SupportsOffscreenMSAA(),
+      .supports_ssbo = capabilities.SupportsSSBO(),
+  };
+}
+
+std::vector<PrewarmVariant> MakeAvioPrewarmVariants(
+    const PrewarmTargets& targets) {
+  using Pipeline = PrewarmVariant::Pipeline;
+  std::vector<PrewarmVariant> variants;
+  const auto add = [&variants](Pipeline pipeline, ContentContextOptions options,
+                               BlendMode blend_mode,
+                               PrimitiveType primitive_type,
+                               bool depth_write_enabled) {
+    options.blend_mode = blend_mode;
+    options.primitive_type = primitive_type;
+    options.depth_write_enabled = depth_write_enabled;
+    const PrewarmVariant variant{.pipeline = pipeline, .options = options};
+    if (std::find(variants.begin(), variants.end(), variant) ==
+        variants.end()) {
+      variants.push_back(variant);
+    }
+  };
+  // UberSDF reads gradient stops from a storage buffer where the backend has
+  // one (UberSDFContents::Render).
+  const Pipeline uber_sdf =
+      targets.supports_ssbo ? Pipeline::kUberSDFSSBO : Pipeline::kUberSDF;
+  const SampleCount pass_samples =
+      targets.multisampled_passes ? SampleCount::kCount4 : SampleCount::kCount1;
+
+  // The passes Canvas draws into: save layers (CreateRenderTarget) in the
+  // offscreen format and the root, multisampled with depth/stencil.
+  for (const PixelFormat format :
+       {targets.offscreen_format, targets.root_format}) {
+    if (format == PixelFormat::kUnknown) {
+      continue;
+    }
+    const ContentContextOptions pass = PassOptions(
+        pass_samples, format, /*has_depth_stencil_attachments=*/true);
+    // Patch 50: every SDF shape, solid or gradient, over a rect quad.
+    add(uber_sdf, pass, BlendMode::kSrcOver, PrimitiveType::kTriangleStrip,
+        /*depth_write_enabled=*/false);
+    // Patch 52 (b): the masked composite, drawn back as a texture.
+    add(Pipeline::kTexture, pass, BlendMode::kSrcOver,
+        PrimitiveType::kTriangleStrip, /*depth_write_enabled=*/false);
+    // Patch 48's path: the backdrop restored after a Flip. Its stencil is
+    // disabled, so it writes no depth (TextureContents::Render).
+    add(Pipeline::kTexture, pass, BlendMode::kSrc,
+        PrimitiveType::kTriangleStrip, /*depth_write_enabled=*/false);
+    // Patch 52 (a): an image or gradient on a rect that contains the clip,
+    // drawn directly. An opaque one draws with kSrc and writes depth
+    // (ColorSourceContents::DrawGeometry).
+    for (const bool opaque : {false, true}) {
+      const BlendMode blend_mode =
+          opaque ? BlendMode::kSrc : BlendMode::kSrcOver;
+      add(Pipeline::kTiledTexture, pass, blend_mode,
+          PrimitiveType::kTriangleStrip, opaque);
+      add(Pipeline::kFastGradient, pass, blend_mode, PrimitiveType::kTriangle,
+          opaque);
+      if (targets.supports_ssbo) {
+        add(Pipeline::kLinearGradientSSBOFill, pass, blend_mode,
+            PrimitiveType::kTriangleStrip, opaque);
+        add(Pipeline::kRadialGradientSSBOFill, pass, blend_mode,
+            PrimitiveType::kTriangleStrip, opaque);
+      }
+    }
+  }
+
+  // Patch 52 (b): the SDF mask and color source snapshots and the "Pipeline
+  // Blend Filter" target are single-sample offscreens without depth/stencil.
+  if (targets.offscreen_format != PixelFormat::kUnknown) {
+    const ContentContextOptions snapshot =
+        PassOptions(SampleCount::kCount1, targets.offscreen_format,
+                    /*has_depth_stencil_attachments=*/false);
+    add(uber_sdf, snapshot, BlendMode::kSrcOver, PrimitiveType::kTriangleStrip,
+        /*depth_write_enabled=*/false);
+    // PipelineBlend draws the mask with kSrc, then the color source with
+    // kSrcIn.
+    add(Pipeline::kTexture, snapshot, BlendMode::kSrc,
+        PrimitiveType::kTriangleStrip, /*depth_write_enabled=*/false);
+    add(Pipeline::kTexture, snapshot, BlendMode::kSrcIn,
+        PrimitiveType::kTriangleStrip, /*depth_write_enabled=*/false);
+    // A gradient UberSDF cannot shade (a non-similarity local matrix).
+    if (targets.supports_ssbo) {
+      add(Pipeline::kLinearGradientSSBOFill, snapshot, BlendMode::kSrcOver,
+          PrimitiveType::kTriangleStrip, /*depth_write_enabled=*/false);
+      add(Pipeline::kRadialGradientSSBOFill, snapshot, BlendMode::kSrcOver,
+          PrimitiveType::kTriangleStrip, /*depth_write_enabled=*/false);
+    }
+  }
+  return variants;
+}
+
 template <typename PipelineT>
 static std::unique_ptr<PipelineT> CreateDefaultPipeline(
     const Context& context) {
@@ -881,6 +1019,19 @@ ContentContext::ContentContext(
 #endif  // IMPELLER_ENABLE_OPENGLES
   }
 
+  // Avio's Shell and greeter render with SDFs. Queue the variants their SDF,
+  // color source and backdrop paths draw with behind the defaults, so their
+  // first use does not compile them on the raster thread. Nothing here waits;
+  // a use that arrives before its compile finished waits for it or, while it
+  // is still queued, takes the job over, as for the defaults.
+  if (context_->GetFlags().use_sdfs) {
+    TRACE_EVENT0("impeller", "ContentContext::PrewarmPipelineVariants");
+    for (const PrewarmVariant& variant : MakeAvioPrewarmVariants(
+             MakeAvioPrewarmTargets(*context_->GetCapabilities()))) {
+      PrewarmPipelineVariant(variant);
+    }
+  }
+
   is_valid_ = true;
   InitializeCommonlyUsedShadersIfNeeded();
 }
@@ -1028,6 +1179,33 @@ void ContentContext::ResetTransientsBuffers() {
 
 void ContentContext::InitializeCommonlyUsedShadersIfNeeded() const {
   GetContext()->InitializeCommonlyUsedShadersIfNeeded();
+}
+
+void ContentContext::PrewarmPipelineVariant(const PrewarmVariant& variant) {
+  const ContentContextOptions& options = variant.options;
+  switch (variant.pipeline) {
+    case PrewarmVariant::Pipeline::kUberSDF:
+      pipelines_->uber_sdf.Prewarm(*context_, options);
+      return;
+    case PrewarmVariant::Pipeline::kUberSDFSSBO:
+      pipelines_->uber_sdf_ssbo.Prewarm(*context_, options);
+      return;
+    case PrewarmVariant::Pipeline::kTexture:
+      pipelines_->texture.Prewarm(*context_, options);
+      return;
+    case PrewarmVariant::Pipeline::kTiledTexture:
+      pipelines_->tiled_texture.Prewarm(*context_, options);
+      return;
+    case PrewarmVariant::Pipeline::kFastGradient:
+      pipelines_->fast_gradient.Prewarm(*context_, options);
+      return;
+    case PrewarmVariant::Pipeline::kLinearGradientSSBOFill:
+      pipelines_->linear_gradient_ssbo_fill.Prewarm(*context_, options);
+      return;
+    case PrewarmVariant::Pipeline::kRadialGradientSSBOFill:
+      pipelines_->radial_gradient_ssbo_fill.Prewarm(*context_, options);
+      return;
+  }
 }
 
 PipelineRef ContentContext::GetFastGradientPipeline(
