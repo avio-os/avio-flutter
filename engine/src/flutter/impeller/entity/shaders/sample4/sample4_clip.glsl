@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 #include <impeller/types.glsl>
 #include <impeller/coverage_geometry.glsl>
-struct AvioSample4Node { mat4 lines; vec4 target; vec4 raster; vec4 meta; };
+struct AvioSample4Node { vec4 lines[4]; vec4 target; vec4 raster; vec4 meta; };
 layout(set=0,binding=29,std430) readonly buffer AvioSample4ClipControl {
   vec4 runtime; vec4 origin; AvioSample4Node nodes[4];
 } avio_sample4;
@@ -25,7 +25,7 @@ uint AvioJointClipMask4() {
     AvioSample4Node node=avio_sample4.nodes[index];
     uint shape=0u;
     if(node.meta.x<.5) {
-      shape=IPCoverageConvexQuadMask4(pixel,node.lines);
+      shape=IPCoverageConvexQuadMask4(pixel,mat4(node.lines[0],node.lines[1],node.lines[2],node.lines[3]));
     } else {
       vec2 local=pixel-node.target.xy;
       if(all(greaterThanEqual(local,vec2(0))) && all(lessThan(local,node.target.zw))) {

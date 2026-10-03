@@ -17,8 +17,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "flutter/shell/platform/embedder/avio_antialiasing_config.h"
-#include "flutter/shell/platform/embedder/avio_frame_facts.h"
 #include "impeller/base/flags.h"
 
 #include "flutter/fml/build_config.h"
@@ -62,6 +60,8 @@ extern const intptr_t kPlatformStrongDillSize;
 #include "flutter/fml/trace_event.h"
 #include "flutter/shell/common/rasterizer.h"
 #include "flutter/shell/common/switches.h"
+#include "flutter/shell/platform/embedder/avio_antialiasing_config.h"
+#include "flutter/shell/platform/embedder/avio_frame_facts.h"
 #include "flutter/shell/platform/embedder/embedder.h"
 #include "flutter/shell/platform/embedder/embedder_engine.h"
 #include "flutter/shell/platform/embedder/embedder_external_resource_custody.h"

@@ -94,7 +94,8 @@ void SceneBuilder::pushAvioOutputGround(
   tonic::Float64List region_rects(region_rects_handle);
   tonic::Uint32List region_colors(region_colors_handle);
   facts.ground_authored = true;
-  if (region_colors.num_elements() > AvioFrameFacts::kMaxGroundRegions ||
+  if (static_cast<size_t>(region_colors.num_elements()) >
+          AvioFrameFacts::kMaxGroundRegions ||
       region_rects.num_elements() != region_colors.num_elements() * 4) {
     facts.invalid = true;
   } else {
