@@ -47,7 +47,7 @@ if (is_linux && impeller_enable_vulkan) {
       "//flutter/impeller/display_list",
       "//flutter/impeller/renderer/backend/vulkan",
       "//flutter/impeller/testing:screenshot",
-      "//flutter/third_party/skia",
+      "//flutter/skia",
     ]
   }
 
@@ -62,6 +62,8 @@ if (is_linux && impeller_enable_vulkan) {
       "main_vk.cc",
     ]
     deps = [
+      "//flutter/impeller/display_list",
+      "//flutter/testing:testing_lib",
       ":digest",
       ":golden_playground_test",
       ":golden_renderer_vk",
