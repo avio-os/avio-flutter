@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
+
 #include "flutter/testing/testing.h"  // IWYU pragma: keep
 #include "gtest/gtest.h"
 #include "impeller/base/validation.h"
@@ -137,6 +139,89 @@ TEST(RenderPassVK, BoundedAndFullPassesDoNotShareIncompatibleCachedPolicy) {
   EXPECT_EQ(resolve.GetCachedFrameData(SampleCount::kCount4, 0, 0).render_pass,
             cached.render_pass);
   run(full, IRect::MakeSize(ISize(100, 100)));
+}
+
+TEST(RenderPassVK, PolicyDistinguishesLoadActionAndInitialLayout) {
+  auto policy = [](LoadAction load, vk::ImageLayout current) {
+    RenderPassBuilderVK builder;
+    builder.SetColorAttachment(0, PixelFormat::kR8G8B8A8UNormInt,
+                               SampleCount::kCount1, load, StoreAction::kStore,
+                               current);
+    return builder.GetPolicy();
+  };
+  const auto clear = policy(LoadAction::kClear, vk::ImageLayout::eGeneral);
+  ASSERT_EQ(clear.count, 1u);
+  EXPECT_EQ(clear.attachments[0].loadOp, vk::AttachmentLoadOp::eClear);
+  EXPECT_EQ(clear.attachments[0].initialLayout, vk::ImageLayout::eUndefined);
+  // A clear discards contents whatever the current layout is.
+  EXPECT_TRUE(clear ==
+              policy(LoadAction::kClear,
+                     vk::ImageLayout::eShaderReadOnlyOptimal));
+  const auto load = policy(LoadAction::kLoad, vk::ImageLayout::eGeneral);
+  EXPECT_FALSE(clear == load);
+  EXPECT_EQ(load.attachments[0].loadOp, vk::AttachmentLoadOp::eLoad);
+  EXPECT_EQ(load.attachments[0].initialLayout, vk::ImageLayout::eGeneral);
+  EXPECT_FALSE(load == policy(LoadAction::kLoad,
+                              vk::ImageLayout::eShaderReadOnlyOptimal));
+}
+
+// The Coverage root is an imported single-sample image without a render area.
+// Its first segment clears it; every later segment, tile composite and clip
+// parent pass loads the composited prefix in a new command buffer. A cached
+// render pass must never replay the first segment's CLEAR over that prefix.
+TEST(RenderPassVK, LaterSegmentLoadsTheParentAfterAnEarlierClear) {
+  auto context = MockVulkanContextBuilder().Build();
+  TextureDescriptor desc;
+  desc.size = ISize(32, 32);
+  desc.format = PixelFormat::kR8G8B8A8UNormInt;
+  desc.storage_mode = StorageMode::kDevicePrivate;
+  desc.usage = TextureUsage::kRenderTarget | TextureUsage::kShaderRead;
+  auto allocation = context->GetResourceAllocator()->CreateTexture(desc);
+  ASSERT_TRUE(allocation);
+  const auto& image = TextureVK::Cast(*allocation);
+  auto source = std::make_shared<ExternalRenderTargetSourceVK>(
+      image.GetImage(), image.GetImageView(), desc);
+  auto parent = std::make_shared<TextureVK>(context, source);
+  auto run_segment = [&](LoadAction load) {
+    RenderTarget target;
+    ColorAttachment colour;
+    colour.texture = parent;
+    colour.load_action = load;
+    colour.store_action = StoreAction::kStore;
+    colour.clear_color = Color::BlackTransparent();
+    target.SetColorAttachment(colour, 0);
+    auto buffer = context->CreateCommandBuffer();
+    auto pass = buffer->CreateRenderPass(target);
+    ASSERT_TRUE(pass);
+    ASSERT_TRUE(pass->EncodeCommands());
+    ASSERT_TRUE(CommandBufferVK::Cast(*buffer).EndCommandBuffer());
+  };
+  auto creates = [&] {
+    const auto called = GetMockVulkanFunctions(context->GetDevice());
+    return std::count(called->begin(), called->end(), "vkCreateRenderPass");
+  };
+
+  run_segment(LoadAction::kClear);
+  ASSERT_EQ(GetLastRenderPassAttachments().size(), 1u);
+  EXPECT_EQ(GetLastRenderPassAttachments()[0].loadOp,
+            VK_ATTACHMENT_LOAD_OP_CLEAR);
+  EXPECT_EQ(GetLastRenderPassAttachments()[0].initialLayout,
+            VK_IMAGE_LAYOUT_UNDEFINED);
+  const auto after_clear = creates();
+
+  run_segment(LoadAction::kLoad);
+  EXPECT_EQ(creates(), after_clear + 1);
+  ASSERT_EQ(GetLastRenderPassAttachments().size(), 1u);
+  EXPECT_EQ(GetLastRenderPassAttachments()[0].loadOp,
+            VK_ATTACHMENT_LOAD_OP_LOAD);
+  EXPECT_EQ(GetLastRenderPassAttachments()[0].initialLayout,
+            VK_IMAGE_LAYOUT_GENERAL);
+
+  // Identical policies still share their cached render pass and framebuffer.
+  const auto both_policies = creates();
+  run_segment(LoadAction::kLoad);
+  run_segment(LoadAction::kClear);
+  EXPECT_EQ(creates(), both_policies);
 }
 
 TEST(RenderPassVK, DoesNotRedundantlySetStencil) {

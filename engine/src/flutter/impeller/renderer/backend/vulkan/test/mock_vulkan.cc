@@ -220,6 +220,7 @@ struct MockVulkanState {
   std::vector<std::vector<uint32_t>> queue_submit_signal_counts;
   std::vector<std::vector<std::vector<uint64_t>>> queue_submit_signal_values;
   std::vector<VkSubpassDependency> last_render_pass_dependencies;
+  std::vector<VkAttachmentDescription> last_render_pass_attachments;
 };
 
 class MockVulkanStatePtr {
@@ -635,6 +636,9 @@ VkResult vkCreateRenderPass(VkDevice device,
     GetMockVulkanState().last_render_pass_dependencies.assign(
         pCreateInfo->pDependencies,
         pCreateInfo->pDependencies + pCreateInfo->dependencyCount);
+    GetMockVulkanState().last_render_pass_attachments.assign(
+        pCreateInfo->pAttachments,
+        pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
   }
   return VK_SUCCESS;
 }
@@ -1557,6 +1561,10 @@ GetMockVulkanQueueSubmitSignalValues() {
 
 const std::vector<VkSubpassDependency>& GetLastRenderPassDependencies() {
   return GetMockVulkanState().last_render_pass_dependencies;
+}
+
+const std::vector<VkAttachmentDescription>& GetLastRenderPassAttachments() {
+  return GetMockVulkanState().last_render_pass_attachments;
 }
 
 void SetSwapchainImageSize(ISize size) {

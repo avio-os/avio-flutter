@@ -113,27 +113,48 @@ fml::Status TextureSourceVK::SetLayout(const BarrierVK& barrier) const {
   return {};
 }
 
+bool RenderPassPolicyVK::operator==(const RenderPassPolicyVK& other) const {
+  if (count != other.count) {
+    return false;
+  }
+  for (size_t i = 0u; i < count && i < kCapacity; i++) {
+    const vk::AttachmentDescription& a = attachments[i];
+    const vk::AttachmentDescription& b = other.attachments[i];
+    if (a.flags != b.flags || a.format != b.format || a.samples != b.samples ||
+        a.loadOp != b.loadOp || a.storeOp != b.storeOp ||
+        a.stencilLoadOp != b.stencilLoadOp ||
+        a.stencilStoreOp != b.stencilStoreOp ||
+        a.initialLayout != b.initialLayout ||
+        a.finalLayout != b.finalLayout) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void TextureSourceVK::SetCachedFrameData(const FramebufferAndRenderPass& data,
                                          SampleCount sample_count,
                                          uint32_t mip_level,
-                                         uint32_t slice) {
+                                         uint32_t slice,
+                                         const RenderPassPolicyVK& policy) {
   for (auto& entry : frame_data_) {
     if (entry.sample_count == sample_count && entry.mip_level == mip_level &&
-        entry.slice == slice) {
+        entry.slice == slice && entry.policy == policy) {
       entry.data = data;
       return;
     }
   }
-  frame_data_.push_back({sample_count, mip_level, slice, data});
+  frame_data_.push_back({sample_count, mip_level, slice, policy, data});
 }
 
 FramebufferAndRenderPass TextureSourceVK::GetCachedFrameData(
     SampleCount sample_count,
     uint32_t mip_level,
-    uint32_t slice) const {
+    uint32_t slice,
+    const RenderPassPolicyVK* policy) const {
   for (const auto& entry : frame_data_) {
     if (entry.sample_count == sample_count && entry.mip_level == mip_level &&
-        entry.slice == slice) {
+        entry.slice == slice && (!policy || entry.policy == *policy)) {
       return entry.data;
     }
   }

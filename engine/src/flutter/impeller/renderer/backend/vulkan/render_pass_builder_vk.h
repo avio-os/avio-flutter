@@ -10,6 +10,7 @@
 
 #include "impeller/core/formats.h"
 #include "impeller/renderer/backend/vulkan/context_vk.h"
+#include "impeller/renderer/backend/vulkan/texture_source_vk.h"
 #include "impeller/renderer/backend/vulkan/vk.h"
 
 namespace impeller {
@@ -50,6 +51,11 @@ class RenderPassBuilderVK {
                                             StoreAction store_action);
 
   vk::UniqueRenderPass Build(const vk::Device& device) const;
+
+  /// The exact attachment descriptions `Build` bakes into the render pass, in
+  /// the same attachment order. Subpass dependencies are derived from these
+  /// descriptions, so equal policies build interchangeable render passes.
+  RenderPassPolicyVK GetPolicy() const;
 
   // Visible for testing.
   const std::map<size_t, vk::AttachmentDescription>& GetColorAttachments()

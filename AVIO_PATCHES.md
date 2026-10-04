@@ -92,6 +92,7 @@ already ancestors of the selected main target under their original commits.
 | 59 | Headless Linux Vulkan goldens and strict native4/Coverage/aliased1 edge comparisons | test-only TL3 renderer and fixtures; source/CPU checks, full native/GPU execution pending | none |
 | 60 | Opt-in continuous classes with joint shape/clip coverage and native4 destination prefixes | permanent explicit Vulkan class contract; default mask zero, native/GPU approval gates pending | none |
 | 61 | Exact clip segments, full native recipes, bounded typed recording and native submission custody | permanent bounded rendering/lifetime contract; source and CPU checks, native/GPU release checks pending | none |
+| 62 | A cached Vulkan render pass is replayed only for its exact attachment policy | upstreamable correctness fix (latent upstream; fatal for the single-sample Coverage root) | submit upstream |
 | 48 | Flip allocates a single-sample secondary | upstreamable memory fix | submit upstream |
 | 51 | RenderTargetCache ages once per raster frame | upstreamable correctness fix (offer on flutter/flutter#190613) | open: flutter/flutter#190613 |
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
@@ -1695,3 +1696,32 @@ unproved idle wait never turns it into a Produced frame. Acquisition failures
 keep the original collection guard, and callbacks run once in destruction then
 collection order. Actual CPU tests exercise the source cache with fake Vulkan
 deleters; native timeline execution remains a separate gate.
+
+### Patch 62: exact attachment policy for cached Vulkan render passes
+
+`RenderPassVK` caches one `VkRenderPass` and `VkFramebuffer` per texture
+subresource. Upstream keyed that cache on `(sample_count, mip_level, slice)`
+alone and replayed the cached render pass for any later full-area pass over the
+same subresource. A framebuffer only needs render-pass compatibility, but
+`vkCmdBeginRenderPass` executes the render pass object's own load/store
+operations and initial layouts. A texture that is first cleared and later
+loaded therefore had its later `kLoad` silently replaced by the first pass's
+`CLEAR` from `UNDEFINED`.
+
+Upstream rarely reaches this: its multisample targets always clear the
+transient attachment and its single-sample targets keep one load policy. The
+negotiated Coverage policy (patch 55b/61) renders straight into the imported
+single-sample root without a render area. Its first segment clears that root;
+every backdrop-filter or advanced-blend boundary starts a new segment whose
+initialization pass, tile composites and certified clip passes load the
+composited prefix. With the old key each later segment re-cleared the root, so
+a non-preserved frame kept only the content painted after its last backdrop
+boundary (the greeter showed only its power button on black).
+
+The cache key now includes the exact attachment descriptions that
+`RenderPassBuilderVK::Build` bakes in (`RenderPassPolicyVK`). Equal policies
+still share one cached render pass and framebuffer; a texture holds one entry
+per distinct policy (two or three for a Coverage root). Bounded passes still
+bypass the cache. `LaterSegmentLoadsTheParentAfterAnEarlierClear` and
+`PolicyDistinguishesLoadActionAndInitialLayout` cover the contract with the
+mock Vulkan driver; hardware validation is the Coverage greeter.

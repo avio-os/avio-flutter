@@ -32,6 +32,9 @@ GetMockVulkanQueueSubmitSignalValues();
 
 const std::vector<VkSubpassDependency>& GetLastRenderPassDependencies();
 
+/// The attachment descriptions of the most recent vkCreateRenderPass call.
+const std::vector<VkAttachmentDescription>& GetLastRenderPassAttachments();
+
 // A test-controlled version of |vk::Fence|.
 class MockFence final {
  public:

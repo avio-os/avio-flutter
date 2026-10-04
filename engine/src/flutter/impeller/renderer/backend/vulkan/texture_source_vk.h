@@ -5,6 +5,8 @@
 #ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_TEXTURE_SOURCE_VK_H_
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_TEXTURE_SOURCE_VK_H_
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -26,6 +28,24 @@ namespace impeller {
 struct FramebufferAndRenderPass {
   SharedHandleVK<vk::Framebuffer> framebuffer = nullptr;
   SharedHandleVK<vk::RenderPass> render_pass = nullptr;
+};
+
+/// The attachment descriptions baked into one VkRenderPass, in attachment
+/// order: load/store operations and initial/final layouts included.
+///
+/// A framebuffer only needs render-pass *compatibility*, but
+/// vkCmdBeginRenderPass executes the render pass object's own load operations
+/// and layout transitions. A cached render pass is therefore replayed only for
+/// an identical policy. A later full-area kLoad pass over the same subresource
+/// must never inherit an earlier kClear with an UNDEFINED initial layout.
+struct RenderPassPolicyVK {
+  // Matches `kMaxAttachments` in render_pass_builder_vk.h (static_assert'ed
+  // there): sixteen colour attachments, their resolves and one depth/stencil.
+  static constexpr size_t kCapacity = 33u;
+  std::array<vk::AttachmentDescription, kCapacity> attachments = {};
+  size_t count = 0u;
+
+  bool operator==(const RenderPassPolicyVK& other) const;
 };
 
 class Context;
@@ -195,27 +215,34 @@ class TextureSourceVK {
 
   // These methods should only be used by render_pass_vk.h
 
-  /// Store the framebuffer and render pass last used to render into the
-  /// `(sample_count, mip_level, slice)` subresource of this texture.
+  /// Store the framebuffer and render pass used to render into the
+  /// `(sample_count, mip_level, slice)` subresource of this texture with the
+  /// exact attachment `policy` the render pass was built from.
   ///
   /// This is only called when this texture is being used as the resolve (or
-  /// non-MSAA color) target of a render pass. By construction, the cached
-  /// objects are compatible with any future render pass that targets the
-  /// same subresource.
+  /// non-MSAA color) target of a render pass. Compatibility alone is not
+  /// enough to replay a cached render pass: its load operations and initial
+  /// layouts execute at vkCmdBeginRenderPass. Each distinct policy over a
+  /// subresource therefore owns its own entry.
   void SetCachedFrameData(const FramebufferAndRenderPass& data,
                           SampleCount sample_count,
                           uint32_t mip_level = 0u,
-                          uint32_t slice = 0u);
+                          uint32_t slice = 0u,
+                          const RenderPassPolicyVK& policy = {});
 
   /// Retrieve the cached framebuffer and render pass for the given
-  /// `(sample_count, mip_level, slice)` subresource.
+  /// `(sample_count, mip_level, slice)` subresource and exact `policy`.
   ///
-  /// An empty `FramebufferAndRenderPass` is returned when no cached entry
-  /// exists for that key. Entries are populated lazily on first use and
+  /// A null `policy` returns the first entry for the subresource regardless
+  /// of policy; it is for inspection only and must never select a render pass
+  /// to begin. An empty `FramebufferAndRenderPass` is returned when no cached
+  /// entry exists for that key. Entries are populated lazily on first use and
   /// live for the lifetime of the texture.
-  FramebufferAndRenderPass GetCachedFrameData(SampleCount sample_count,
-                                              uint32_t mip_level = 0u,
-                                              uint32_t slice = 0u) const;
+  FramebufferAndRenderPass GetCachedFrameData(
+      SampleCount sample_count,
+      uint32_t mip_level = 0u,
+      uint32_t slice = 0u,
+      const RenderPassPolicyVK* policy = nullptr) const;
 
  protected:
   const TextureDescriptor desc_;
@@ -232,12 +259,15 @@ class TextureSourceVK {
     SampleCount sample_count;
     uint32_t mip_level;
     uint32_t slice;
+    RenderPassPolicyVK policy;
     FramebufferAndRenderPass data;
   };
   // Linear-scanned because N is typically 1 and bounded by
-  // `sample_counts * mip_count * layer_count` for the rare textures that
-  // are rendered to across many subresources (e.g. a fully populated cube
-  // mip chain).
+  // `sample_counts * mip_count * layer_count * policies` for the rare textures
+  // that are rendered to across many subresources (e.g. a fully populated cube
+  // mip chain). A single-sample target that is cleared once and then loaded
+  // by later passes of the same frame (the Coverage root) holds one entry per
+  // load/layout policy, typically two or three.
   std::vector<CachedFrameDataEntry> frame_data_;
   mutable vk::ImageLayout layout_ = vk::ImageLayout::eUndefined;
   // No self-reference: the temporary WaitSemaphore owns the source, while the

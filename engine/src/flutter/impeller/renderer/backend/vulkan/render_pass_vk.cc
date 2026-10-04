@@ -92,16 +92,8 @@ static size_t GetVKClearValues(
   return offset;
 }
 
-SharedHandleVK<vk::RenderPass> RenderPassVK::CreateVKRenderPass(
-    const ContextVK& context,
-    const SharedHandleVK<vk::RenderPass>& recycled_renderpass,
-    const std::shared_ptr<CommandBufferVK>& command_buffer,
-    bool is_swapchain) const {
-  if (recycled_renderpass != nullptr) {
-    return recycled_renderpass;
-  }
-
-  RenderPassBuilderVK builder;
+void RenderPassVK::PopulateRenderPassBuilder(RenderPassBuilderVK& builder,
+                                             bool is_swapchain) const {
   render_target_.IterateAllColorAttachments([&](size_t bind_point,
                                                 const ColorAttachment&
                                                     attachment) -> bool {
@@ -140,7 +132,11 @@ SharedHandleVK<vk::RenderPass> RenderPassVK::CreateVKRenderPass(
         stencil->store_action                                   //
     );
   }
+}
 
+SharedHandleVK<vk::RenderPass> RenderPassVK::CreateVKRenderPass(
+    const ContextVK& context,
+    const RenderPassBuilderVK& builder) const {
   auto pass = builder.Build(context.GetDevice());
 
   if (!pass) {
@@ -187,11 +183,22 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
     is_valid_ = false;
     return;
   }
-  // The existing cache key does not encode resolve preservation/load policy.
+  // Describe this exact pass after any external acquisition has established
+  // the attachment layouts. vkCmdBeginRenderPass executes the render pass
+  // object's own load operations and initial layouts, not the target's: a
+  // recycled pass is only valid for the identical attachment policy. One
+  // texture can legitimately see several policies in a frame (a Coverage root
+  // clears once, then every later segment and tile composite loads it).
+  RenderPassBuilderVK builder;
+  PopulateRenderPassBuilder(builder, is_swapchain);
+  const RenderPassPolicyVK policy = builder.GetPolicy();
+  // The cache key does not encode resolve preservation for bounded passes.
   // Bounded passes must neither consume nor overwrite a full-pass cache entry.
-  if (!render_target_.GetRenderArea()) {
+  const bool cacheable = !render_target_.GetRenderArea() &&
+                         policy.count <= RenderPassPolicyVK::kCapacity;
+  if (cacheable) {
     frame_data = frame_data_texture.GetCachedFrameData(
-        sample_count, cache_mip_level, cache_slice);
+        sample_count, cache_mip_level, cache_slice, &policy);
   }
   const auto& target_size = render_target_.GetRenderTargetSize();
   const bool partial_render_area =
@@ -205,8 +212,9 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
     return;
   }
 
-  render_pass_ = CreateVKRenderPass(vk_context, frame_data.render_pass,
-                                    command_buffer_, is_swapchain);
+  render_pass_ = frame_data.render_pass
+                     ? frame_data.render_pass
+                     : CreateVKRenderPass(vk_context, builder);
   if (!render_pass_) {
     VALIDATION_LOG << "Could not create renderpass.";
     is_valid_ = false;
@@ -231,9 +239,9 @@ RenderPassVK::RenderPassVK(const std::shared_ptr<const Context>& context,
   frame_data.framebuffer = framebuffer;
   frame_data.render_pass = render_pass_;
 
-  if (!render_target_.GetRenderArea()) {
+  if (cacheable) {
     frame_data_texture.SetCachedFrameData(frame_data, sample_count,
-                                          cache_mip_level, cache_slice);
+                                          cache_mip_level, cache_slice, policy);
   }
 
   // If the resolve image exists and has mipmaps, transition mip levels besides

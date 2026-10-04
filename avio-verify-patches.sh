@@ -913,6 +913,14 @@ need "translated native replay preserves original raster phase" \
 need "native dither and derivative tile phase are tested" \
   "$F/impeller/entity/contents/coverage_atlas_unittests.cc" 'NativeDitherAndDerivativePhaseSurviveEveryTile'
 
+echo "--- Patch 62: exact cached render-pass policy ---"
+need "cached render passes are keyed by their exact attachment policy" \
+  "$F/impeller/renderer/backend/vulkan/render_pass_vk.cc" 'cache_mip_level, cache_slice, &policy\)'
+need "a later Coverage segment loads after an earlier clear (test)" \
+  "$F/impeller/renderer/backend/vulkan/render_pass_vk_unittests.cc" 'LaterSegmentLoadsTheParentAfterAnEarlierClear'
+need "exact render-pass policy is documented" \
+  AVIO_PATCHES.md 'Patch 62: exact attachment policy for cached Vulkan render passes'
+
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"

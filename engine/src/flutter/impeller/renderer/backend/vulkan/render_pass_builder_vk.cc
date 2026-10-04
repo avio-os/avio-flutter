@@ -31,6 +31,9 @@ constexpr auto kSelfDependencyDstAccessMask =
 
 constexpr auto kSelfDependencyFlags = vk::DependencyFlagBits::eByRegion;
 
+static_assert(RenderPassPolicyVK::kCapacity == kMaxAttachments,
+              "A cached render pass policy must hold every attachment.");
+
 RenderPassBuilderVK::RenderPassBuilderVK() = default;
 
 RenderPassBuilderVK::~RenderPassBuilderVK() = default;
@@ -131,6 +134,37 @@ RenderPassBuilderVK& RenderPassBuilderVK::SetStencilAttachment(
   desc.finalLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
   depth_stencil_ = desc;
   return *this;
+}
+
+RenderPassPolicyVK RenderPassBuilderVK::GetPolicy() const {
+  // Mirror the attachment order of `Build`: colour 0 and its resolve, the
+  // remaining colours each followed by their resolve, then depth/stencil.
+  RenderPassPolicyVK policy;
+  auto add = [&policy](const vk::AttachmentDescription& description) {
+    if (policy.count < policy.attachments.size()) {
+      policy.attachments[policy.count] = description;
+    }
+    // `Build` refuses more than kMaxAttachments. Keep counting anyway so an
+    // overfull policy can never alias a representable one; RenderPassVK does
+    // not cache it.
+    policy.count++;
+  };
+  if (color0_.has_value()) {
+    add(color0_.value());
+    if (color0_resolve_.has_value()) {
+      add(color0_resolve_.value());
+    }
+  }
+  for (const auto& color : colors_) {
+    add(color.second);
+    if (auto found = resolves_.find(color.first); found != resolves_.end()) {
+      add(found->second);
+    }
+  }
+  if (depth_stencil_.has_value()) {
+    add(depth_stencil_.value());
+  }
+  return policy;
 }
 
 vk::UniqueRenderPass RenderPassBuilderVK::Build(

@@ -53,22 +53,27 @@ class TextureVK final : public Texture, public BackendCast<TextureVK, Texture> {
   std::shared_ptr<SamplerVK> GetImmutableSamplerVariant(
       const SamplerVK& sampler) const;
 
-  /// Store the framebuffer and render pass last used to render into the
-  /// `(sample_count, mip_level, slice)` subresource of this texture.
+  /// Store the framebuffer and render pass used to render into the
+  /// `(sample_count, mip_level, slice)` subresource of this texture with the
+  /// exact attachment `policy` the render pass was built from.
   ///
   /// Only called when this texture is being used as the resolve (or
   /// non-MSAA color) target of a render pass.
   void SetCachedFrameData(const FramebufferAndRenderPass& data,
                           SampleCount sample_count,
                           uint32_t mip_level = 0u,
-                          uint32_t slice = 0u);
+                          uint32_t slice = 0u,
+                          const RenderPassPolicyVK& policy = {});
 
   /// Retrieve the cached framebuffer and render pass for the given
-  /// `(sample_count, mip_level, slice)` subresource. Returns an empty
-  /// `FramebufferAndRenderPass` if no entry exists.
-  FramebufferAndRenderPass GetCachedFrameData(SampleCount sample_count,
-                                              uint32_t mip_level = 0u,
-                                              uint32_t slice = 0u) const;
+  /// `(sample_count, mip_level, slice)` subresource and exact `policy`.
+  /// A null `policy` inspects the first entry for the subresource. Returns
+  /// an empty `FramebufferAndRenderPass` if no entry exists.
+  FramebufferAndRenderPass GetCachedFrameData(
+      SampleCount sample_count,
+      uint32_t mip_level = 0u,
+      uint32_t slice = 0u,
+      const RenderPassPolicyVK* policy = nullptr) const;
 
  private:
   std::weak_ptr<Context> context_;

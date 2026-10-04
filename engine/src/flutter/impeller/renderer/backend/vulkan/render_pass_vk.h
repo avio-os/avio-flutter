@@ -16,6 +16,7 @@
 namespace impeller {
 
 class CommandBufferVK;
+class RenderPassBuilderVK;
 class SamplerVK;
 
 class RenderPassVK final : public RenderPass {
@@ -135,11 +136,14 @@ class RenderPassVK final : public RenderPass {
   // |RenderPass|
   bool OnEncodeCommands(const Context& context) const override;
 
+  // Describes every attachment of this target with the load/store actions it
+  // declares and the layouts its textures currently hold.
+  void PopulateRenderPassBuilder(RenderPassBuilderVK& builder,
+                                 bool is_swapchain) const;
+
   SharedHandleVK<vk::RenderPass> CreateVKRenderPass(
       const ContextVK& context,
-      const SharedHandleVK<vk::RenderPass>& recycled_renderpass,
-      const std::shared_ptr<CommandBufferVK>& command_buffer,
-      bool is_swapchain) const;
+      const RenderPassBuilderVK& builder) const;
 
   SharedHandleVK<vk::Framebuffer> CreateVKFramebuffer(
       const ContextVK& context,
