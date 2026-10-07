@@ -257,6 +257,10 @@ class ContentContext {
       const {
     return coverage_classifier_storage_;
   }
+  // Census access that leaves the plan's exclusive-owner use count intact.
+  const CoverageDisplayListPlan* GetCoverageClassifierPlan() const {
+    return coverage_classifier_storage_.get();
+  }
 
   const Capabilities& GetDeviceCapabilities() const;
 

@@ -874,6 +874,22 @@ need "captured source rounding is materialized before joint mask" \
   "$F/impeller/entity/coverage_tiled_render_pass.cc" 'opaque_group.IsValid\(\)'
 need "CPU recorder bank is cold and bounded" \
   "$F/impeller/entity/coverage_recorder_bank.h" 'kPackets = 8192'
+need "bounded coverage storage is uninitialized capacity, not preallocation" \
+  "$F/impeller/entity/coverage_recorder_storage.h" 'alignas\(T\) std::byte storage_\[Capacity \* sizeof\(T\)\];'
+need "recorder bank is not value-initialized by make_shared" \
+  "$F/impeller/entity/coverage_recorder_bank.h" 'CoverageRecorderStorage\(\) \{\}'
+need "recorder bank constructs controls on demand" \
+  "$F/impeller/entity/coverage_recorder_bank.h" 'CoverageFixedVector<Control, kControls> controls'
+need "pre-pass plan uses the one fixed-vector authority" \
+  "$F/impeller/display_list/coverage_classifier.h" 'CoverageFixedVector<CoverageClipDecision, 512> clips_'
+absent_in "pre-pass plan has no second fixed-vector template" \
+  "$F/impeller/display_list/coverage_classifier.h" 'class CoverageFixedVector'
+need "coverage CPU storage census kind is reported" \
+  "$F/impeller/display_list/aiks_context.cc" 'AvioRenderResourceKind::kCoverageCpuStorage'
+need "rasterizer reports through the aiks census" \
+  "$F/shell/common/rasterizer.cc" 'aiks->GetAvioRenderResourceReport\(start_new_interval\)'
+need "coverage CPU storage residency tests are registered" \
+  "$F/impeller/entity/coverage_recorder_bank_unittests.cc" 'CapsAreFixedAddressSpaceNotResidentMemory'
 need "recorder storage is registered in GN" \
   "$F/impeller/entity/BUILD.gn" '"coverage_tiled_recorder.cc"'
 need "source proof production fixtures are registered" \

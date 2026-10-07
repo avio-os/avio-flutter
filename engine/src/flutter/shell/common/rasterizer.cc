@@ -76,8 +76,7 @@ impeller::AvioRenderResourceReport Rasterizer::GetAvioRenderResourceReport(
   if (aiks && aiks->IsValid()) {
     auto report =
         aiks->GetContext()->GetAvioRenderResourceReport(start_new_interval);
-    report.Merge(aiks->GetContentContext().GetAvioRenderResourceReport(
-        start_new_interval));
+    report.Merge(aiks->GetAvioRenderResourceReport(start_new_interval));
     return report;
   }
   if (avio_report_context_) {

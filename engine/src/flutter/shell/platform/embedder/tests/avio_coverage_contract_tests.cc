@@ -631,6 +631,9 @@ int main() {
   static_assert(impeller::AvioContinuousSupportedClasses(
                     impeller::AvioCoverageBackend::kMetal) == 0);
   static_assert(kFlutterAvioRenderResourceDeviceBuffers == 9);
+  static_assert(kFlutterAvioRenderResourceCoverageCpuStorage ==
+                static_cast<uint32_t>(
+                    impeller::AvioRenderResourceKind::kCoverageCpuStorage));
   static_assert(offsetof(FlutterProjectArgs, avio_antialiasing_config) >
                 offsetof(FlutterProjectArgs, avio_resource_lifecycle_config));
   static_assert(

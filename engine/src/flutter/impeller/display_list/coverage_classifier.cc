@@ -86,6 +86,16 @@ void CoverageDisplayListPlan::Reset(Rect bounds, size_t bpp) {
   finalized_ = false;
   scopes_.push_back({.physical_bounds = bounds});
 }
+void CoverageDisplayListPlan::AccumulateStorageUsage(
+    CoverageFixedStorageUsage& usage) const {
+  scopes_.AccumulateUsage(usage);
+  clips_.AccumulateUsage(usage);
+  active_clips_.AccumulateUsage(usage);
+  clip_stack_.AccumulateUsage(usage);
+  draw_records_.AccumulateUsage(usage);
+  images_.AccumulateUsage(usage);
+  saved_.AccumulateUsage(usage);
+}
 void CoverageDisplayListPlan::Invalidate() {
   overflow_ = true;
   for (auto& scope : scopes_)

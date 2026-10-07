@@ -258,6 +258,9 @@ typedef enum {
 #define kFlutterAvioRenderResourceCoverageRegion 7u
 #define kFlutterAvioRenderResourceLayerRegion 8u
 #define kFlutterAvioRenderResourceDeviceBuffers 9u
+/// entries: constructed high-water elements; nominal_bytes: fixed capacity;
+/// real_bytes: high-water element bytes (bounds resident CPU memory).
+#define kFlutterAvioRenderResourceCoverageCpuStorage 10u
 
 #define kFlutterAvioResourceFieldCounts 0x1ULL
 #define kFlutterAvioResourceFieldDescriptorBytes 0x2ULL

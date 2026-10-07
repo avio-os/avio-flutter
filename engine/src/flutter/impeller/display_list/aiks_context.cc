@@ -4,6 +4,7 @@
 
 #include "impeller/display_list/aiks_context.h"
 #include "impeller/display_list/coverage_classifier.h"
+#include "impeller/entity/coverage_recorder_bank.h"
 
 #include "impeller/typographer/typographer_context.h"
 
@@ -46,6 +47,35 @@ std::shared_ptr<Context> AiksContext::GetContext() const {
 
 ContentContext& AiksContext::GetContentContext() const {
   return *content_context_;
+}
+
+AvioRenderResourceReport AiksContext::GetAvioRenderResourceReport(
+    bool start_new_interval) const {
+  if (!content_context_) {
+    return {};
+  }
+  auto report =
+      content_context_->GetAvioRenderResourceReport(start_new_interval);
+  if (!report.available) {
+    return report;
+  }
+  CoverageFixedStorageUsage storage;
+  if (const auto bank = content_context_->GetCoverageRecorderStorage()) {
+    bank->AccumulateStorageUsage(storage);
+  }
+  if (const auto* plan = content_context_->GetCoverageClassifierPlan()) {
+    plan->AccumulateStorageUsage(storage);
+  }
+  if (storage.capacity_bytes != 0u) {
+    AvioRenderResourceEntry entry;
+    entry.kind_id =
+        static_cast<uint32_t>(AvioRenderResourceKind::kCoverageCpuStorage);
+    entry.usage.entries = storage.high_water_elements;
+    entry.usage.nominal_bytes = storage.capacity_bytes;
+    entry.usage.real_bytes = storage.high_water_bytes;
+    report.AddEntry(entry);
+  }
+  return report;
 }
 
 }  // namespace impeller

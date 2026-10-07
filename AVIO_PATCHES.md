@@ -1676,6 +1676,36 @@ neither those tests nor source compilation establishes native pixel parity.
 A cold aggregate CPU bank holds at most 64 recorder controls, 8,192 packets,
 32,768 bindings and 32,768 vertex views. Pending resources and names use fixed
 inline storage, and exact weak identities never resurrect on slot reuse.
+
+Those caps, and the DisplayList pre-pass plan's, are address space, not a
+preallocation. Every bounded container is one `CoverageFixedVector`
+(`coverage_recorder_storage.h`): `std::inplace_vector` semantics over aligned
+uninitialized bytes, placement-constructed on append, refusing at capacity, and
+destroyed explicitly by `pop_back`/`resize`/`clear`. The bank and plan have
+user-provided constructors, so the single cold `std::make_shared` no longer
+value-initializes them. Previously it zeroed and constructed every slot, which
+made the measured 20,627,440-byte bank and the 2.7 MiB plan fully resident on
+every Coverage shell host. The bank constructs a control on first demand,
+reusing the lowest free one first, and never moves it. A reservation constructs
+its packet, vertex views, bindings and ordinal chunk while it owns the
+admission word, and `Commit` assigns those live elements. `ReclaimIdle`
+destroys the whole generation, releasing its shared owners, and the next
+generation reuses the lowest indices. Resident memory is therefore the touched
+high-water mark, with no custom allocator, `madvise` or zero-state convention.
+Element addresses, the single standing allocation and frame-path
+allocation-freedom are unchanged.
+
+`AiksContext` adds one `kCoverageCpuStorage` (kind 10) census entry for both
+standing owners, next to the content context's report. `entries` is the
+constructed high-water element count. `nominal_bytes` is the capacity bytes.
+`real_bytes` is the high-water element bytes, which bounds residency before page
+rounding. Production CPU tests construct the bank and plan the same way
+`std::make_shared` does, in a fresh no-huge-page mapping, and check residency
+with `mincore`. With zero-filled storage they observe 5,036 of 5,036 and 683 of
+683 pages resident; the patched types stay within their vector headers plus
+the touched elements. Further tests cover refusal at capacity, explicit
+destruction on reclaim, and census counters that read zero before first use and
+keep their high water across reclaim/reset.
 Capacity or busy admission fails before submission, without frame-path bank
 growth. Logical clip-write markers distinguish replayed clips from a fill's own
 winding/stroke operations. Source proofs apply to exactly one accepted draw.

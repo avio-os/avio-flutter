@@ -6,12 +6,12 @@
 #define FLUTTER_IMPELLER_DISPLAY_LIST_COVERAGE_CLASSIFIER_H_
 
 #include <array>
-#include <iterator>
 #include <memory>
 #include <span>
 
 #include "flutter/display_list/display_list.h"
 #include "impeller/entity/contents/clip_coverage.h"
+#include "impeller/entity/coverage_recorder_storage.h"
 #include "impeller/entity/geometry/coverage_geometry.h"
 #include "impeller/geometry/matrix.h"
 #include "impeller/renderer/render_resource_report.h"
@@ -19,37 +19,6 @@
 namespace impeller {
 
 class Context;
-
-template <class T, size_t Capacity>
-class CoverageFixedVector {
- public:
-  bool push_back(const T& value) {
-    if (count_ == Capacity)
-      return false;
-    entries_[count_++] = value;
-    return true;
-  }
-  void clear() { count_ = 0; }
-  void pop_back() { --count_; }
-  void resize(size_t count) { count_ = count; }
-  bool empty() const { return count_ == 0; }
-  size_t size() const { return count_; }
-  T& operator[](size_t i) { return entries_[i]; }
-  const T& operator[](size_t i) const { return entries_[i]; }
-  T& front() { return entries_[0]; }
-  const T& front() const { return entries_[0]; }
-  T& back() { return entries_[count_ - 1]; }
-  auto begin() { return entries_.begin(); }
-  auto end() { return entries_.begin() + count_; }
-  auto begin() const { return entries_.begin(); }
-  auto end() const { return entries_.begin() + count_; }
-  auto rbegin() { return std::make_reverse_iterator(end()); }
-  auto rend() { return std::make_reverse_iterator(begin()); }
-
- private:
-  std::array<T, Capacity> entries_ = {};
-  size_t count_ = 0;
-};
 
 enum class CoverageGeometryKind {
   kRect,
@@ -205,6 +174,9 @@ class CoverageDisplayListPlan {
   const std::array<AvioCoverageReasonUsage, 32>& GetReasons() const {
     return reasons_;
   }
+  // Standing CPU storage census: fixed capacities and constructed high-water
+  // marks, never the current frame's sizes.
+  void AccumulateStorageUsage(CoverageFixedStorageUsage& usage) const;
 
  private:
   struct SavedState {

@@ -2,7 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include <algorithm>
 #include <limits>
+#include <vector>
+
 #include "gtest/gtest.h"
 #include "impeller/display_list/coverage_classifier.h"
 
@@ -204,6 +210,40 @@ TEST(CoverageClassifier, FixedCapacityOverflowDisablesAllOptimizationProofs) {
   EXPECT_FALSE(plan.HasOverflow());
   EXPECT_TRUE(plan.GetRoot().can_render_direct_1x);
   EXPECT_EQ(plan.GetScopes().size(), 1u);
+}
+TEST(CoverageClassifier, StandingPlanCapacityIsNotResidentMemory) {
+  const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  const size_t bytes =
+      (sizeof(CoverageDisplayListPlan) + page - 1) / page * page;
+  void* base = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(base, MAP_FAILED);
+  // One touched byte faults one base page.
+  madvise(base, bytes, MADV_NOHUGEPAGE);
+  const auto resident = [&] {
+    std::vector<unsigned char> pages(bytes / page);
+    EXPECT_EQ(mincore(base, bytes, pages.data()), 0);
+    return static_cast<size_t>(std::count_if(
+        pages.begin(), pages.end(), [](unsigned char p) { return p & 1u; }));
+  };
+  auto* plan = ::new (base) CoverageDisplayListPlan(Bounds(), 4);
+  // Vector headers, the root scope and the scalar tail only.
+  EXPECT_LE(resident(), 12u) << "of " << bytes / page;
+  CoverageFixedStorageUsage usage;
+  plan->AccumulateStorageUsage(usage);
+  EXPECT_EQ(usage.high_water_elements, 1u);
+  EXPECT_EQ(usage.high_water_bytes, sizeof(CoverageScopeSummary));
+  EXPECT_GE(usage.capacity_bytes, 512 * sizeof(CoverageClipDecision));
+  plan->RecordClip(Rect::MakeLTRB(10.5, 10.5, 50, 50), Matrix{},
+                   ClipOperation::kIntersect, true, true);
+  plan->Reset(Bounds(), 4);
+  CoverageFixedStorageUsage reset;
+  plan->AccumulateStorageUsage(reset);
+  // High water survives Reset; capacity never changes.
+  EXPECT_GT(reset.high_water_elements, usage.high_water_elements);
+  EXPECT_EQ(reset.capacity_bytes, usage.capacity_bytes);
+  plan->~CoverageDisplayListPlan();
+  munmap(base, bytes);
 }
 TEST(CoverageClassifier, LegacySdfProofRequiresRealOwnerPaintAndTransform) {
   CoverageDrawFacts shape{.kind = CoverageGeometryKind::kRect,

@@ -24,6 +24,11 @@ enum class AvioRenderResourceKind : uint32_t {
   kCoverageRegion = 7,
   kLayerRegion = 8,
   kDeviceBuffers = 9,
+  // Standing fixed-capacity CPU storage of the coverage recorder bank and
+  // DisplayList pre-pass plan. entries: constructed high-water elements;
+  // nominal_bytes: capacity bytes reserved inside the standing allocations;
+  // real_bytes: high-water element bytes, the bound on what can be resident.
+  kCoverageCpuStorage = 10,
 };
 
 inline constexpr uint64_t kAvioCounterRasterThreadAllocations = 1u << 0;

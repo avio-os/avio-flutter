@@ -20,6 +20,12 @@ namespace impeller {
 // Final releases publish cleanup facts through the admission word. Its owner
 // drains those facts before unlocking, rather than exposing zero readers while
 // cleanup is still running. Claims/records never wait for an admission owner.
+//
+// The caps are fixed-address uninitialized capacity inside the one standing
+// allocation, never a preallocation: an element is constructed only while the
+// admission word is owned, so resident memory is the touched high-water mark.
+// ReclaimIdle destroys every generation element and later records reuse the
+// lowest indices first. Readers index elements handed to them, never sizes.
 class CoverageRecorderStorage {
  public:
   using Pass = CoverageTiledRenderPass;
@@ -27,10 +33,15 @@ class CoverageRecorderStorage {
   static constexpr size_t kPackets = 8192;
   static constexpr size_t kBindings = 32768;
   static constexpr size_t kVertices = 32768;
+  // At most 128 full pages plus 63 partial pages for 64 simultaneous passes.
+  static constexpr size_t kIndexChunks = 256;
   static constexpr uint32_t kOwned = 1;
   static constexpr uint32_t kCleanup = 2;
   static constexpr size_t kControlBytes = sizeof(Pass) + 128;
   struct Control {
+    // User-provided: constructing a control writes only its flags; the pass
+    // constructor writes the bytes it actually uses.
+    Control() {}
     alignas(std::max_align_t) std::array<std::byte, kControlBytes> bytes;
     std::atomic_bool occupied = false;
     std::atomic_bool live = false;
@@ -39,17 +50,27 @@ class CoverageRecorderStorage {
     Pass::DrawPacket draw;
     uint32_t next = Pass::PacketSequence::kEnd;
   };
-  std::array<Control, kControls> controls;
-  std::array<Packet, kPackets> packets;
-  std::array<Pass::Binding, kBindings> bindings;
-  std::array<BufferView, kVertices> vertices;
-  // At most128 full pages plus63 partial pages for64 simultaneous passes.
-  std::array<std::array<uint32_t, 64>, 256> ordinal_indices;
-  size_t index_chunk_count = 0;
-  size_t packet_count = 0;
-  size_t binding_count = 0;
-  size_t vertex_count = 0;
+  using IndexChunk = std::array<uint32_t, 64>;
+
+  // User-provided, so std::make_shared does not zero-initialize the bank.
+  CoverageRecorderStorage() {}
+
   std::atomic<uint32_t> admission = 0;
+  // Controls are constructed on first demand and never destroyed or moved
+  // while the bank lives; allocators address them by index.
+  CoverageFixedVector<Control, kControls> controls;
+  CoverageFixedVector<Packet, kPackets> packets;
+  CoverageFixedVector<Pass::Binding, kBindings> bindings;
+  CoverageFixedVector<BufferView, kVertices> vertices;
+  CoverageFixedVector<IndexChunk, kIndexChunks> ordinal_indices;
+
+  void AccumulateStorageUsage(CoverageFixedStorageUsage& usage) const {
+    controls.AccumulateUsage(usage);
+    packets.AccumulateUsage(usage);
+    bindings.AccumulateUsage(usage);
+    vertices.AccumulateUsage(usage);
+    ordinal_indices.AccumulateUsage(usage);
+  }
 
   bool TryLock() {
     auto state = admission.load(std::memory_order_acquire);
@@ -65,16 +86,10 @@ class CoverageRecorderStorage {
     }
     // Native command buffers independently own every encoded pipeline,
     // texture and buffer. Weak pass readers cannot keep a packet generation.
-    while (packet_count) {
-      packets[--packet_count] = Packet{};
-    }
-    while (binding_count) {
-      bindings[--binding_count] = Pass::BufferBinding{};
-    }
-    while (vertex_count) {
-      vertices[--vertex_count] = BufferView{};
-    }
-    index_chunk_count = 0;
+    packets.clear();
+    bindings.clear();
+    vertices.clear();
+    ordinal_indices.clear();
   }
   void Unlock() {
     for (;;) {
@@ -102,10 +117,18 @@ class CoverageRecorderStorage {
       bool free = false;
       if (controls[i].occupied.compare_exchange_strong(
               free, true, std::memory_order_acquire)) {
-        controls[i].live.store(true, std::memory_order_release);
         result = i;
         break;
       }
+    }
+    // Lowest free slot first; a new slot is constructed only when all
+    // constructed ones are still weakly referenced.
+    if (!result && controls.emplace_back()) {
+      result = controls.size() - 1;
+      controls[*result].occupied.store(true, std::memory_order_relaxed);
+    }
+    if (result) {
+      controls[*result].live.store(true, std::memory_order_release);
     }
     Unlock();
     return result;
@@ -118,9 +141,9 @@ class CoverageRecorderStorage {
     }
   }
   bool HasRoom(size_t vertex_views, size_t resource_bindings) const {
-    return packet_count < packets.size() &&
-           vertex_views <= vertices.size() - vertex_count &&
-           resource_bindings <= bindings.size() - binding_count;
+    return packets.size() < packets.capacity() &&
+           vertex_views <= vertices.capacity() - vertices.size() &&
+           resource_bindings <= bindings.capacity() - bindings.size();
   }
   struct Reservation {
     CoverageRecorderStorage& storage;
@@ -166,17 +189,22 @@ class CoverageRecorderStorage {
       return std::nullopt;
     }
     if (!HasRoom(vertex_views, resource_bindings) || ordinal >= kPackets ||
-        (ordinal % 64 == 0 && index_chunk_count == ordinal_indices.size())) {
+        (ordinal % 64 == 0 &&
+         ordinal_indices.size() == ordinal_indices.capacity())) {
       Unlock();
       return std::nullopt;
     }
-    Reservation result{*this, static_cast<uint32_t>(packet_count++),
-                       vertex_count, binding_count, std::nullopt};
+    // Construct the whole reservation while owned; Commit then only assigns
+    // already-live elements, and the next link starts at kEnd.
+    Reservation result{*this, static_cast<uint32_t>(packets.size()),
+                       vertices.size(), bindings.size(), std::nullopt};
+    packets.emplace_back();
+    vertices.resize(vertices.size() + vertex_views);
+    bindings.resize(bindings.size() + resource_bindings);
     if (ordinal % 64 == 0) {
-      result.index_chunk = static_cast<uint16_t>(index_chunk_count++);
+      result.index_chunk = static_cast<uint16_t>(ordinal_indices.size());
+      ordinal_indices.emplace_back();
     }
-    vertex_count += vertex_views;
-    binding_count += resource_bindings;
     Unlock();
     return result;
   }

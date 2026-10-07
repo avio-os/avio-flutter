@@ -293,9 +293,9 @@ class CoverageTiledRenderPass final : public RenderPass {
   mutable size_t encoding_last_ = SIZE_MAX;
   mutable std::shared_ptr<const AvioSample4ClipDescriptor> native_start_clip_;
   DrawPacket pending_;
-  CoverageRecorderVector<BufferView, 16> pending_vertices_;
-  CoverageRecorderVector<Binding, 32> pending_bindings_;
-  CoverageRecorderVector<std::shared_ptr<void>, 64> logical_owners_;
+  CoverageFixedVector<BufferView, 16> pending_vertices_;
+  CoverageFixedVector<Binding, 32> pending_bindings_;
+  CoverageFixedVector<std::shared_ptr<void>, 64> logical_owners_;
   struct ClipBuffer {
     std::shared_ptr<const AvioContinuousClipExpression> expression;
     BufferView buffer;

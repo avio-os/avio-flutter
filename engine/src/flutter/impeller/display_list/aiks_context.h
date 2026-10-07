@@ -43,6 +43,11 @@ class AiksContext {
 
   ContentContext& GetContentContext() const;
 
+  /// The content context's report plus the standing coverage CPU storage this
+  /// layer can see whole: the recorder bank and the DisplayList pre-pass plan.
+  AvioRenderResourceReport GetAvioRenderResourceReport(
+      bool start_new_interval) const;
+
  private:
   std::shared_ptr<Context> context_;
   std::unique_ptr<ContentContext> content_context_;
