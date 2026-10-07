@@ -21,25 +21,34 @@ void FrameDamage::ComputeDamage(flutter::LayerTree& layer_tree,
     raster_damage_.reset();
     return;
   }
+  // A previous tree that was never diffed has no paint regions, so the diff
+  // cannot know where its removed or changed layers painted. Treat it like a
+  // missing previous tree: the whole frame is damaged, and this tree's own
+  // regions are still recorded for the next frame.
+  const LayerTree* prev_layer_tree =
+      prev_layer_tree_ && prev_layer_tree_->has_paint_regions()
+          ? prev_layer_tree_
+          : nullptr;
   PaintRegionMap empty_paint_region_map;
   DiffContext context(layer_tree.frame_size(), layer_tree.paint_region_map(),
-                      prev_layer_tree_ ? prev_layer_tree_->paint_region_map()
-                                       : empty_paint_region_map,
+                      prev_layer_tree ? prev_layer_tree->paint_region_map()
+                                      : empty_paint_region_map,
                       has_raster_cache, impeller_enabled, texture_registry);
   context.PushCullRect(DlRect::MakeSize(layer_tree.frame_size()));
   {
     DiffContext::AutoSubtreeRestore subtree(&context);
     const Layer* prev_root_layer = nullptr;
-    if (!prev_layer_tree_ ||
-        prev_layer_tree_->frame_size() != layer_tree.frame_size()) {
+    if (!prev_layer_tree ||
+        prev_layer_tree->frame_size() != layer_tree.frame_size()) {
       // If there is no previous layer tree assume the entire frame must be
       // repainted.
       context.MarkSubtreeDirty(DlRect::MakeSize(layer_tree.frame_size()));
     } else {
-      prev_root_layer = prev_layer_tree_->root_layer();
+      prev_root_layer = prev_layer_tree->root_layer();
     }
     layer_tree.root_layer()->Diff(&context, prev_root_layer);
   }
+  layer_tree.set_has_paint_regions();
 
   damage_ = context.ComputeDamage(
       additional_damage_, horizontal_clip_alignment_, vertical_clip_alignment_);

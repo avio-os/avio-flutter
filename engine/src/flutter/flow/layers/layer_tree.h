@@ -62,6 +62,13 @@ class LayerTree {
   const PaintRegionMap& paint_region_map() const { return paint_region_map_; }
   PaintRegionMap& paint_region_map() { return paint_region_map_; }
 
+  // Whether FrameDamage has diffed this tree, recording the paint region of
+  // every layer the diff visited. Only such a tree can be the previous tree of
+  // a later diff. A tree that was submitted without a diff (an empty frame, a
+  // rejected or root-promoted frame) has no paint regions to compare against.
+  bool has_paint_regions() const { return has_paint_regions_; }
+  void set_has_paint_regions() { has_paint_regions_ = true; }
+
   const std::vector<AvioCompositorMaterial>& avio_compositor_materials() const {
     return avio_compositor_materials_;
   }
@@ -87,6 +94,7 @@ class LayerTree {
   DlISize frame_size_;  // Physical pixels.
 
   PaintRegionMap paint_region_map_;
+  bool has_paint_regions_ = false;
 
   std::vector<RasterCacheItem*> raster_cache_items_;
   std::vector<AvioCompositorMaterial> avio_compositor_materials_;

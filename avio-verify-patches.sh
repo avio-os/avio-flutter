@@ -921,6 +921,14 @@ need "a later Coverage segment loads after an earlier clear (test)" \
 need "exact render-pass policy is documented" \
   AVIO_PATCHES.md 'Patch 62: exact attachment policy for cached Vulkan render passes'
 
+echo "--- Patch 63: a diff baseline is a tree that was diffed ---"
+need "frame damage refuses a previous tree without paint regions" \
+  "$F/flow/compositor_context.cc" 'prev_layer_tree_->has_paint_regions\(\)'
+need "an undiffed previous tree repaints the whole frame (test)" \
+  "$F/flow/diff_context_unittests.cc" 'FrameDamageRepaintsWholeAfterAnUndiffedPreviousTree'
+need "diff baseline rule is documented" \
+  AVIO_PATCHES.md 'Patch 63: a diff baseline is a tree that was diffed'
+
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"

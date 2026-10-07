@@ -1725,3 +1725,27 @@ per distinct policy (two or three for a Coverage root). Bounded passes still
 bypass the cache. `LaterSegmentLoadsTheParentAfterAnEarlierClear` and
 `PolicyDistinguishesLoadActionAndInitialLayout` cover the contract with the
 mock Vulkan driver; hardware validation is the Coverage greeter.
+
+### Patch 63: a diff baseline is a tree that was diffed
+
+Partial repaint diffs each layer tree against the view's previous tree and
+reads the paint region every old layer recorded when it was itself diffed.
+Upstream stores a tree as the previous tree only after a raster that diffed
+it, so every baseline carries those regions. Avio added paths that keep a tree
+as the view's last successful tree without a diff: an empty frame submitted
+before raster (`SubmitAvioEmptyFrame`), a frame rejected for invalid root
+facts, and a frame whose root facts changed (rasterized without
+`FrameDamage`). The next diff then found no region for an old layer. A
+removed child reached `DiffContext::AddDamage` with an invalid `PaintRegion`
+and dereferenced null on the raster thread (Shell host SIGSEGV when a new
+window's item views appeared, 2026-10-07); a changed child silently lost its
+old-region damage.
+
+`LayerTree` now records that `FrameDamage::ComputeDamage` diffed it
+(`has_paint_regions`). `ComputeDamage` uses a previous tree only when it
+carries paint regions; otherwise the frame is damaged whole, exactly as with
+no previous tree, and the current tree's regions are recorded for the next
+frame. One rule in the damage owner covers every submission path, so a new
+early return cannot reintroduce the hazard. `FrameDamageRepaintsWholeAfterAnUndiffedPreviousTree`
+crashes without the change; `FrameDamageNarrowsAgainstADiffedPreviousTree`
+keeps exact narrow damage after a diffed tree.

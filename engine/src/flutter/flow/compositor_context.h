@@ -52,7 +52,8 @@ enum class RasterStatus {
 
 class FrameDamage {
  public:
-  // Sets previous layer tree for calculating frame damage. If not set, entire
+  // Sets previous layer tree for calculating frame damage. If not set, or if
+  // that tree was never diffed (LayerTree::has_paint_regions), the entire
   // frame will be repainted.
   void SetPreviousLayerTree(const LayerTree* prev_layer_tree) {
     prev_layer_tree_ = prev_layer_tree;

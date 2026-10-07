@@ -144,5 +144,52 @@ TEST_F(DiffContextTest, FrameDamageSeparatesLogicalAndRasterDamage) {
   EXPECT_EQ(raster_damage->bounds(), frame_damage->bounds());
 }
 
+// An Avio empty, rejected or root-promoted frame becomes the view's last tree
+// without a diff. Diffing a later tree against it must not read the paint
+// region of a removed layer that was never recorded; the frame repaints whole.
+TEST_F(DiffContextTest, FrameDamageRepaintsWholeAfterAnUndiffedPreviousTree) {
+  const DlISize frame_size(800, 600);
+  auto kept = CreateDisplayListLayer(CreateDisplayList(
+      DlRect::MakeLTRB(20, 220, 120, 380), DlColor(0xFF1EB45A)));
+  auto removed = CreateDisplayListLayer(CreateDisplayList(
+      DlRect::MakeLTRB(680, 220, 780, 380), DlColor(0xFFAA46D2)));
+  LayerTree previous(CreateContainerLayer({kept, removed}), frame_size);
+  ASSERT_FALSE(previous.has_paint_regions());
+
+  LayerTree current(CreateContainerLayer({kept}), frame_size);
+  FrameDamage damage;
+  damage.SetPreviousLayerTree(&previous);
+  damage.ComputeDamage(current, /*has_raster_cache=*/false,
+                       /*impeller_enabled=*/true);
+
+  const auto frame_damage = damage.GetFrameDamage();
+  ASSERT_TRUE(frame_damage.has_value());
+  EXPECT_EQ(frame_damage->bounds(), DlIRect::MakeSize(frame_size));
+  EXPECT_TRUE(current.has_paint_regions());
+}
+
+TEST_F(DiffContextTest, FrameDamageNarrowsAgainstADiffedPreviousTree) {
+  const DlISize frame_size(800, 600);
+  auto kept = CreateDisplayListLayer(CreateDisplayList(
+      DlRect::MakeLTRB(20, 220, 120, 380), DlColor(0xFF1EB45A)));
+  auto removed = CreateDisplayListLayer(CreateDisplayList(
+      DlRect::MakeLTRB(680, 220, 780, 380), DlColor(0xFFAA46D2)));
+  LayerTree previous(CreateContainerLayer({kept, removed}), frame_size);
+  FrameDamage initial_damage;
+  initial_damage.ComputeDamage(previous, /*has_raster_cache=*/false,
+                               /*impeller_enabled=*/true);
+  ASSERT_TRUE(previous.has_paint_regions());
+
+  LayerTree current(CreateContainerLayer({kept}), frame_size);
+  FrameDamage damage;
+  damage.SetPreviousLayerTree(&previous);
+  damage.ComputeDamage(current, /*has_raster_cache=*/false,
+                       /*impeller_enabled=*/true);
+
+  const auto frame_damage = damage.GetFrameDamage();
+  ASSERT_TRUE(frame_damage.has_value());
+  EXPECT_EQ(frame_damage->bounds(), DlIRect::MakeLTRB(680, 220, 780, 380));
+}
+
 }  // namespace testing
 }  // namespace flutter
