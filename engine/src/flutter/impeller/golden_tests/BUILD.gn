@@ -56,22 +56,26 @@ if (is_linux && impeller_enable_vulkan) {
     testonly = true
     sources = [
       "avio_captured_backdrop_goldens_vk.cc",
+      "avio_continuous_shader_goldens_vk.cc",
       "avio_coverage_goldens_vk.cc",
       "golden_edge_comparison.h",
       "golden_edge_comparison_unittests.cc",
       "main_vk.cc",
     ]
     deps = [
-      "//flutter/impeller/display_list",
-      "//flutter/testing:testing_lib",
       ":digest",
       ":golden_playground_test",
       ":golden_renderer_vk",
       "//flutter/display_list",
       "//flutter/fml",
+      "//flutter/impeller/display_list",
       "//flutter/impeller/display_list:aiks_unittests_golden",
+      "//flutter/impeller/entity",
       "//flutter/impeller/fixtures",
+      "//flutter/impeller/renderer/backend/vulkan",
+      "//flutter/impeller/shader_archive",
       "//flutter/impeller/typographer/backends/skia:typographer_skia_backend",
+      "//flutter/testing:testing_lib",
       "//flutter/third_party/googletest:gtest",
       "//flutter/third_party/swiftshader",
       "//flutter/txt",

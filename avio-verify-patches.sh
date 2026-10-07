@@ -825,6 +825,14 @@ need "continuous shader source inventory is Vulkan-only" \
   "$F/impeller/entity/BUILD.gn" 'vulkan_only_shaders ='
 need "continuous control tests are registered" \
   "$F/impeller/renderer/BUILD.gn" 'continuous_coverage_pipeline_unittests.cc'
+need "continuous evaluator has one inlined call site per variant" \
+  "$F/impeller/entity/shaders/continuous_clip.glsl" 'taps\[tap\]=AvioContinuousLocalDistance\(v,tap_position\)'
+need "own geometry and clips share one evaluator loop" \
+  "$F/impeller/entity/shaders/continuous_coverage.glsl" 'slot = avio_control.runtime.y > 0.5 \? -1 : 0'
+absent_in "no per-use continuous evaluator inlining" \
+  "$F/impeller/entity/shaders/continuous_clip.glsl" 'AvioContinuousLocalDistance\(v,local[+-]'
+need "continuous SPIR-V budget and evaluator fixture are registered" \
+  "$F/impeller/golden_tests/avio_continuous_shader_goldens_vk.cc" 'VariantsStayWithinSpirvBudget'
 need "borrowed logical-device enablement is explicit ABI data" \
   "$F/shell/platform/embedder/embedder.h" 'bool native_sample_shading_enabled'
 need "selected Coverage target fixtures remain registered" \

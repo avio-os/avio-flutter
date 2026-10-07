@@ -1581,6 +1581,36 @@ rebuilds and per-class changed-look approval remain separate gates. No continuou
 class is enabled in the host's default request, and no pixel parity or memory
 saving measurement is asserted.
 
+**Shader size.** Impellerc inlines every GLSL call, and `ShaderLibraryVK`
+creates a module for every archived shader at context creation, whose SPIR-V
+the driver keeps for the context's life. The evaluator therefore has a single
+call site per variant: one loop over primitive slots, where slot -1 is the
+draw's own geometry (gated by `runtime.y`) and slots 0.. are the ordered
+expression, and one five-tap loop (value, then the +dx, -dx, +dy, -dy central
+differences, each formed by the same single add or subtract, with the same
+0.01 and /0.02 arithmetic). Before this, own geometry plus the loop body each
+inlined the value and four gradient taps, ten evaluator copies per variant:
+the 44 variants were 20.8 MiB (489-565 KiB each, measured as 21 MiB of
+NVIDIA-retained SPIR-V in the live shell host). They are now 3.0 MiB
+(3,117,028 bytes, largest 139,748). Non-continuous archive shaders, GLES
+outputs and all reflection (bindings, layouts, pipeline keys) are
+byte-identical. `AvioContinuousShaderVK.VariantsStayWithinSpirvBudget` (CPU
+only, in `impeller_golden_tests_vk`) caps each variant at 144 KiB and the set
+at 3,200 KiB; the previous source fails both.
+
+`AvioContinuousShaderVK.EvaluatorExportsExactNativeFourSamples` executes the
+evaluator through `avio_continuous_solid_fill` with production primitive
+packing (`AvioContinuousClip` factories, `Transform`,
+`MakeAvioContinuousControl`): every primitive kind, own geometry, ordered
+difference up to 16 slots, empty expressions and both final-blend paths under
+fractional, rotated and sheared transforms, into native-four float32 samples.
+It exports the resolved floats and their digest. Old and new evaluators
+exported byte-identical floats on lavapipe, SwiftShader and the NVIDIA
+driver; a mathematically equal rewrite (`inversesqrt`) changed 1,646 floats
+by at most 1.2e-7, so the comparison detects last-bit drift. This fixture bypasses
+`GetAvioContinuousPipeline` and the tiled recorder: it proves the evaluator,
+not the full continuous replay path, which remains unexecuted on GPU.
+
 
 ### Patch 61: exact clip segments and bounded typed recording (EG-2/3/4)
 

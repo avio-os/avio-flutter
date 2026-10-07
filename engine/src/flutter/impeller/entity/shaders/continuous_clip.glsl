@@ -93,13 +93,21 @@ float AvioContinuousLocalDistance(vec4 v[40], vec2 position) {
 }
 // Return physical pixel distance; Boolean operations combine distances before
 // a single smooth coverage evaluation. The original pass grid survives tiling.
+// Impellerc inlines every call, so the local evaluator has exactly one call
+// site: tap 0 is the value and taps 1-4 are the +dx, -dx, +dy, -dy central
+// differences, each formed by the same single add or subtract as before.
 float AvioContinuousDistance(vec4 v[40], vec2 physical_position) {
   vec3 position=vec3(physical_position,1.0);
   vec2 local=vec2(dot(v[1].xyz,position),dot(v[2].xyz,position));
-  float d=AvioContinuousLocalDistance(v,local);
   vec2 dx=vec2(v[1].x,v[2].x)*0.01, dy=vec2(v[1].y,v[2].y)*0.01;
-  vec2 gradient=vec2(AvioContinuousLocalDistance(v,local+dx)-AvioContinuousLocalDistance(v,local-dx),
-                     AvioContinuousLocalDistance(v,local+dy)-AvioContinuousLocalDistance(v,local-dy))/0.02;
-  return d/max(length(gradient),0.00001);
+  float taps[5];
+  for (int tap=0; tap<5; ++tap) {
+    vec2 offset=tap<3 ? dx : dy;
+    vec2 tap_position=tap==0 ? local
+                     : (tap==1 || tap==3) ? local+offset : local-offset;
+    taps[tap]=AvioContinuousLocalDistance(v,tap_position);
+  }
+  vec2 gradient=vec2(taps[1]-taps[2],taps[3]-taps[4])/0.02;
+  return taps[0]/max(length(gradient),0.00001);
 }
 #endif

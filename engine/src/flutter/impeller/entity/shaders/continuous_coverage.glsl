@@ -66,14 +66,18 @@ vec4 AvioApplyContinuousCoverage(vec4 source) {
   // keeps the original grid/phase even with translated tile viewports.
   vec2 position = floor(gl_FragCoord.xy) + gl_SamplePosition + avio_control.origin.xy;
   float distance = avio_has_geometry_distance ? avio_geometry_distance : -1e20;
-  if (avio_control.runtime.y > 0.5) {
-    distance = max(distance,
-        AvioContinuousDistance(avio_control.own_geometry.vectors, position));
-  }
-  for (int index = 0; index < 16; ++index) {
-    if (index >= int(avio_control.runtime.x)) break;
-    float child = AvioContinuousDistance(avio_expression.primitives[index].vectors, position);
-    if (avio_expression.primitives[index].vectors[0].y > 0.5) child = -child;
+  // Slot -1 is the draw's own deferred geometry, then the ordered clip
+  // expression. One loop gives the evaluator a single inlined call site.
+  for (int slot = avio_control.runtime.y > 0.5 ? -1 : 0; slot < 16; ++slot) {
+    if (slot >= 0 && slot >= int(avio_control.runtime.x)) break;
+    vec4 v[40];
+    if (slot < 0) {
+      v = avio_control.own_geometry.vectors;
+    } else {
+      v = avio_expression.primitives[slot].vectors;
+    }
+    float child = AvioContinuousDistance(v, position);
+    if (slot >= 0 && v[0].y > 0.5) child = -child;
     distance = max(distance, child);
   }
   float coverage = 1.0 - smoothstep(-0.5, 0.5, distance);

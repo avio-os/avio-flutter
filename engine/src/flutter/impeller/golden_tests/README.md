@@ -63,6 +63,28 @@ or a recorded edge delta establishes neither pixel parity nor user approval.
 Hosted source compilation and CPU oracle tests do not constitute a native
 Vulkan golden run.
 
+## Continuous evaluator checks
+
+`AvioContinuousShaderVK.VariantsStayWithinSpirvBudget` needs no GPU: it bounds
+the archived `avio_continuous_*` SPIR-V that every Vulkan context hands to the
+driver. `AvioContinuousShaderVK.EvaluatorExportsExactNativeFourSamples` draws
+the Patch 60 evaluator with production primitive packing into native-four
+float32 samples and writes `avio_continuous_shader_samples.f32` plus its digest.
+A shader-only refactor is pixel-equivalent when builds before and after it
+export identical files on the same ICD:
+
+```sh
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+  out/host_profile/impeller_golden_tests_vk --working_dir=/tmp/after \
+  --gtest_filter='AvioContinuousShaderVK.*'
+cmp /tmp/before/avio_continuous_shader_samples.f32 \
+  /tmp/after/avio_continuous_shader_samples.f32
+```
+
+Digests differ between ICDs, whose transcendental functions differ. The
+fixture binds the variant directly; it does not run the tiled recorder's
+continuous replay.
+
 ## Adding tests
 
 To add a golden image test, the `impeller_golden_tests` target must be modified
