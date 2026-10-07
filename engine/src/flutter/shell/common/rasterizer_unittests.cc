@@ -466,6 +466,345 @@ TEST(RasterizerTest,
   latch.Wait();
 }
 
+namespace {
+
+// Patch 64: one view drawn through a root target while its root facts
+// change. Records the damage of every frame the embedder was handed, and the
+// draw status and baseline that each draw left behind.
+class RootFactsHarness {
+ public:
+  struct Submitted {
+    std::optional<DlRegion> frame_damage;
+    std::optional<DlRegion> buffer_damage;
+  };
+  using Acquisition = ExternalViewEmbedder::RootRenderTargetAcquisition;
+  using Result = ExternalViewEmbedder::RootRenderTargetResult;
+
+  static constexpr int kSide = 64;
+
+  // With `selected` the target is chosen before damage setup (root-target
+  // mode); otherwise the surface frame carries `target` and the generic
+  // embedder reports metadata damage.
+  RootFactsHarness(const SurfaceFrame::FramebufferInfo& target,
+                   bool selected,
+                   bool empty_frames = false)
+      : threads_("avio.root_facts",
+                 ThreadHost::Type::kPlatform | ThreadHost::Type::kRaster |
+                     ThreadHost::Type::kIo | ThreadHost::Type::kUi),
+        runners_("test",
+                 threads_.platform_thread->GetTaskRunner(),
+                 threads_.raster_thread->GetTaskRunner(),
+                 threads_.ui_thread->GetTaskRunner(),
+                 threads_.io_thread->GetTaskRunner()),
+        embedder_(std::make_shared<NiceMock<MockExternalViewEmbedder>>()) {
+    ON_CALL(delegate_, GetSettings()).WillByDefault(ReturnRef(settings_));
+    ON_CALL(delegate_, GetTaskRunners()).WillByDefault(ReturnRef(runners_));
+    ON_CALL(delegate_, ShouldDiscardLayerTree).WillByDefault(Return(false));
+    rasterizer_ = std::make_unique<Rasterizer>(delegate_);
+    rasterizer_->SetExternalViewEmbedder(embedder_);
+    ON_CALL(*embedder_, SupportsAvioEmptyFrames())
+        .WillByDefault(Return(empty_frames));
+    ON_CALL(*embedder_, SupportsAvioFrameFacts(_)).WillByDefault(Return(true));
+    ON_CALL(*embedder_, SubmitAvioEmptyFrame(_, _)).WillByDefault(Return(true));
+    ON_CALL(*embedder_, AcquireRootRenderTarget(kImplicitViewId, _, _))
+        .WillByDefault([target, selected](auto...) {
+          return selected ? std::make_optional(target) : std::nullopt;
+        });
+    ON_CALL(*embedder_, GetRootRenderTargetAcquisition(kImplicitViewId))
+        .WillByDefault([this](int64_t) { return acquisition; });
+    ON_CALL(*embedder_, GetRootRenderTargetResult(kImplicitViewId))
+        .WillByDefault([this](int64_t) { return result; });
+    ON_CALL(*embedder_, SubmitFlutterView(kImplicitViewId, _, _, _))
+        .WillByDefault([this](int64_t, GrDirectContext*,
+                              const std::shared_ptr<impeller::AiksContext>&,
+                              std::unique_ptr<SurfaceFrame> frame) {
+          submitted.push_back({frame->submit_info().frame_damage,
+                               frame->submit_info().buffer_damage});
+        });
+    auto surface = std::make_unique<NiceMock<MockSurface>>();
+    const auto surface_info =
+        selected ? SurfaceFrame::FramebufferInfo{} : target;
+    ON_CALL(*surface, AcquireFrame(_)).WillByDefault([surface_info](DlISize) {
+      return std::make_unique<SurfaceFrame>(
+          nullptr, surface_info,
+          [](const SurfaceFrame&, DlCanvas*) { return true; },
+          [](const SurfaceFrame&) { return true; }, Size(), nullptr,
+          /*display_list_fallback=*/true);
+    });
+    ON_CALL(*surface, MakeRenderContextCurrent()).WillByDefault([] {
+      return std::make_unique<GLContextDefaultResult>(true);
+    });
+    ON_CALL(*surface, AllowsDrawingWhenGpuDisabled())
+        .WillByDefault(Return(true));
+    rasterizer_->Setup(std::move(surface));
+  }
+
+  static DlISize Size() { return DlISize(kSide, kSide); }
+  static DlIRect Whole() { return DlIRect::MakeSize(Size()); }
+
+  static std::shared_ptr<Layer> Rect(const DlRect& rect, DlColor color) {
+    DisplayListBuilder builder;
+    builder.DrawRect(rect, DlPaint(color));
+    return std::make_shared<DisplayListLayer>(DlPoint(), builder.Build(), false,
+                                              false);
+  }
+
+  // The sole root fact here is an authored item opacity: the fact a fade
+  // changes every frame while the children stay retained.
+  static std::shared_ptr<Layer> Faded(
+      double opacity,
+      const std::vector<std::shared_ptr<Layer>>& children) {
+    AvioFrameFacts facts;
+    facts.item_effect_declaration_id = 1;
+    facts.item_opacity = opacity;
+    auto root = std::make_shared<AvioFrameMetadataLayer>(facts, DlPoint());
+    for (const auto& child : children) {
+      root->Add(child);
+    }
+    return root;
+  }
+
+  // Draws one fresh tree on the raster thread.
+  DrawSurfaceStatus Draw(const std::shared_ptr<Layer>& root) {
+    DrawSurfaceStatus status = DrawSurfaceStatus::kFailed;
+    fml::AutoResetWaitableEvent done;
+    threads_.raster_thread->GetTaskRunner()->PostTask([&] {
+      auto pipeline = std::make_shared<FramePipeline>(10);
+      auto tree = std::make_unique<LayerTree>(root, Size());
+      submitted_tree_ = tree.get();
+      auto item = std::make_unique<FrameItem>(
+          SingleLayerTreeList(kImplicitViewId, std::move(tree),
+                              kDevicePixelRatio),
+          CreateFinishedBuildRecorder());
+      EXPECT_TRUE(pipeline->Produce().Complete(std::move(item)).success);
+      EXPECT_EQ(rasterizer_->Draw(pipeline), DrawStatus::kDone);
+      status = rasterizer_->GetLastDrawStatus(kImplicitViewId)
+                   .value_or(DrawSurfaceStatus::kFailed);
+      baseline_ = rasterizer_->GetLastLayerTree(kImplicitViewId);
+      baseline_has_paint_regions_ = baseline_ && baseline_->has_paint_regions();
+      done.Signal();
+    });
+    done.Wait();
+    return status;
+  }
+
+  // Whether the tree drawn last became the view's damage baseline.
+  bool LastDrawBecameBaseline() const {
+    return baseline_ && baseline_ == submitted_tree_;
+  }
+  const LayerTree* baseline() const { return baseline_; }
+  bool BaselineHasPaintRegions() const { return baseline_has_paint_regions_; }
+
+  std::vector<Submitted> submitted;
+  std::optional<Acquisition> acquisition;
+  std::optional<Result> result;
+
+ private:
+  ThreadHost threads_;
+  TaskRunners runners_;
+  Settings settings_;
+  NiceMock<MockDelegate> delegate_;
+  std::shared_ptr<NiceMock<MockExternalViewEmbedder>> embedder_;
+  std::unique_ptr<Rasterizer> rasterizer_;
+  const LayerTree* submitted_tree_ = nullptr;
+  const LayerTree* baseline_ = nullptr;
+  bool baseline_has_paint_regions_ = false;
+};
+
+SurfaceFrame::FramebufferInfo PreservedTarget(bool replaces_whole_target) {
+  SurfaceFrame::FramebufferInfo info;
+  info.supports_readback = true;
+  info.supports_partial_repaint = true;
+  info.existing_damage = DlRegion();
+  info.raster_replaces_whole_target = replaces_whole_target;
+  return info;
+}
+
+}  // namespace
+
+// A facts-only change (a fade step over retained children) is rendered whole
+// into the acquired target, but its logical damage is the exact pixel change:
+// none. The tree is diffed, so it is a real baseline for the next frame.
+TEST(RasterizerTest,
+     rootFactsOnlyChangeRastersWholeTargetWithExactFrameDamage) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true);
+  auto child =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {child})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {child})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 2u);
+  const auto& fade = view.submitted[1];
+  ASSERT_TRUE(fade.frame_damage.has_value());
+  EXPECT_TRUE(fade.frame_damage->isEmpty());
+  ASSERT_TRUE(fade.buffer_damage.has_value());
+  EXPECT_FALSE(fade.buffer_damage->isEmpty());
+  EXPECT_EQ(fade.buffer_damage->bounds(), RootFactsHarness::Whole());
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+  EXPECT_TRUE(view.BaselineHasPaintRegions());
+}
+
+// A multisampled target replaces every pixel, so the facts frame honors no
+// buffer rectangle; its logical damage is still exact.
+TEST(RasterizerTest,
+     rootFactsOnlyChangeOnMultisampledTargetReportsNoBufferDamage) {
+  RootFactsHarness view(PreservedTarget(true), /*selected=*/true);
+  auto child =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {child})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {child})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 2u);
+  const auto& fade = view.submitted[1];
+  ASSERT_TRUE(fade.frame_damage.has_value());
+  EXPECT_TRUE(fade.frame_damage->isEmpty());
+  EXPECT_FALSE(fade.buffer_damage.has_value());
+  EXPECT_TRUE(view.BaselineHasPaintRegions());
+}
+
+// The facts frame is a diffed baseline: the next frame's damage is only what
+// it changed, not the whole frame Patch 63 gives an undiffed baseline.
+TEST(RasterizerTest, frameAfterRootFactsChangeDiffsNarrowly) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true);
+  const auto changed_rect = DlRect::MakeLTRB(40, 40, 48, 48);
+  auto kept =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  auto before = RootFactsHarness::Rect(changed_rect, DlColor::kGreen());
+  auto after = RootFactsHarness::Rect(changed_rect, DlColor::kBlue());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {kept, before})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {kept, before})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {kept, after})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 3u);
+  const auto& next = view.submitted[2];
+  ASSERT_TRUE(next.frame_damage.has_value());
+  EXPECT_EQ(next.frame_damage->bounds(), DlIRect::MakeLTRB(40, 40, 48, 48));
+}
+
+// The crash shape (Shell host SIGSEGV, 2026-10-07): a child removed after a
+// facts change damages exactly the region it painted.
+TEST(RasterizerTest, rootFactsChangeThenRemovedChildDamagesOnlyItsOldRegion) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true);
+  auto a =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  auto b = RootFactsHarness::Rect(DlRect::MakeLTRB(40, 32, 56, 48),
+                                  DlColor::kGreen());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {a, b})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {a, b})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {a})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 3u);
+  const auto& removal = view.submitted[2];
+  ASSERT_TRUE(removal.frame_damage.has_value());
+  EXPECT_EQ(removal.frame_damage->bounds(), DlIRect::MakeLTRB(40, 32, 56, 48));
+}
+
+// A facts change the producer did not accept leaves the old facts in the
+// baseline, so the next opportunity detects the change again and delivers it
+// as a whole-target generation with exact logical damage.
+TEST(RasterizerTest, rootFactsChangeNotAcceptedIsResentNextOpportunity) {
+  using Acquisition = RootFactsHarness::Acquisition;
+  using Result = RootFactsHarness::Result;
+  struct Refusal {
+    std::optional<Acquisition> acquisition;
+    std::optional<Result> result;
+    DrawSurfaceStatus status;
+  };
+  for (const auto& refusal : {
+           Refusal{Acquisition::kBackpressured, std::nullopt,
+                   DrawSurfaceStatus::kTargetBackpressured},
+           Refusal{std::nullopt, Result::kRejected,
+                   DrawSurfaceStatus::kRejected},
+           Refusal{std::nullopt, Result::kBackpressured,
+                   DrawSurfaceStatus::kTargetRenderBackpressured},
+       }) {
+    SCOPED_TRACE(static_cast<int>(refusal.status));
+    RootFactsHarness view(PreservedTarget(false), /*selected=*/true);
+    auto child =
+        RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+    ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {child})),
+              DrawSurfaceStatus::kSuccess);
+    const LayerTree* accepted = view.baseline();
+
+    view.acquisition = refusal.acquisition;
+    view.result = refusal.result;
+    EXPECT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {child})), refusal.status);
+    EXPECT_EQ(view.baseline(), accepted);
+    ASSERT_NE(view.baseline(), nullptr);
+    EXPECT_EQ(view.baseline()->avio_frame_facts().item_opacity, 1.0);
+
+    view.acquisition = std::nullopt;
+    view.result = std::nullopt;
+    ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {child})),
+              DrawSurfaceStatus::kSuccess);
+    ASSERT_EQ(view.submitted.size(), 3u);
+    const auto& resent = view.submitted[2];
+    ASSERT_TRUE(resent.frame_damage.has_value());
+    EXPECT_TRUE(resent.frame_damage->isEmpty());
+    ASSERT_TRUE(resent.buffer_damage.has_value());
+    EXPECT_EQ(resent.buffer_damage->bounds(), RootFactsHarness::Whole());
+    EXPECT_TRUE(view.LastDrawBecameBaseline());
+  }
+}
+
+// A generic embedder selects its backing store later and only reports
+// metadata damage. An empty pixel diff there is no visual change only while
+// the root facts are unchanged; a facts change is submitted and rastered.
+TEST(RasterizerTest, metadataPathRootFactsChangeIsNotNoVisualChange) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/false);
+  auto child =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {child})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {child})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 2u);
+  const auto& fade = view.submitted[1];
+  ASSERT_TRUE(fade.frame_damage.has_value());
+  EXPECT_TRUE(fade.frame_damage->isEmpty());
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+  EXPECT_TRUE(view.BaselineHasPaintRegions());
+
+  // The same facts again are an exact no-change.
+  EXPECT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {child})),
+            DrawSurfaceStatus::kNoVisualChange);
+  EXPECT_EQ(view.submitted.size(), 2u);
+}
+
+// An accepted empty frame is the one undiffed baseline Avio keeps; the next
+// content frame is damaged whole (Patch 63) and becomes a diffed baseline.
+TEST(RasterizerTest, contentAfterAcceptedEmptyFrameIsWholeDamaged) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true,
+                        /*empty_frames=*/true);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {})),
+            DrawSurfaceStatus::kSuccess);
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+  EXPECT_FALSE(view.BaselineHasPaintRegions());
+  EXPECT_TRUE(view.submitted.empty());
+
+  auto child =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {child})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.submitted.size(), 1u);
+  const auto& content = view.submitted[0];
+  ASSERT_TRUE(content.frame_damage.has_value());
+  EXPECT_EQ(content.frame_damage->bounds(), RootFactsHarness::Whole());
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+  EXPECT_TRUE(view.BaselineHasPaintRegions());
+}
+
 TEST(RasterizerTest, backpressuredRootTargetKeepsBaselineAndRearmsDemand) {
   std::string test_name =
       ::testing::UnitTest::GetInstance()->current_test_info()->name();

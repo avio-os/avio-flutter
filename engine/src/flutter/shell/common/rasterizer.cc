@@ -1071,14 +1071,17 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     std::optional<DlRegion> eve_frame_damage = std::nullopt;
     // when leaf layer tracing is enabled we wish to repaint the whole frame
     // for accurate performance metrics.
-    // Root facts belong to a new content revision. Until the producer has an
-    // explicit same-buffer metadata transaction, changing them must render an
-    // acquired target and publish nonempty buffer damage. Child paint remains
-    // retained by the framework; only this root raster is promoted.
+    // Root facts are not pixels: the metadata layer paints its children
+    // unchanged, so a facts change never changes the diff. A changed revision
+    // must still reach the producer as a freshly rendered buffered generation
+    // (Patch 56), so it makes the whole target stale for this frame. That is
+    // catch-up damage, never a skipped diff: the frame is still diffed
+    // against the accepted baseline, publishes exact logical damage and
+    // records its paint regions for the next frame (Patch 64).
     const auto* previous_tree = GetLastLayerTree(view_id);
     const bool root_facts_changed =
         previous_tree && previous_tree->avio_frame_facts() != frame_facts;
-    if (framebuffer_info.supports_partial_repaint && !root_facts_changed) {
+    if (framebuffer_info.supports_partial_repaint) {
       bool has_external_view_embedder =
           external_view_embedder_ &&
           (!raster_thread_merger_ || raster_thread_merger_->IsMerged());
@@ -1094,7 +1097,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
               framebuffer_info.raster_replaces_whole_target);
           auto existing_damage = framebuffer_info.existing_damage;
           if (existing_damage.has_value()) {
-            damage->SetPreviousLayerTree(GetLastLayerTree(view_id));
+            damage->SetPreviousLayerTree(previous_tree);
             damage->AddAdditionalDamage(existing_damage.value());
             damage->SetClipAlignment(framebuffer_info.horizontal_clip_alignment,
                                      framebuffer_info.vertical_clip_alignment);
@@ -1107,7 +1110,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
           auto existing_damage = framebuffer_info.existing_damage;
           if (existing_damage.has_value()) {
             FrameDamage metadata_damage;
-            metadata_damage.SetPreviousLayerTree(GetLastLayerTree(view_id));
+            metadata_damage.SetPreviousLayerTree(previous_tree);
             metadata_damage.AddAdditionalDamage(existing_damage.value());
             metadata_damage.SetClipAlignment(
                 framebuffer_info.horizontal_clip_alignment,
@@ -1119,7 +1122,8 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
                 compositor_context_->texture_registry().get());
 
             auto frame_dmg = metadata_damage.GetFrameDamage();
-            if (frame_dmg.has_value() && frame_dmg->isEmpty() &&
+            if (!root_facts_changed && frame_dmg.has_value() &&
+                frame_dmg->isEmpty() &&
                 metadata_damage.GetBufferDamage().has_value()) {
               NOT_SLIMPELLER(compositor_context_->raster_cache().EndFrame());
               return DrawSurfaceStatus::kNoVisualChange;
@@ -1132,12 +1136,15 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
         damage = std::make_unique<FrameDamage>();
         auto existing_damage = framebuffer_info.existing_damage;
         if (existing_damage.has_value()) {
-          damage->SetPreviousLayerTree(GetLastLayerTree(view_id));
+          damage->SetPreviousLayerTree(previous_tree);
           damage->AddAdditionalDamage(existing_damage.value());
           damage->SetClipAlignment(framebuffer_info.horizontal_clip_alignment,
                                    framebuffer_info.vertical_clip_alignment);
         }
       }
+    }
+    if (damage && root_facts_changed) {
+      damage->AddAdditionalDamage(DlIRect::MakeSize(layer_tree.frame_size()));
     }
 
     bool ignore_raster_cache = true;
@@ -1160,7 +1167,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     // Guard: only skip if buffer_damage also has a value (i.e., Reset()
     // was not called to force a full repaint).
     auto frame_dmg = damage ? damage->GetFrameDamage() : std::nullopt;
-    if (frame_dmg.has_value() && frame_dmg->isEmpty() &&
+    if (!root_facts_changed && frame_dmg.has_value() && frame_dmg->isEmpty() &&
         damage->GetBufferDamage().has_value() &&
         !selected_target_info.has_value()) {
       NOT_SLIMPELLER(compositor_context_->raster_cache().EndFrame());

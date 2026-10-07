@@ -144,9 +144,10 @@ TEST_F(DiffContextTest, FrameDamageSeparatesLogicalAndRasterDamage) {
   EXPECT_EQ(raster_damage->bounds(), frame_damage->bounds());
 }
 
-// An Avio empty, rejected or root-promoted frame becomes the view's last tree
-// without a diff. Diffing a later tree against it must not read the paint
-// region of a removed layer that was never recorded; the frame repaints whole.
+// An accepted Avio empty frame, or a frame on a surface without partial
+// repaint, becomes the view's last tree without a diff. Diffing a later tree
+// against it must not read the paint region of a removed layer that was never
+// recorded; the frame repaints whole.
 TEST_F(DiffContextTest, FrameDamageRepaintsWholeAfterAnUndiffedPreviousTree) {
   const DlISize frame_size(800, 600);
   auto kept = CreateDisplayListLayer(CreateDisplayList(
@@ -189,6 +190,36 @@ TEST_F(DiffContextTest, FrameDamageNarrowsAgainstADiffedPreviousTree) {
   const auto frame_damage = damage.GetFrameDamage();
   ASSERT_TRUE(frame_damage.has_value());
   EXPECT_EQ(frame_damage->bounds(), DlIRect::MakeLTRB(680, 220, 780, 380));
+}
+
+// A root-facts change (Patch 64) makes the whole target stale without changing
+// a pixel. It is catch-up damage on a diffed frame: the buffer repaints whole,
+// the logical damage stays the exact (empty) pixel change, and the tree still
+// records its paint regions as the next frame's baseline.
+TEST_F(DiffContextTest, FrameDamageCatchUpLeavesFrameDamageExact) {
+  const DlISize frame_size(800, 600);
+  auto kept = CreateDisplayListLayer(CreateDisplayList(
+      DlRect::MakeLTRB(20, 220, 120, 380), DlColor(0xFF1EB45A)));
+  LayerTree previous(CreateContainerLayer({kept}), frame_size);
+  FrameDamage initial_damage;
+  initial_damage.ComputeDamage(previous, /*has_raster_cache=*/false,
+                               /*impeller_enabled=*/true);
+  ASSERT_TRUE(previous.has_paint_regions());
+
+  LayerTree current(CreateContainerLayer({kept}), frame_size);
+  FrameDamage damage;
+  damage.SetPreviousLayerTree(&previous);
+  damage.AddAdditionalDamage(DlIRect::MakeSize(frame_size));
+  damage.ComputeDamage(current, /*has_raster_cache=*/false,
+                       /*impeller_enabled=*/true);
+
+  const auto frame_damage = damage.GetFrameDamage();
+  const auto buffer_damage = damage.GetBufferDamage();
+  ASSERT_TRUE(frame_damage.has_value());
+  EXPECT_TRUE(frame_damage->isEmpty());
+  ASSERT_TRUE(buffer_damage.has_value());
+  EXPECT_EQ(buffer_damage->bounds(), DlIRect::MakeSize(frame_size));
+  EXPECT_TRUE(current.has_paint_regions());
 }
 
 }  // namespace testing

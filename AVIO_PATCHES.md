@@ -1380,7 +1380,10 @@ The metadata layer paints original child pixels without an opacity saveLayer,
 including at external alpha zero. Framework composited-layer updates reuse the
 same framework layer and retain child painting. Changing root facts promotes the
 root to a fresh ordinary buffered raster; it does not reuse a held producer BO
-through an unimplemented metadata-only custody shortcut.
+through an unimplemented metadata-only custody shortcut. Since Patch 64 that
+promotion is whole-target catch-up damage on a diffed frame: the buffer is
+rendered whole while the published logical frame damage stays the exact pixel
+change (usually empty).
 
 Nullable root effect opacity means no author. An authored identity opacity is
 an explicit group declaration; its nonzero monotonic declaration ID travels with
@@ -1732,10 +1735,11 @@ Partial repaint diffs each layer tree against the view's previous tree and
 reads the paint region every old layer recorded when it was itself diffed.
 Upstream stores a tree as the previous tree only after a raster that diffed
 it, so every baseline carries those regions. Avio added paths that keep a tree
-as the view's last successful tree without a diff: an empty frame submitted
-before raster (`SubmitAvioEmptyFrame`), a frame rejected for invalid root
-facts, and a frame whose root facts changed (rasterized without
-`FrameDamage`). The next diff then found no region for an old layer. A
+as the view's last successful tree without a diff: an accepted empty frame
+submitted before raster (`SubmitAvioEmptyFrame`), and, until Patch 64, a frame
+whose root facts changed (rasterized without `FrameDamage`). A fresh tree
+rejected before raster is never stored, and a retained tree cannot newly fail
+fact validation. The next diff then found no region for an old layer. A
 removed child reached `DiffContext::AddDamage` with an invalid `PaintRegion`
 and dereferenced null on the raster thread (Shell host SIGSEGV when a new
 window's item views appeared, 2026-10-07); a changed child silently lost its
@@ -1748,4 +1752,46 @@ no previous tree, and the current tree's regions are recorded for the next
 frame. One rule in the damage owner covers every submission path, so a new
 early return cannot reintroduce the hazard. `FrameDamageRepaintsWholeAfterAnUndiffedPreviousTree`
 crashes without the change; `FrameDamageNarrowsAgainstADiffedPreviousTree`
-keeps exact narrow damage after a diffed tree.
+keeps exact narrow damage after a diffed tree. After Patch 64 the remaining
+undiffed baselines are the accepted empty frame and upstream's surfaces without
+partial repaint; both correctly become "no baseline", which matches the host's
+all-slots-unknown and the producer's damage-journal reset after empty content.
+The rule stays a runtime rule, never an assertion: an assertion would fire on
+every empty-to-content transition.
+
+### Patch 64: a root-facts change is whole-target catch-up damage
+
+Patch 56 promotes a root-facts change (item opacity, output ground, ready
+revision, effect declaration) to a freshly rendered buffered generation. It did
+so by skipping `FrameDamage` for that frame. The frame then published no logical
+damage, recorded no paint regions, and became an undiffed baseline: the hazard
+Patch 63 contains by damaging the next frame whole. Reusing the MSAA
+`raster_replaces_whole_target` bit or `FrameDamage::Reset()` before raster
+cannot carry the obligation: `ComputeDamage` clears `Reset`, and `Raster`'s exact
+no-change exit precedes the whole-target branch, so a facts-only frame (an
+empty pixel diff by design) would end as `NoVisualChange` and its facts would
+never reach the producer.
+
+`Rasterizer::DrawToSurfaceUnsafe` now always diffs when partial repaint is
+supported, against the same baseline it compares facts with. A facts change adds
+the whole frame as additional damage, upstream's `existing_damage` idiom and
+the same as a buffer of age 0 in wlroots, KWin and Smithay. Buffer damage is
+therefore never empty, `Raster` resets it itself (Impeller's cost heuristic or
+the multisampled branch) and renders the whole target exactly as before, and
+the frame publishes exact logical damage and records its paint regions. The
+two rasterizer no-change shortcuts outside `Raster` (generic metadata damage
+and the post-raster check) also require unchanged facts. `FrameDamage`,
+`Raster`, the empty path and the baseline storage rules are unchanged: a facts
+change the producer did not accept leaves the old facts in the baseline and is
+detected again at the next opportunity.
+
+Effects: the other pool slots stay exact instead of being poisoned by absent
+frame damage, the producer's damage journal continues, and the frame after a
+fade step is a narrow raster again. `rootFactsOnlyChangeRastersWholeTargetWithExactFrameDamage`,
+`rootFactsOnlyChangeOnMultisampledTargetReportsNoBufferDamage`,
+`frameAfterRootFactsChangeDiffsNarrowly`,
+`rootFactsChangeThenRemovedChildDamagesOnlyItsOldRegion`,
+`rootFactsChangeNotAcceptedIsResentNextOpportunity` and
+`metadataPathRootFactsChangeIsNotNoVisualChange` fail without the change;
+`contentAfterAcceptedEmptyFrameIsWholeDamaged` pins Patch 63's empty-frame rule
+and `FrameDamageCatchUpLeavesFrameDamageExact` pins the damage split.

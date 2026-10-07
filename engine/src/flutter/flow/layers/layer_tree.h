@@ -64,8 +64,9 @@ class LayerTree {
 
   // Whether FrameDamage has diffed this tree, recording the paint region of
   // every layer the diff visited. Only such a tree can be the previous tree of
-  // a later diff. A tree that was submitted without a diff (an empty frame, a
-  // rejected or root-promoted frame) has no paint regions to compare against.
+  // a later diff. A tree that became the view's last tree without a diff (an
+  // accepted Avio empty frame, or a frame on a surface without partial
+  // repaint) has no paint regions to compare against.
   bool has_paint_regions() const { return has_paint_regions_; }
   void set_has_paint_regions() { has_paint_regions_ = true; }
 

@@ -929,6 +929,26 @@ need "an undiffed previous tree repaints the whole frame (test)" \
 need "diff baseline rule is documented" \
   AVIO_PATCHES.md 'Patch 63: a diff baseline is a tree that was diffed'
 
+echo "--- Patch 64: a root-facts change is whole-target catch-up damage ---"
+need "a root-facts change adds whole-frame catch-up damage" \
+  "$F/shell/common/rasterizer.cc" 'damage->AddAdditionalDamage\(DlIRect::MakeSize\(layer_tree.frame_size\(\)\)\)'
+absent_in "a root-facts change never skips the diff" \
+  "$F/shell/common/rasterizer.cc" 'supports_partial_repaint && !root_facts_changed'
+need "facts-only frame rasters whole with exact frame damage (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'rootFactsOnlyChangeRastersWholeTargetWithExactFrameDamage'
+need "facts frame is a diffed baseline (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'frameAfterRootFactsChangeDiffsNarrowly'
+need "removed child after a facts change damages its old region (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'rootFactsChangeThenRemovedChildDamagesOnlyItsOldRegion'
+need "unaccepted facts change is resent (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'rootFactsChangeNotAcceptedIsResentNextOpportunity'
+need "metadata path never treats a facts change as no-change (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'metadataPathRootFactsChangeIsNotNoVisualChange'
+need "catch-up damage leaves frame damage exact (test)" \
+  "$F/flow/diff_context_unittests.cc" 'FrameDamageCatchUpLeavesFrameDamageExact'
+need "root-facts catch-up damage is documented" \
+  AVIO_PATCHES.md 'Patch 64: a root-facts change is whole-target catch-up damage'
+
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"
