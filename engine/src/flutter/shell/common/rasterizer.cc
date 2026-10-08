@@ -986,6 +986,16 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     return DrawSurfaceStatus::kFailed;
   }
 
+  // A hit region is an input claim that travels only with the frame that
+  // carries its pixels. An embedder that cannot deliver it refuses the frame
+  // before anything is acquired; a claim is never silently dropped.
+  if (external_view_embedder_ && layer_tree.root_layer() &&
+      layer_tree.root_layer()->subtree_has_avio_hit_region() &&
+      !external_view_embedder_->SupportsAvioHitRegions()) {
+    external_view_embedder_->RejectAvioFrameFacts(view_id);
+    return DrawSurfaceStatus::kRejected;
+  }
+
   if (external_view_embedder_ &&
       external_view_embedder_->SupportsAvioEmptyFrames()) {
     // Determine the structural paint fact before acquiring either a surface
@@ -1002,6 +1012,14 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     layer_tree.Preroll(*fact_frame, true,
                        DlRect::MakeSize(layer_tree.frame_size()),
                        /*collect_frame_facts=*/true);
+    if (layer_tree.avio_hit_regions().invalid()) {
+      // The claim cannot be described exactly (an unsupported transform, a
+      // malformed rect or too many regions). Fail the frame closed, before a
+      // target exists, rather than publish a derived or truncated claim.
+      fact_frame.reset();
+      external_view_embedder_->RejectAvioFrameFacts(view_id);
+      return DrawSurfaceStatus::kRejected;
+    }
     const bool empty = layer_tree.root_layer() &&
                        layer_tree.root_layer()->paint_bounds().IsEmpty() &&
                        !layer_tree.root_layer()->subtree_has_platform_view() &&
@@ -1014,6 +1032,8 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
       SurfaceFrame::SubmitInfo info;
       info.presentation_time = presentation_time;
       info.avio_frame_facts = frame_facts;
+      // Claims are not paint: an empty revision still carries its hot zones.
+      info.avio_hit_regions = layer_tree.avio_hit_regions();
       if (!external_view_embedder_->SubmitAvioEmptyFrame(view_id, info)) {
         return DrawSurfaceStatus::kRejected;
       }
@@ -1072,16 +1092,19 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     std::optional<DlRegion> eve_frame_damage = std::nullopt;
     // when leaf layer tracing is enabled we wish to repaint the whole frame
     // for accurate performance metrics.
-    // Root facts are not pixels: the metadata layer paints its children
-    // unchanged, so a facts change never changes the diff. A changed revision
-    // must still reach the producer as a freshly rendered buffered generation
-    // (Patch 56), so it makes the whole target stale for this frame. That is
-    // catch-up damage, never a skipped diff: the frame is still diffed
-    // against the accepted baseline, publishes exact logical damage and
-    // records its paint regions for the next frame (Patch 64).
+    // Frame facts are not pixels: the metadata and hit-region layers paint
+    // their children unchanged, so a root-facts or hit-region change never
+    // changes the diff. A changed revision must still reach the producer as a
+    // freshly rendered buffered generation (Patch 56), so it makes the whole
+    // target stale for this frame. That is catch-up damage, never a skipped
+    // diff: the frame is still diffed against the accepted baseline, publishes
+    // exact logical damage and records its paint regions for the next frame
+    // (Patch 64). Both trees' hit sets come from their own facts prerolls.
     const auto* previous_tree = GetLastLayerTree(view_id);
-    const bool root_facts_changed =
-        previous_tree && previous_tree->avio_frame_facts() != frame_facts;
+    const bool frame_facts_changed =
+        previous_tree &&
+        (previous_tree->avio_frame_facts() != frame_facts ||
+         previous_tree->avio_hit_regions() != layer_tree.avio_hit_regions());
     if (framebuffer_info.supports_partial_repaint) {
       bool has_external_view_embedder =
           external_view_embedder_ &&
@@ -1123,7 +1146,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
                 compositor_context_->texture_registry().get());
 
             auto frame_dmg = metadata_damage.GetFrameDamage();
-            if (!root_facts_changed && frame_dmg.has_value() &&
+            if (!frame_facts_changed && frame_dmg.has_value() &&
                 frame_dmg->isEmpty() &&
                 metadata_damage.GetBufferDamage().has_value()) {
               NOT_SLIMPELLER(compositor_context_->raster_cache().EndFrame());
@@ -1144,7 +1167,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
         }
       }
     }
-    if (damage && root_facts_changed) {
+    if (damage && frame_facts_changed) {
       damage->AddAdditionalDamage(DlIRect::MakeSize(layer_tree.frame_size()));
     }
 
@@ -1168,7 +1191,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     // Guard: only skip if buffer_damage also has a value (i.e., Reset()
     // was not called to force a full repaint).
     auto frame_dmg = damage ? damage->GetFrameDamage() : std::nullopt;
-    if (!root_facts_changed && frame_dmg.has_value() && frame_dmg->isEmpty() &&
+    if (!frame_facts_changed && frame_dmg.has_value() && frame_dmg->isEmpty() &&
         damage->GetBufferDamage().has_value() &&
         !selected_target_info.has_value()) {
       NOT_SLIMPELLER(compositor_context_->raster_cache().EndFrame());
@@ -1177,6 +1200,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
 
     SurfaceFrame::SubmitInfo submit_info;
     submit_info.avio_frame_facts = frame_facts;
+    submit_info.avio_hit_regions = layer_tree.avio_hit_regions();
     submit_info.presentation_time = presentation_time;
     submit_info.avio_window_previews = layer_tree.TakeAvioWindowPreviews();
     submit_info.avio_window_previews_invalid =

@@ -16,6 +16,7 @@
 #include "flutter/display_list/skia/dl_sk_canvas.h"
 #include "flutter/flow/avio_compositor_material.h"
 #include "flutter/flow/avio_frame_facts.h"
+#include "flutter/flow/avio_hit_region.h"
 #include "flutter/flow/avio_window_preview.h"
 #include "flutter/fml/macros.h"
 #include "flutter/fml/time/time_point.h"
@@ -138,6 +139,9 @@ class SurfaceFrame {
     std::vector<AvioWindowPreview> avio_window_previews;
     bool avio_window_previews_invalid = false;
     AvioFrameFacts avio_frame_facts;
+    // The complete device-space input claim the frame-facts preroll collected
+    // from this exact layer tree. Inline; copying it never allocates.
+    AvioHitRegionSet avio_hit_regions;
   };
 
   bool Encode();

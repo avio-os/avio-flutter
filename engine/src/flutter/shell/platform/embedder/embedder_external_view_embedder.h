@@ -5,6 +5,7 @@
 #ifndef FLUTTER_SHELL_PLATFORM_EMBEDDER_EMBEDDER_EXTERNAL_VIEW_EMBEDDER_H_
 #define FLUTTER_SHELL_PLATFORM_EMBEDDER_EMBEDDER_EXTERNAL_VIEW_EMBEDDER_H_
 
+#include <array>
 #include <map>
 #include <memory>
 #include <set>
@@ -35,6 +36,16 @@ ConvertAvioWindowPreviewsToEmbedderCoordinates(
     const std::vector<AvioWindowPreview>& previews,
     const DlMatrix& surface_transformation,
     double device_pixel_ratio);
+
+/// Hit regions use the same root surface mapping, then become view-local
+/// logical pixels. Writes the complete ordered set into the caller's inline
+/// |out| without allocating and returns the number of regions written. The
+/// caller passes only a valid set; an invalid one is refused upstream.
+size_t ConvertAvioHitRegionsToEmbedderCoordinates(
+    const AvioHitRegionSet& regions,
+    const DlMatrix& surface_transformation,
+    double device_pixel_ratio,
+    std::array<FlutterAvioHitRegion, FLUTTER_AVIO_MAX_HIT_REGIONS>& out);
 
 /// Everything a frame put on its target, in the physical-pixel space the root
 /// view records in: the view's recorded draw-op bounds unioned with the rects
@@ -89,7 +100,9 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
       bool compositor_materials_invalid,
       const std::vector<FlutterAvioWindowPreview>& window_previews,
       bool window_previews_invalid,
-      const AvioFrameFacts& frame_facts)>;
+      const AvioFrameFacts& frame_facts,
+      const FlutterAvioHitRegion* hit_regions,
+      size_t hit_regions_count)>;
   using SurfaceTransformationCallback = std::function<DlMatrix(void)>;
 
   //----------------------------------------------------------------------------
@@ -172,6 +185,7 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
   bool SupportsMetadataFrameDamageForCurrentFrame() const override;
   bool SupportsAvioEmptyFrames() const override;
   bool SupportsAvioFrameFacts(const AvioFrameFacts& facts) const override;
+  bool SupportsAvioHitRegions() const override;
   bool SubmitAvioEmptyFrame(int64_t view_id,
                             const SurfaceFrame::SubmitInfo& info) override;
   void RejectAvioFrameFacts(int64_t view_id) override;
@@ -224,6 +238,11 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
   const bool avoid_backing_store_cache_;
   const FlutterAvioExtensionFeatures avio_frame_features_;
   AvioFrameFacts pending_frame_facts_;
+  // The device-space claim of the revision being submitted, and the inline
+  // scratch its logical conversion is borrowed from during the callback.
+  AvioHitRegionSet pending_hit_regions_;
+  std::array<FlutterAvioHitRegion, FLUTTER_AVIO_MAX_HIT_REGIONS>
+      hit_region_scratch_{};
   const CreateRenderTargetCallback create_render_target_callback_;
   const AcquireRenderTargetCallback acquire_render_target_callback_;
   const PresentCallback present_callback_;

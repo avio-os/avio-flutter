@@ -15,12 +15,19 @@ inline const char* ValidateAvioFrameFactFeatures(
   constexpr auto kFacts = kFlutterAvioExtensionFeatureEmptyFrame |
                           kFlutterAvioExtensionFeatureItemEffects |
                           kFlutterAvioExtensionFeatureOutputGround |
-                          kFlutterAvioExtensionFeatureReadyContent;
+                          kFlutterAvioExtensionFeatureReadyContent |
+                          kFlutterAvioExtensionFeatureHitRegions;
   constexpr auto kRequired =
       kFlutterAvioExtensionFeatureRootRenderTarget |
       kFlutterAvioExtensionFeatureFrameOpportunityOutcomes;
   if ((features & kFacts) != 0 && (features & kRequired) != kRequired) {
     return "Root frame facts require exact root-target frame opportunities.";
+  }
+  // Only the empty-frame facts preroll collects hit regions, over the whole
+  // frame and before a target is acquired.
+  if ((features & kFlutterAvioExtensionFeatureHitRegions) != 0 &&
+      (features & kFlutterAvioExtensionFeatureEmptyFrame) == 0) {
+    return "Hit regions require empty frames.";
   }
   return nullptr;
 }

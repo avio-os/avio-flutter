@@ -1244,6 +1244,38 @@ TEST_F(EmbedderTest, ExactFrameOpportunityContractCanBeNegotiated) {
   EXPECT_TRUE(engine.is_valid());
 }
 
+// Hit regions are collected only by the empty-frame facts preroll, so a host
+// cannot negotiate them without empty frames; with them, ABI 10 launches.
+static bool LaunchWithHitRegions(EmbedderTestContextSoftware& context,
+                                 bool empty_frames) {
+  EmbedderConfigBuilder builder(context);
+  builder.SetSurface(DlISize(800, 600));
+  builder.SetRootRenderTargetCompositor(
+      false, kFlutterAvioExtensionFeaturePerDisplayVsync |
+                 kFlutterAvioExtensionFeatureRootRenderTarget |
+                 kFlutterAvioExtensionFeatureExplicitRenderCompletion |
+                 kFlutterAvioExtensionFeatureExactVsyncCancellation |
+                 kFlutterAvioExtensionFeatureFrameOpportunityOutcomes |
+                 kFlutterAvioExtensionFeatureRenderDeadline |
+                 kFlutterAvioExtensionFeatureHitRegions |
+                 (empty_frames ? kFlutterAvioExtensionFeatureEmptyFrame : 0u));
+  builder.GetProjectArgs().vsync_for_display_callback =
+      [](void*, intptr_t, FlutterEngineDisplayId) {};
+  builder.GetCompositor().frame_opportunity_outcome_callback =
+      [](const FlutterFrameOpportunityOutcomeInfo*) {};
+  return builder.LaunchEngine().is_valid();
+}
+
+TEST_F(EmbedderTest, HitRegionsWithoutEmptyFramesFailBeforeLaunch) {
+  EXPECT_FALSE(LaunchWithHitRegions(
+      GetEmbedderContext<EmbedderTestContextSoftware>(), false));
+}
+
+TEST_F(EmbedderTest, HitRegionsCanBeNegotiatedWithEmptyFrames) {
+  EXPECT_TRUE(LaunchWithHitRegions(
+      GetEmbedderContext<EmbedderTestContextSoftware>(), true));
+}
+
 TEST_F(EmbedderTest, PerViewVisibilityCanBeNegotiated) {
   auto& context = GetEmbedderContext<EmbedderTestContextSoftware>();
   EmbedderConfigBuilder builder(context);

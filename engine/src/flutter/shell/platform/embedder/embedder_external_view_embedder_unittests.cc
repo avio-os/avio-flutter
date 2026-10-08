@@ -82,6 +82,42 @@ TEST(EmbedderExternalViewEmbedderTest,
   EXPECT_EQ(converted[0].opacity, 0.5);
 }
 
+// Hit regions leave the engine in device pixels and reach the host in
+// view-local logical pixels, divided by the DPR exactly once, in paint order.
+TEST(EmbedderExternalViewEmbedderTest,
+     HitRegionCoordinatesApplyDprExactlyOnceAndKeepOrderAndKind) {
+  AvioHitRegionSet regions;
+  regions.Add({DlRect::MakeLTRB(10, 20, 110, 45), AvioHitRegionKind::kClaim});
+  regions.Add(
+      {DlRect::MakeLTRB(0, 0, 2000, 1250), AvioHitRegionKind::kOutputCapture});
+  std::array<FlutterAvioHitRegion, FLUTTER_AVIO_MAX_HIT_REGIONS> out{};
+
+  ASSERT_EQ(ConvertAvioHitRegionsToEmbedderCoordinates(regions, DlMatrix(),
+                                                       1.25, out),
+            2u);
+  EXPECT_EQ(out[0].struct_size, sizeof(FlutterAvioHitRegion));
+  EXPECT_DOUBLE_EQ(out[0].rect.left, 8.0);
+  EXPECT_DOUBLE_EQ(out[0].rect.top, 16.0);
+  EXPECT_DOUBLE_EQ(out[0].rect.right, 88.0);
+  EXPECT_DOUBLE_EQ(out[0].rect.bottom, 36.0);
+  EXPECT_EQ(out[0].kind, kFlutterAvioHitRegionKindClaim);
+  EXPECT_DOUBLE_EQ(out[1].rect.right, 1600.0);
+  EXPECT_DOUBLE_EQ(out[1].rect.bottom, 1000.0);
+  EXPECT_EQ(out[1].kind, kFlutterAvioHitRegionKindOutputCapture);
+
+  ASSERT_EQ(
+      ConvertAvioHitRegionsToEmbedderCoordinates(regions, DlMatrix(), 2.0, out),
+      2u);
+  EXPECT_DOUBLE_EQ(out[0].rect.left, 5.0);
+  EXPECT_DOUBLE_EQ(out[0].rect.top, 10.0);
+  EXPECT_DOUBLE_EQ(out[0].rect.right, 55.0);
+  EXPECT_DOUBLE_EQ(out[0].rect.bottom, 22.5);
+
+  EXPECT_EQ(ConvertAvioHitRegionsToEmbedderCoordinates(AvioHitRegionSet(),
+                                                       DlMatrix(), 2.0, out),
+            0u);
+}
+
 AvioCompositorMaterial MakeMaterial(uint64_t id, const DlRect& rect) {
   return AvioCompositorMaterial{
       .id = id,
@@ -165,7 +201,8 @@ TEST(EmbedderExternalViewEmbedderTest,
          const FlutterBackingStorePresentInfo*,
          const std::vector<FlutterAvioCompositorMaterial>&, bool,
          const std::vector<FlutterAvioWindowPreview>&, bool,
-         const AvioFrameFacts&) { return true; });
+         const AvioFrameFacts&, const FlutterAvioHitRegion*,
+         size_t) { return true; });
   ExternalViewEmbedder& boundary = embedder;
   boundary.BeginFrame(nullptr, nullptr);
   boundary.SetFrameOpportunity(FrameOpportunityContext{
@@ -213,7 +250,8 @@ TEST(EmbedderExternalViewEmbedderTest,
           const std::vector<FlutterAvioCompositorMaterial>& materials,
           bool invalid_materials,
           const std::vector<FlutterAvioWindowPreview>& previews,
-          bool invalid_previews, const AvioFrameFacts& facts) {
+          bool invalid_previews, const AvioFrameFacts& facts,
+          const FlutterAvioHitRegion* hit_regions, size_t hit_regions_count) {
         ++presentations;
         statuses.push_back(status);
         EXPECT_EQ(view, 29);
@@ -226,6 +264,9 @@ TEST(EmbedderExternalViewEmbedderTest,
         EXPECT_FALSE(invalid_materials || invalid_previews);
         EXPECT_EQ(facts.item_opacity, 0.25);
         EXPECT_TRUE(facts.ground_authored);
+        // A revision that authored no claim claims nothing.
+        EXPECT_EQ(hit_regions, nullptr);
+        EXPECT_EQ(hit_regions_count, 0u);
         return accept;
       },
       kFlutterAvioExtensionFeatureEmptyFrame |
@@ -275,9 +316,12 @@ TEST(EmbedderExternalViewEmbedderTest,
           const FlutterBackingStorePresentInfo*,
           const std::vector<FlutterAvioCompositorMaterial>&, bool,
           const std::vector<FlutterAvioWindowPreview>&, bool,
-          const AvioFrameFacts& facts) {
+          const AvioFrameFacts& facts, const FlutterAvioHitRegion* hit_regions,
+          size_t hit_regions_count) {
         ++presentations;
         EXPECT_EQ(status, kFlutterPresentRenderTargetStatusInvalidFrameFacts);
+        EXPECT_EQ(hit_regions, nullptr);
+        EXPECT_EQ(hit_regions_count, 0u);
         EXPECT_EQ(target, nullptr);
         EXPECT_FALSE(facts.HasMetadata());
         return false;
@@ -305,6 +349,127 @@ TEST(EmbedderExternalViewEmbedderTest,
   }
   EXPECT_EQ(acquisitions, 0u);
   EXPECT_EQ(presentations, 4u);
+}
+
+using PresentedHitRegions = std::vector<FlutterAvioHitRegion>;
+
+// A root-target embedder that records every terminal it reports.
+struct RecordingRootTarget {
+  explicit RecordingRootTarget(FlutterAvioExtensionFeatures features)
+      : embedder(
+            kFlutterCompositorModeRootRenderTarget,
+            /*selected_target_damage=*/true,
+            /*avoid_backing_store_cache=*/true,
+            /*create_render_target_callback=*/nullptr,
+            [this](GrDirectContext*,
+                   const std::shared_ptr<impeller::AiksContext>&,
+                   const FlutterBackingStoreConfig&,
+                   FlutterFrameOpportunityId,
+                   FlutterEngineDisplayId) {
+              ++acquisitions;
+              return EmbedderExternalViewEmbedder::RenderTargetAcquisition{};
+            },
+            /*present_callback=*/nullptr,
+            [this](FlutterViewId,
+                   FlutterFrameOpportunityId,
+                   FlutterEngineDisplayId,
+                   FlutterPresentRenderTargetStatus status,
+                   const FlutterBackingStore*,
+                   const FlutterBackingStorePresentInfo*,
+                   const std::vector<FlutterAvioCompositorMaterial>&,
+                   bool,
+                   const std::vector<FlutterAvioWindowPreview>&,
+                   bool,
+                   const AvioFrameFacts&,
+                   const FlutterAvioHitRegion* regions,
+                   size_t count) {
+              statuses.push_back(status);
+              EXPECT_EQ(regions == nullptr, count == 0u);
+              hit_regions.emplace_back(regions, regions + count);
+              return true;
+            },
+            features) {}
+
+  // Submits one empty revision for view 29 at |dpr|.
+  bool SubmitEmpty(const AvioHitRegionSet& regions, double dpr) {
+    ExternalViewEmbedder& boundary = embedder;
+    boundary.BeginFrame(nullptr, nullptr);
+    boundary.SetFrameOpportunity(FrameOpportunityContext{
+        .id = ++opportunity, .display_id = 11, .target_ids = {29}});
+    boundary.PrepareFlutterView(DlISize(2000, 1250), dpr);
+    SurfaceFrame::SubmitInfo info;
+    info.avio_hit_regions = regions;
+    return boundary.SubmitAvioEmptyFrame(29, info);
+  }
+
+  EmbedderExternalViewEmbedder embedder;
+  size_t acquisitions = 0;
+  uint64_t opportunity = 0;
+  std::vector<FlutterPresentRenderTargetStatus> statuses;
+  std::vector<PresentedHitRegions> hit_regions;
+};
+
+constexpr auto kEmptyFrameWithHitRegions =
+    kFlutterAvioExtensionFeatureEmptyFrame |
+    kFlutterAvioExtensionFeatureHitRegions;
+
+// An empty revision (a hot zone with no pixels) still carries its complete
+// claim, in logical pixels, in the same callback as the EmptyContent terminal.
+TEST(EmbedderExternalViewEmbedderTest,
+     EmptyContentCarriesItsHitRegionsInLogicalPixels) {
+  RecordingRootTarget target(kEmptyFrameWithHitRegions);
+  AvioHitRegionSet regions;
+  regions.Add(
+      {DlRect::MakeLTRB(0, 1225, 2000, 1250), AvioHitRegionKind::kClaim});
+  ASSERT_TRUE(target.SubmitEmpty(regions, 1.25));
+
+  ASSERT_EQ(target.statuses.size(), 1u);
+  EXPECT_EQ(target.statuses[0], kFlutterPresentRenderTargetStatusEmptyContent);
+  ASSERT_EQ(target.hit_regions[0].size(), 1u);
+  const auto& zone = target.hit_regions[0][0];
+  EXPECT_EQ(zone.struct_size, sizeof(FlutterAvioHitRegion));
+  EXPECT_DOUBLE_EQ(zone.rect.left, 0.0);
+  EXPECT_DOUBLE_EQ(zone.rect.top, 980.0);
+  EXPECT_DOUBLE_EQ(zone.rect.right, 1600.0);
+  EXPECT_DOUBLE_EQ(zone.rect.bottom, 1000.0);
+  EXPECT_EQ(zone.kind, kFlutterAvioHitRegionKindClaim);
+  EXPECT_EQ(target.acquisitions, 0u);
+}
+
+// A claim the host did not negotiate, or a set the frame could not describe
+// exactly, is refused as invalid frame facts. The refusal carries no claim.
+TEST(EmbedderExternalViewEmbedderTest,
+     EmptyContentRefusesUnnegotiatedOrInvalidHitRegions) {
+  AvioHitRegionSet claim;
+  claim.Add({DlRect::MakeLTRB(0, 0, 10, 10), AvioHitRegionKind::kClaim});
+  AvioHitRegionSet invalid = claim;
+  invalid.Invalidate();
+
+  RecordingRootTarget unnegotiated(kFlutterAvioExtensionFeatureEmptyFrame);
+  EXPECT_FALSE(static_cast<ExternalViewEmbedder&>(unnegotiated.embedder)
+                   .SupportsAvioHitRegions());
+  EXPECT_FALSE(unnegotiated.SubmitEmpty(claim, 1.0));
+  // Without the feature an empty claim set is still an ordinary empty frame.
+  EXPECT_TRUE(unnegotiated.SubmitEmpty(AvioHitRegionSet(), 1.0));
+
+  RecordingRootTarget negotiated(kEmptyFrameWithHitRegions);
+  EXPECT_TRUE(static_cast<ExternalViewEmbedder&>(negotiated.embedder)
+                  .SupportsAvioHitRegions());
+  EXPECT_FALSE(negotiated.SubmitEmpty(invalid, 1.0));
+
+  EXPECT_EQ(unnegotiated.statuses,
+            (std::vector<FlutterPresentRenderTargetStatus>{
+                kFlutterPresentRenderTargetStatusInvalidFrameFacts,
+                kFlutterPresentRenderTargetStatusEmptyContent}));
+  EXPECT_EQ(negotiated.statuses,
+            (std::vector<FlutterPresentRenderTargetStatus>{
+                kFlutterPresentRenderTargetStatusInvalidFrameFacts}));
+  for (const auto* target : {&unnegotiated, &negotiated}) {
+    for (const auto& presented : target->hit_regions) {
+      EXPECT_TRUE(presented.empty());
+    }
+    EXPECT_EQ(target->acquisitions, 0u);
+  }
 }
 
 }  // namespace

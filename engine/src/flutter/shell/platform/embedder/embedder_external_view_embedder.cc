@@ -39,6 +39,11 @@ bool EmbedderExternalViewEmbedder::SupportsAvioFrameFacts(
           (avio_frame_features_ & kFlutterAvioExtensionFeatureReadyContent));
 }
 
+bool EmbedderExternalViewEmbedder::SupportsAvioHitRegions() const {
+  return SupportsAvioEmptyFrames() &&
+         (avio_frame_features_ & kFlutterAvioExtensionFeatureHitRegions) != 0;
+}
+
 bool EmbedderExternalViewEmbedder::SubmitAvioEmptyFrame(
     int64_t view_id,
     const SurfaceFrame::SubmitInfo& info) {
@@ -48,6 +53,8 @@ bool EmbedderExternalViewEmbedder::SubmitAvioEmptyFrame(
   if (!SupportsAvioEmptyFrames() ||
       !SupportsAvioFrameFacts(info.avio_frame_facts) ||
       info.avio_frame_facts.ready_content_revision.has_value() ||
+      info.avio_hit_regions.invalid() ||
+      (!info.avio_hit_regions.empty() && !SupportsAvioHitRegions()) ||
       !info.avio_compositor_materials.empty() ||
       !info.avio_window_previews.empty() ||
       info.avio_compositor_materials_invalid ||
@@ -57,6 +64,7 @@ bool EmbedderExternalViewEmbedder::SubmitAvioEmptyFrame(
     return false;
   }
   pending_frame_facts_ = info.avio_frame_facts;
+  pending_hit_regions_ = info.avio_hit_regions;
   const bool accepted = CompleteRootRenderTarget(
       view_id, kFlutterPresentRenderTargetStatusEmptyContent);
   if (accepted) {
@@ -72,6 +80,7 @@ bool EmbedderExternalViewEmbedder::SubmitAvioEmptyFrame(
 
 void EmbedderExternalViewEmbedder::RejectAvioFrameFacts(int64_t view_id) {
   pending_frame_facts_ = {};
+  pending_hit_regions_.Clear();
   if (compositor_mode_ == kFlutterCompositorModeRootRenderTarget) {
     CompleteRootRenderTarget(
         view_id, kFlutterPresentRenderTargetStatusInvalidFrameFacts);
@@ -171,6 +180,7 @@ void EmbedderExternalViewEmbedder::PrepareFlutterView(
     double device_pixel_ratio) {
   Reset();
   pending_frame_facts_ = {};
+  pending_hit_regions_.Clear();
 
   pending_frame_size_ = frame_size;
   pending_device_pixel_ratio_ = device_pixel_ratio;
@@ -1105,12 +1115,36 @@ ConvertAvioWindowPreviewsToEmbedderCoordinates(
   return result;
 }
 
+size_t ConvertAvioHitRegionsToEmbedderCoordinates(
+    const AvioHitRegionSet& regions,
+    const DlMatrix& transform,
+    double device_pixel_ratio,
+    std::array<FlutterAvioHitRegion, FLUTTER_AVIO_MAX_HIT_REGIONS>& out) {
+  static_assert(kMaxAvioHitRegionsPerFrame == FLUTTER_AVIO_MAX_HIT_REGIONS);
+  static_assert(static_cast<int>(AvioHitRegionKind::kClaim) ==
+                kFlutterAvioHitRegionKindClaim);
+  static_assert(static_cast<int>(AvioHitRegionKind::kOutputCapture) ==
+                kFlutterAvioHitRegionKindOutputCapture);
+  FML_DCHECK(!regions.invalid());
+  const double scale = device_pixel_ratio > 0 ? 1.0 / device_pixel_ratio : 1.0;
+  size_t count = 0;
+  for (const auto& region : regions) {
+    const auto rect = region.rect.TransformAndClipBounds(transform);
+    out[count++] = {sizeof(FlutterAvioHitRegion),
+                    {rect.GetLeft() * scale, rect.GetTop() * scale,
+                     rect.GetRight() * scale, rect.GetBottom() * scale},
+                    static_cast<FlutterAvioHitRegionKind>(region.kind)};
+  }
+  return count;
+}
+
 void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
     int64_t flutter_view_id,
     GrDirectContext* context,
     const std::shared_ptr<impeller::AiksContext>& aiks_context,
     std::unique_ptr<SurfaceFrame> frame) {
   pending_frame_facts_ = frame->submit_info().avio_frame_facts;
+  pending_hit_regions_ = frame->submit_info().avio_hit_regions;
   // The unordered_map render_target_cache creates a new entry if the view ID is
   // unrecognized.
   EmbedderRenderTargetCache& render_target_cache =
@@ -1169,6 +1203,19 @@ void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
             ? pending_root_render_target_->GetBackingStore()
             : nullptr,
         nullptr, &compositor_materials, false, &window_previews, true);
+    ResetPendingRootRenderTarget();
+    frame->Submit();
+    return;
+  }
+  if (pending_hit_regions_.invalid() ||
+      (!pending_hit_regions_.empty() && !SupportsAvioHitRegions())) {
+    // The rasterizer refuses these before acquisition; a set that still
+    // arrives here is never delivered derived or truncated.
+    CompleteRootRenderTarget(
+        flutter_view_id, kFlutterPresentRenderTargetStatusInvalidFrameFacts,
+        pending_root_render_target_
+            ? pending_root_render_target_->GetBackingStore()
+            : nullptr);
     ResetPendingRootRenderTarget();
     frame->Submit();
     return;
@@ -1432,6 +1479,17 @@ bool EmbedderExternalViewEmbedder::CompleteRootRenderTarget(
     bool window_previews_invalid) {
   static const std::vector<FlutterAvioCompositorMaterial> kNoMaterials;
   static const std::vector<FlutterAvioWindowPreview> kNoPreviews;
+  // Only a revision the host may bind carries a claim: Presented pixels or
+  // EmptyContent. Every refusal carries none.
+  const bool carries_revision =
+      status == kFlutterPresentRenderTargetStatusPresented ||
+      status == kFlutterPresentRenderTargetStatusEmptyContent;
+  const size_t hit_regions_count =
+      carries_revision
+          ? ConvertAvioHitRegionsToEmbedderCoordinates(
+                pending_hit_regions_, pending_surface_transformation_,
+                pending_device_pixel_ratio_, hit_region_scratch_)
+          : 0u;
   const bool accepted = present_render_target_callback_(
       flutter_view_id,
       pending_frame_opportunity_.has_value() ? pending_frame_opportunity_->id
@@ -1448,7 +1506,9 @@ bool EmbedderExternalViewEmbedder::CompleteRootRenderTarget(
               status == kFlutterPresentRenderTargetStatusNoVisualChange ||
               status == kFlutterPresentRenderTargetStatusEmptyContent
           ? pending_frame_facts_
-          : AvioFrameFacts{});
+          : AvioFrameFacts{},
+      hit_regions_count ? hit_region_scratch_.data() : nullptr,
+      hit_regions_count);
   RootRenderTargetResult result = RootRenderTargetResult::kRejected;
   if (accepted) {
     switch (status) {

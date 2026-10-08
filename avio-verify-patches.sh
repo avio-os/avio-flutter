@@ -75,9 +75,9 @@ echo "--- Exact frame opportunities ---"
 need "exact opportunity feature negotiation" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureFrameOpportunityOutcomes'
-need "Avio ABI extension version (v9 exact root frame facts)" \
+need "Avio ABI extension version (v10 frame-carried hit regions)" \
   $F/shell/platform/embedder/embedder.h \
-  'FLUTTER_AVIO_EXTENSION_VERSION 9u'
+  'FLUTTER_AVIO_EXTENSION_VERSION 10u'
 need "render-deadline semantic feature" \
   $F/shell/platform/embedder/embedder.h \
   'kFlutterAvioExtensionFeatureRenderDeadline'
@@ -739,7 +739,7 @@ need "empty path releases cached root custody" \
 need "exact empty terminal and next-target regression" \
   "$F/shell/platform/embedder/embedder_external_view_embedder_unittests.cc" 'EmptyRootReportsOneExactFrameWithoutTargetAndTransitionsNormally'
 need "root facts force ordinary raster on changed revision" \
-  "$F/shell/common/rasterizer.cc" 'root_facts_changed'
+  "$F/shell/common/rasterizer.cc" 'frame_facts_changed'
 need "bufferless surface/target regression" \
   "$F/shell/common/rasterizer_unittests.cc" 'EmptyRootSkipsSurfaceAndTargetThenContentAcquiresNormally'
 need "bounded logical split ground" \
@@ -957,7 +957,7 @@ echo "--- Patch 64: a root-facts change is whole-target catch-up damage ---"
 need "a root-facts change adds whole-frame catch-up damage" \
   "$F/shell/common/rasterizer.cc" 'damage->AddAdditionalDamage\(DlIRect::MakeSize\(layer_tree.frame_size\(\)\)\)'
 absent_in "a root-facts change never skips the diff" \
-  "$F/shell/common/rasterizer.cc" 'supports_partial_repaint && !root_facts_changed'
+  "$F/shell/common/rasterizer.cc" 'supports_partial_repaint && !(root|frame)_facts_changed'
 need "facts-only frame rasters whole with exact frame damage (test)" \
   "$F/shell/common/rasterizer_unittests.cc" 'rootFactsOnlyChangeRastersWholeTargetWithExactFrameDamage'
 need "facts frame is a diffed baseline (test)" \
@@ -994,6 +994,32 @@ need "retained dart:ui claims follow their new parent (test)" \
   "$F/lib/ui/compositing/avio_hit_region_scene_builder_unittests.cc" 'AvioHitRegionSceneBuilderCollectsRetainedClaims'
 need "frame-collected hit regions are documented" \
   AVIO_PATCHES.md 'Patch 65: shell hit regions are collected from the frame they describe'
+
+echo "--- Patch 66: embedder ABI 10 delivers hit regions with their revision ---"
+need "hit-region feature bit" \
+  "$F/shell/platform/embedder/embedder.h" 'kFlutterAvioExtensionFeatureHitRegions 0x0000000000080000ULL'
+need "hit regions are appended to the root-target present info" \
+  "$F/shell/platform/embedder/embedder.h" 'size_t hit_regions_count;'
+need "hit regions require empty frames" \
+  "$F/shell/platform/embedder/avio_frame_facts.h" 'Hit regions require empty frames'
+need "an undeliverable claim is refused before acquisition" \
+  "$F/shell/common/rasterizer.cc" 'SupportsAvioHitRegions\(\)'
+need "an invalid hit set fails the frame closed" \
+  "$F/shell/common/rasterizer.cc" 'avio_hit_regions\(\).invalid\(\)'
+need "a hit-set change is a frame-facts change" \
+  "$F/shell/common/rasterizer.cc" 'previous_tree->avio_hit_regions\(\) != layer_tree.avio_hit_regions\(\)'
+need "hit regions convert to logical pixels without allocating" \
+  "$F/shell/platform/embedder/embedder_external_view_embedder.cc" 'ConvertAvioHitRegionsToEmbedderCoordinates'
+need "hit-only change is not no-change (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'hitRegionOnlyChangeIsNotNoVisualChange'
+need "invalid hit set is refused before acquisition (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'invalidHitRegionSetIsRejectedBeforeTargetAcquisition'
+need "empty content carries its hit regions (test)" \
+  "$F/shell/platform/embedder/embedder_external_view_embedder_unittests.cc" 'EmptyContentCarriesItsHitRegionsInLogicalPixels'
+need "hit-region negotiation (test)" \
+  "$F/shell/platform/embedder/tests/embedder_unittests.cc" 'HitRegionsWithoutEmptyFramesFailBeforeLaunch'
+need "frame-carried hit-region ABI is documented" \
+  AVIO_PATCHES.md 'Patch 66: embedder ABI 10 delivers hit regions with their revision'
 
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"

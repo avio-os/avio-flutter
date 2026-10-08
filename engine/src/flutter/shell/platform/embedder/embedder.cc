@@ -202,7 +202,8 @@ static constexpr FlutterAvioExtensionFeatures kAvioSupportedFeatures =
     kFlutterAvioExtensionFeatureEmptyFrame |
     kFlutterAvioExtensionFeatureItemEffects |
     kFlutterAvioExtensionFeatureOutputGround |
-    kFlutterAvioExtensionFeatureReadyContent
+    kFlutterAvioExtensionFeatureReadyContent |
+    kFlutterAvioExtensionFeatureHitRegions
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
     | kFlutterAvioExtensionFeatureResourceLifecycleConfig
 #endif
@@ -2289,7 +2290,8 @@ InferExternalViewEmbedderFromArgs(
            (kFlutterAvioExtensionFeatureEmptyFrame |
             kFlutterAvioExtensionFeatureItemEffects |
             kFlutterAvioExtensionFeatureOutputGround |
-            kFlutterAvioExtensionFeatureReadyContent)) != 0) {
+            kFlutterAvioExtensionFeatureReadyContent |
+            kFlutterAvioExtensionFeatureHitRegions)) != 0) {
         return fml::Status(
             fml::StatusCode::kInvalidArgument,
             "Root frame facts require root-target compositor mode.");
@@ -2436,7 +2438,8 @@ InferExternalViewEmbedderFromArgs(
             const FlutterBackingStorePresentInfo* backing_store_present_info,
             const auto& compositor_materials, bool compositor_materials_invalid,
             const auto& window_previews, bool window_previews_invalid,
-            const flutter::AvioFrameFacts& frame_facts) {
+            const flutter::AvioFrameFacts& frame_facts,
+            const FlutterAvioHitRegion* hit_regions, size_t hit_regions_count) {
           TRACE_EVENT0("flutter", "FlutterCompositorPresentRenderTarget");
           const flutter::EmbedderAvioFrameFacts facts(frame_facts);
           FlutterPresentRenderTargetInfo info = {
@@ -2457,6 +2460,8 @@ InferExternalViewEmbedderFromArgs(
               .item_effect = facts.effect(),
               .output_ground = facts.ground(),
               .ready_content = facts.ready_content(),
+              .hit_regions = hit_regions,
+              .hit_regions_count = hit_regions_count,
           };
           if (frame_opportunity_registry) {
             if (opportunity_id == 0 ||

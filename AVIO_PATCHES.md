@@ -1905,3 +1905,57 @@ versus raster prerolls and diff damage.
 `AvioHitRegionSceneBuilderCollectsRetainedClaims` (ui_unittests) covers the
 `dart:ui` path, retained subtrees under a moved parent, a disabled update of
 the same engine layer and Dart-side rect validation.
+
+### Patch 66: embedder ABI 10 delivers hit regions with their revision
+
+Patch 65 collects a frame's hit regions in the frame-facts preroll; this patch
+hands them to the host in the same terminal callback as the content they
+describe. `FLUTTER_AVIO_EXTENSION_VERSION` is 10. The new feature
+`kFlutterAvioExtensionFeatureHitRegions` (`0x80000`) is a root frame fact: it
+requires `RootRenderTarget` and `FrameOpportunityOutcomes` like the other facts,
+and also `EmptyFrame`, because only the empty-frame facts preroll collects the
+set, over the whole frame and before a target is acquired. Generic compositor
+mode refuses it.
+
+`FlutterAvioHitRegion` is `{struct_size, FlutterRect rect, kind}` with kinds
+`Claim` and `OutputCapture`; `FLUTTER_AVIO_MAX_HIT_REGIONS` is 64, equal to
+`kMaxAvioHitRegionsPerFrame`. `FlutterPresentRenderTargetInfo` appends
+`hit_regions` and `hit_regions_count`: the complete ordered claim of the exact
+revision, borrowed for the callback, valid for `Presented` and `EmptyContent`
+(zero regions means the revision claims nothing) and null/0 for every other
+status. There is no invalid flag: a set the host could not trust never reaches
+it. Rects are view-local logical pixels: the embedder applies the root surface
+transformation and divides by the device pixel ratio once, into an inline
+scratch array owned by the external view embedder, so delivery never allocates
+(the window-preview conversion, without its heap vector).
+
+The rasterizer is the single admission point and refuses before
+`AcquireRootRenderTarget`, through `RejectAvioFrameFacts` and
+`InvalidFrameFacts`:
+
+- a layer tree whose root subtree carries any hit-region layer (enabled or
+  not) when the embedder does not deliver hit regions, so a claim is never
+  silently dropped;
+- a set the facts preroll invalidated (a transform that is not axis-aligned, a
+  malformed rect, or a 65th region): the frame fails closed rather than claim a
+  derived or truncated set.
+
+Claims are not paint: a tree holding only a hot zone stays `EmptyContent` and
+`SubmitAvioEmptyFrame` carries its set. A hit-set change is a frame-facts change
+(`frame_facts_changed` = root facts differ or the order-exact hit sets differ)
+at both no-change shortcuts and the catch-up, so an enabled flip over retained
+pixels is a fresh buffered generation with exact, empty logical damage
+(Patch 56 and 64), never `NoVisualChange`. The external view embedder re-checks
+the set at both submission edges as it does the other sidecars.
+
+`hitRegionOnlyChangeIsNotNoVisualChange` and
+`invalidHitRegionSetIsRejectedBeforeTargetAcquisition` (shell_unittests) fail
+without the change. `hitRegionOnlyChangeOnRootTargetCarriesTheNewClaim`,
+`hitRegionTravelsWithThePixelsItsAncestorMoved`,
+`hotZoneOnlyTreeIsEmptyContentCarryingItsClaim` and
+`hitRegionWithoutTheNegotiatedFeatureIsRejected` cover delivery and refusal;
+`HitRegionCoordinatesApplyDprExactlyOnceAndKeepOrderAndKind` (DPR 1.25 and 2.0),
+`EmptyContentCarriesItsHitRegionsInLogicalPixels` and
+`EmptyContentRefusesUnnegotiatedOrInvalidHitRegions` cover the embedder;
+`HitRegionsWithoutEmptyFramesFailBeforeLaunch` and
+`HitRegionsCanBeNegotiatedWithEmptyFrames` cover negotiation.

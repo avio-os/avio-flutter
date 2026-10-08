@@ -7,6 +7,7 @@
 #include "flow/surface_frame.h"
 #include "flutter/shell/common/rasterizer.h"
 
+#include <initializer_list>
 #include <memory>
 #include <optional>
 
@@ -14,7 +15,9 @@
 #include "flutter/flow/frame_timings.h"
 #include "flutter/flow/layers/avio_compositor_material_layer.h"
 #include "flutter/flow/layers/avio_frame_metadata_layer.h"
+#include "flutter/flow/layers/avio_hit_region_layer.h"
 #include "flutter/flow/layers/display_list_layer.h"
+#include "flutter/flow/layers/transform_layer.h"
 #include "flutter/fml/synchronization/count_down_latch.h"
 #include "flutter/fml/time/time_point.h"
 #include "flutter/shell/common/thread_host.h"
@@ -101,6 +104,7 @@ class MockSurface : public Surface {
 class MockExternalViewEmbedder : public ExternalViewEmbedder {
  public:
   MOCK_METHOD(bool, SupportsAvioEmptyFrames, (), (const, override));
+  MOCK_METHOD(bool, SupportsAvioHitRegions, (), (const, override));
   MOCK_METHOD(bool,
               SupportsAvioFrameFacts,
               (const AvioFrameFacts&),
@@ -476,6 +480,7 @@ class RootFactsHarness {
   struct Submitted {
     std::optional<DlRegion> frame_damage;
     std::optional<DlRegion> buffer_damage;
+    AvioHitRegionSet hit_regions;
   };
   using Acquisition = ExternalViewEmbedder::RootRenderTargetAcquisition;
   using Result = ExternalViewEmbedder::RootRenderTargetResult;
@@ -487,7 +492,8 @@ class RootFactsHarness {
   // embedder reports metadata damage.
   RootFactsHarness(const SurfaceFrame::FramebufferInfo& target,
                    bool selected,
-                   bool empty_frames = false)
+                   bool empty_frames = false,
+                   bool hit_regions = false)
       : threads_("avio.root_facts",
                  ThreadHost::Type::kPlatform | ThreadHost::Type::kRaster |
                      ThreadHost::Type::kIo | ThreadHost::Type::kUi),
@@ -505,7 +511,13 @@ class RootFactsHarness {
     ON_CALL(*embedder_, SupportsAvioEmptyFrames())
         .WillByDefault(Return(empty_frames));
     ON_CALL(*embedder_, SupportsAvioFrameFacts(_)).WillByDefault(Return(true));
-    ON_CALL(*embedder_, SubmitAvioEmptyFrame(_, _)).WillByDefault(Return(true));
+    ON_CALL(*embedder_, SupportsAvioHitRegions())
+        .WillByDefault(Return(hit_regions));
+    ON_CALL(*embedder_, SubmitAvioEmptyFrame(_, _))
+        .WillByDefault([this](int64_t, const SurfaceFrame::SubmitInfo& info) {
+          empty_submitted.push_back(info.avio_hit_regions);
+          return true;
+        });
     ON_CALL(*embedder_, AcquireRootRenderTarget(kImplicitViewId, _, _))
         .WillByDefault([target, selected](auto...) {
           return selected ? std::make_optional(target) : std::nullopt;
@@ -519,7 +531,8 @@ class RootFactsHarness {
                               const std::shared_ptr<impeller::AiksContext>&,
                               std::unique_ptr<SurfaceFrame> frame) {
           submitted.push_back({frame->submit_info().frame_damage,
-                               frame->submit_info().buffer_damage});
+                               frame->submit_info().buffer_damage,
+                               frame->submit_info().avio_hit_regions});
         });
     auto surface = std::make_unique<NiceMock<MockSurface>>();
     const auto surface_info =
@@ -594,8 +607,24 @@ class RootFactsHarness {
   }
   const LayerTree* baseline() const { return baseline_; }
   bool BaselineHasPaintRegions() const { return baseline_has_paint_regions_; }
+  MockExternalViewEmbedder& embedder() { return *embedder_; }
+
+  // A hit-region layer claiming |rect| around |children|.
+  static std::shared_ptr<Layer> Claim(
+      const DlRect& rect,
+      bool enabled,
+      const std::vector<std::shared_ptr<Layer>>& children) {
+    auto claim = std::make_shared<AvioHitRegionLayer>(
+        rect, enabled, AvioHitRegionKind::kClaim, DlPoint());
+    for (const auto& child : children) {
+      claim->Add(child);
+    }
+    return claim;
+  }
 
   std::vector<Submitted> submitted;
+  // The hit set of every empty-content revision the embedder was handed.
+  std::vector<AvioHitRegionSet> empty_submitted;
   std::optional<Acquisition> acquisition;
   std::optional<Result> result;
 
@@ -780,6 +809,137 @@ TEST(RasterizerTest, metadataPathRootFactsChangeIsNotNoVisualChange) {
   EXPECT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {child})),
             DrawSurfaceStatus::kNoVisualChange);
   EXPECT_EQ(view.submitted.size(), 2u);
+}
+
+// A hit-region set holding exactly |rects| as claims.
+static AvioHitRegionSet Claims(std::initializer_list<DlRect> rects) {
+  AvioHitRegionSet set;
+  for (const auto& rect : rects) {
+    set.Add({rect, AvioHitRegionKind::kClaim});
+  }
+  return set;
+}
+
+// Patch 66: a hit-only change (a claim enabled or disabled over retained
+// pixels) is a frame-facts change. It is never an exact no-change, or the
+// compositor would keep routing input to the old claim.
+TEST(RasterizerTest, hitRegionOnlyChangeIsNotNoVisualChange) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/false,
+                        /*empty_frames=*/true, /*hit_regions=*/true);
+  auto child =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  const auto rect = DlRect::MakeLTRB(8, 8, 24, 24);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Claim(rect, true, {child})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Claim(rect, false, {child})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 2u);
+  EXPECT_EQ(view.submitted[0].hit_regions, Claims({rect}));
+  const auto& flip = view.submitted[1];
+  EXPECT_EQ(flip.hit_regions, AvioHitRegionSet());
+  ASSERT_TRUE(flip.frame_damage.has_value());
+  EXPECT_TRUE(flip.frame_damage->isEmpty());
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+
+  // The same claim again is an exact no-change.
+  EXPECT_EQ(view.Draw(RootFactsHarness::Claim(rect, false, {child})),
+            DrawSurfaceStatus::kNoVisualChange);
+  EXPECT_EQ(view.submitted.size(), 2u);
+}
+
+// Through a selected root target a hit-only change is one freshly rendered
+// generation with exact (empty) logical damage, carrying the new claim.
+TEST(RasterizerTest, hitRegionOnlyChangeOnRootTargetCarriesTheNewClaim) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true,
+                        /*empty_frames=*/true, /*hit_regions=*/true);
+  auto child =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  const auto rect = DlRect::MakeLTRB(4, 4, 28, 28);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Claim(rect, false, {child})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Claim(rect, true, {child})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 2u);
+  EXPECT_TRUE(view.submitted[0].hit_regions.empty());
+  const auto& enable = view.submitted[1];
+  EXPECT_EQ(enable.hit_regions, Claims({rect}));
+  ASSERT_TRUE(enable.frame_damage.has_value());
+  EXPECT_TRUE(enable.frame_damage->isEmpty());
+  ASSERT_TRUE(enable.buffer_damage.has_value());
+  EXPECT_FALSE(enable.buffer_damage->isEmpty());
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+}
+
+// The claim is positioned by the same ancestor transform as the pixels and
+// travels in the same submission, in device pixels.
+TEST(RasterizerTest, hitRegionTravelsWithThePixelsItsAncestorMoved) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true,
+                        /*empty_frames=*/true, /*hit_regions=*/true);
+  auto moved =
+      std::make_shared<TransformLayer>(DlMatrix::MakeTranslation({10, 20}));
+  moved->Add(RootFactsHarness::Claim(
+      DlRect::MakeLTRB(0, 0, 16, 16), true,
+      {RootFactsHarness::Rect(DlRect::MakeLTRB(0, 0, 16, 16),
+                              DlColor::kRed())}));
+  ASSERT_EQ(view.Draw(moved), DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.submitted.size(), 1u);
+  EXPECT_EQ(view.submitted[0].hit_regions,
+            Claims({DlRect::MakeLTRB(10, 20, 26, 36)}));
+}
+
+// A tree that paints nothing but still claims (a hot zone) is empty content
+// carrying its claim. Claims are not paint.
+TEST(RasterizerTest, hotZoneOnlyTreeIsEmptyContentCarryingItsClaim) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true,
+                        /*empty_frames=*/true, /*hit_regions=*/true);
+  EXPECT_CALL(view.embedder(), AcquireRootRenderTarget(_, _, _)).Times(0);
+  const auto zone = DlRect::MakeLTRB(0, 60, 64, 64);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Claim(zone, true, {})),
+            DrawSurfaceStatus::kSuccess);
+  EXPECT_TRUE(view.submitted.empty());
+  ASSERT_EQ(view.empty_submitted.size(), 1u);
+  EXPECT_EQ(view.empty_submitted[0], Claims({zone}));
+}
+
+// A claim the frame cannot describe exactly (here under a 45 degree rotation)
+// fails the whole frame closed as invalid frame facts, before any target is
+// acquired or any pixel is rastered.
+TEST(RasterizerTest, invalidHitRegionSetIsRejectedBeforeTargetAcquisition) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true,
+                        /*empty_frames=*/true, /*hit_regions=*/true);
+  EXPECT_CALL(view.embedder(), AcquireRootRenderTarget(_, _, _)).Times(0);
+  EXPECT_CALL(view.embedder(), SubmitFlutterView(_, _, _, _)).Times(0);
+  EXPECT_CALL(view.embedder(), SubmitAvioEmptyFrame(_, _)).Times(0);
+  EXPECT_CALL(view.embedder(), RejectAvioFrameFacts(kImplicitViewId)).Times(1);
+  auto rotated =
+      std::make_shared<TransformLayer>(DlMatrix::MakeRotationZ(DlDegrees(45)));
+  rotated->Add(RootFactsHarness::Claim(
+      DlRect::MakeLTRB(8, 8, 24, 24), true,
+      {RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24),
+                              DlColor::kRed())}));
+  EXPECT_EQ(view.Draw(rotated), DrawSurfaceStatus::kRejected);
+  EXPECT_TRUE(view.submitted.empty());
+}
+
+// An embedder that did not negotiate hit regions cannot deliver a claim, so a
+// tree that authors one (even disabled) is refused before acquisition rather
+// than presented without it.
+TEST(RasterizerTest, hitRegionWithoutTheNegotiatedFeatureIsRejected) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true,
+                        /*empty_frames=*/true, /*hit_regions=*/false);
+  EXPECT_CALL(view.embedder(), AcquireRootRenderTarget(_, _, _)).Times(0);
+  EXPECT_CALL(view.embedder(), SubmitAvioEmptyFrame(_, _)).Times(0);
+  EXPECT_CALL(view.embedder(), RejectAvioFrameFacts(kImplicitViewId)).Times(2);
+  for (bool enabled : {true, false}) {
+    EXPECT_EQ(view.Draw(RootFactsHarness::Claim(
+                  DlRect::MakeLTRB(8, 8, 24, 24), enabled,
+                  {RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24),
+                                          DlColor::kRed())})),
+              DrawSurfaceStatus::kRejected);
+  }
+  EXPECT_TRUE(view.submitted.empty());
 }
 
 // An accepted empty frame is the one undiffed baseline Avio keeps; the next

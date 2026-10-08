@@ -264,15 +264,31 @@ void RootFrameFactNegotiationRequiresExactRootOpportunity() {
   for (auto feature : {kFlutterAvioExtensionFeatureEmptyFrame,
                        kFlutterAvioExtensionFeatureItemEffects,
                        kFlutterAvioExtensionFeatureOutputGround,
-                       kFlutterAvioExtensionFeatureReadyContent}) {
+                       kFlutterAvioExtensionFeatureReadyContent,
+                       kFlutterAvioExtensionFeatureHitRegions}) {
     assert(flutter::ValidateAvioFrameFactFeatures(feature));
     assert(flutter::ValidateAvioFrameFactFeatures(
         feature | kFlutterAvioExtensionFeatureRootRenderTarget));
     assert(flutter::ValidateAvioFrameFactFeatures(
         feature | kFlutterAvioExtensionFeatureFrameOpportunityOutcomes));
-    assert(!flutter::ValidateAvioFrameFactFeatures(feature | prerequisites));
+    const auto empty_frame = feature == kFlutterAvioExtensionFeatureHitRegions
+                                 ? kFlutterAvioExtensionFeatureEmptyFrame
+                                 : 0u;
+    assert(!flutter::ValidateAvioFrameFactFeatures(feature | prerequisites |
+                                                   empty_frame));
   }
   assert(!flutter::ValidateAvioFrameFactFeatures(0));
+  // Only the empty-frame facts preroll collects hit regions.
+  assert(flutter::ValidateAvioFrameFactFeatures(
+      kFlutterAvioExtensionFeatureHitRegions | prerequisites));
+  static_assert(kFlutterAvioExtensionFeatureHitRegions == 0x80000);
+  static_assert(FLUTTER_AVIO_MAX_HIT_REGIONS == 64);
+  static_assert(kFlutterAvioHitRegionKindClaim == 0 &&
+                kFlutterAvioHitRegionKindOutputCapture == 1);
+  static_assert(offsetof(FlutterPresentRenderTargetInfo, hit_regions) >
+                offsetof(FlutterPresentRenderTargetInfo, ready_content));
+  static_assert(offsetof(FlutterPresentRenderTargetInfo, hit_regions_count) >
+                offsetof(FlutterPresentRenderTargetInfo, hit_regions));
   static_assert(kFlutterPresentRenderTargetStatusEmptyContent == 8);
   static_assert(kFlutterPresentRenderTargetStatusInvalidFrameFacts == 9);
   static_assert(
@@ -617,7 +633,7 @@ void ConcurrentPipelineIntervalsLoseNoSuccessfulCreations() {
 }  // namespace
 
 int main() {
-  static_assert(FLUTTER_AVIO_EXTENSION_VERSION == 9);
+  static_assert(FLUTTER_AVIO_EXTENSION_VERSION == 10);
   static_assert(kFlutterAvioResourceFieldDescriptorMultiplicity == 16);
   static_assert(kFlutterAvioResourceFieldLeases == 32);
   static_assert(kFlutterAvioContinuousKnownClasses ==

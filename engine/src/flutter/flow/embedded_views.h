@@ -503,6 +503,10 @@ class ExternalViewEmbedder {
     return std::nullopt;
   }
   virtual bool SupportsAvioEmptyFrames() const { return false; }
+  // Whether the embedder delivers the frame's hit regions with its content.
+  // A layer tree that authors a hit region for an embedder that does not is
+  // refused as invalid frame facts; a claim is never silently dropped.
+  virtual bool SupportsAvioHitRegions() const { return false; }
   virtual bool SupportsAvioFrameFacts(const AvioFrameFacts& facts) const {
     return !facts.HasMetadata();
   }

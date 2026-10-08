@@ -138,7 +138,7 @@ void CheckDeferredTerminal(bool unchanged, bool accept_terminal = true) {
           const FlutterBackingStorePresentInfo*,
           const std::vector<FlutterAvioCompositorMaterial>&, bool,
           const std::vector<FlutterAvioWindowPreview>&, bool,
-          const AvioFrameFacts&) {
+          const AvioFrameFacts&, const FlutterAvioHitRegion*, size_t) {
         presents++;
         EXPECT_EQ(view, 29);
         EXPECT_EQ(opportunity, 73u);

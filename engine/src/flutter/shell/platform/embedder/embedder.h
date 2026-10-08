@@ -73,7 +73,7 @@ extern "C" {
 // Flutter embedder ABI. The engine reports supported semantics through
 // FlutterEngineGetAvioExtensionCapabilities and validates the request again
 // during initialization, before creating a view or GPU resource.
-#define FLUTTER_AVIO_EXTENSION_VERSION 9u
+#define FLUTTER_AVIO_EXTENSION_VERSION 10u
 
 typedef uint64_t FlutterAvioExtensionFeatures;
 
@@ -101,9 +101,14 @@ typedef uint64_t FlutterAvioExtensionFeatures;
 #define kFlutterAvioExtensionFeatureItemEffects 0x0000000000010000ULL
 #define kFlutterAvioExtensionFeatureOutputGround 0x0000000000020000ULL
 #define kFlutterAvioExtensionFeatureReadyContent 0x0000000000040000ULL
+/// Shell input claims collected from the exact frame that carries the pixels.
+/// Requires EmptyFrame, RootRenderTarget and FrameOpportunityOutcomes.
+#define kFlutterAvioExtensionFeatureHitRegions 0x0000000000080000ULL
 #define FLUTTER_AVIO_MAX_RENDER_RESOURCE_ENTRIES 64u
 #define FLUTTER_AVIO_MAX_COVERAGE_REASONS 32u
 #define FLUTTER_AVIO_MAX_WINDOW_PREVIEWS 64u
+/// Hard per-frame bound on hit regions. A frame authoring more fails closed.
+#define FLUTTER_AVIO_MAX_HIT_REGIONS 64u
 
 /// Hard transaction bound shared by retained scene collection and embedders.
 #define FLUTTER_AVIO_MAX_COMPOSITOR_MATERIALS 64u
@@ -2774,6 +2779,25 @@ typedef struct {
   FlutterAvioReadyContentKind kind;
 } FlutterAvioReadyContent;
 
+/// What a hit region asks the compositor to route to this view.
+typedef enum {
+  /// Pointer input inside the rect belongs to this view.
+  kFlutterAvioHitRegionKindClaim = 0,
+  /// The view asks for the whole output. Only meaningful on an output-sized
+  /// view; the host decides which views may author it.
+  kFlutterAvioHitRegionKindOutputCapture = 1,
+} FlutterAvioHitRegionKind;
+
+/// One input claim of the exact frame that carries the pixels. `rect` is in
+/// view-local logical pixels, already positioned and clipped by every ancestor
+/// transform and clip of the same frame, exactly as the pixels are.
+typedef struct {
+  /// The size of this struct. Must be sizeof(FlutterAvioHitRegion).
+  size_t struct_size;
+  FlutterRect rect;
+  FlutterAvioHitRegionKind kind;
+} FlutterAvioHitRegion;
+
 typedef struct {
   /// The size of this struct. Must be sizeof(FlutterPresentViewInfo).
   size_t struct_size;
@@ -2840,7 +2864,11 @@ typedef enum {
   /// Requires kFlutterAvioExtensionFeatureEmptyFrame.
   kFlutterPresentRenderTargetStatusEmptyContent,
   /// Root frame metadata was malformed, duplicated, nested below a content
-  /// subtree or used without its negotiated feature. No GPU work was issued.
+  /// subtree or used without its negotiated feature, or the frame's hit
+  /// regions could not be described exactly (a transform that is not
+  /// axis-aligned, a malformed rect, more than FLUTTER_AVIO_MAX_HIT_REGIONS)
+  /// or were authored without kFlutterAvioExtensionFeatureHitRegions. No
+  /// render target was acquired and no GPU work was issued.
   kFlutterPresentRenderTargetStatusInvalidFrameFacts,
 } FlutterPresentRenderTargetStatus;
 
@@ -2935,6 +2963,13 @@ typedef struct {
 
   /// Borrowed authored static revision, valid only during this callback.
   const FlutterAvioReadyContent* ready_content;
+
+  /// The complete, ordered input claim of this exact revision, borrowed for
+  /// the callback. Valid for Presented and EmptyContent, where zero regions
+  /// means the revision claims nothing; null and zero for every other status.
+  /// Requires kFlutterAvioExtensionFeatureHitRegions.
+  const FlutterAvioHitRegion* hit_regions;
+  size_t hit_regions_count;
 } FlutterPresentRenderTargetInfo;
 
 typedef bool (*FlutterBackingStoreCreateCallback)(
