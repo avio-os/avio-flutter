@@ -8,6 +8,7 @@
 #include "dart_api.h"
 #include "flutter/flow/layers/avio_compositor_material_layer.h"
 #include "flutter/flow/layers/avio_frame_metadata_layer.h"
+#include "flutter/flow/layers/avio_hit_region_layer.h"
 #include "flutter/flow/layers/avio_window_preview_layer.h"
 #include "flutter/flow/layers/backdrop_filter_layer.h"
 #include "flutter/flow/layers/clip_path_layer.h"
@@ -327,6 +328,35 @@ void SceneBuilder::pushAvioWindowPreview(
     layer->AssignOldLayer(old_layer->Layer().get());
 }
 
+void SceneBuilder::pushAvioHitRegion(
+    Dart_Handle layer_handle,
+    double left,
+    double top,
+    double right,
+    double bottom,
+    bool enabled,
+    uint32_t kind,
+    double dx,
+    double dy,
+    const fml::RefPtr<EngineLayer>& old_layer) {
+  // An unknown kind maps to a value the layer treats as malformed, so the
+  // frame-facts preroll fails the frame closed. A plain narrowing cast could
+  // wrap an unknown kind (256) onto a valid one.
+  auto layer = std::make_shared<AvioHitRegionLayer>(
+      DlRect::MakeLTRB(SafeNarrow(left), SafeNarrow(top), SafeNarrow(right),
+                       SafeNarrow(bottom)),
+      enabled,
+      kind <= static_cast<uint32_t>(AvioHitRegionKind::kOutputCapture)
+          ? static_cast<AvioHitRegionKind>(kind)
+          : static_cast<AvioHitRegionKind>(0xff),
+      DlPoint(SafeNarrow(dx), SafeNarrow(dy)));
+  PushLayer(layer);
+  EngineLayer::MakeRetained(layer_handle, layer);
+  if (old_layer && old_layer->Layer()) {
+    layer->AssignOldLayer(old_layer->Layer().get());
+  }
+}
+
 void SceneBuilder::pushAvioCompositorMaterial(
     Dart_Handle layer_handle,
     int64_t id,
@@ -472,7 +502,8 @@ void SceneBuilder::AddLayer(std::shared_ptr<Layer> layer) {
     const bool has_material = layer->subtree_has_avio_compositor_material();
     const bool has_preview = layer->subtree_has_avio_window_preview();
     const bool has_frame_metadata = layer->subtree_has_avio_frame_metadata();
-    if (has_material || has_preview || has_frame_metadata) {
+    const bool has_hit_region = layer->subtree_has_avio_hit_region();
+    if (has_material || has_preview || has_frame_metadata || has_hit_region) {
       // Active ancestors were inserted before their children. Both fresh and
       // retained sidecars must reach the root before preroll chooses their
       // collectors and full-scene cull. ContainerLayer::Add alone only marks
@@ -486,6 +517,9 @@ void SceneBuilder::AddLayer(std::shared_ptr<Layer> layer) {
         }
         if (has_frame_metadata) {
           ancestor->set_subtree_has_avio_frame_metadata(true);
+        }
+        if (has_hit_region) {
+          ancestor->set_subtree_has_avio_hit_region(true);
         }
       }
     }

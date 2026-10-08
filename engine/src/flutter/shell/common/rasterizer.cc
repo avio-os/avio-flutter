@@ -990,7 +990,8 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
       external_view_embedder_->SupportsAvioEmptyFrames()) {
     // Determine the structural paint fact before acquiring either a surface
     // frame or an embedder target. Preroll has no raster cache/GPU work here;
-    // this is not a pixel probe or a no-damage inference.
+    // this is not a pixel probe or a no-damage inference. It is also the only
+    // preroll that collects the frame's hit regions, over the whole frame.
     auto fact_frame = compositor_context_->AcquireFrame(
         surface_->GetContext(), embedder_root_canvas,
         external_view_embedder_.get(), DlMatrix(), false, true,
@@ -999,7 +1000,8 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
       return DrawSurfaceStatus::kFailed;
     }
     layer_tree.Preroll(*fact_frame, true,
-                       DlRect::MakeSize(layer_tree.frame_size()));
+                       DlRect::MakeSize(layer_tree.frame_size()),
+                       /*collect_frame_facts=*/true);
     const bool empty = layer_tree.root_layer() &&
                        layer_tree.root_layer()->paint_bounds().IsEmpty() &&
                        !layer_tree.root_layer()->subtree_has_platform_view() &&

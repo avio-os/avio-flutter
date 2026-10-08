@@ -39,6 +39,11 @@ enum AvioReadyContentKind { static, live }
 
 abstract class AvioReadyContentEngineLayer implements EngineLayer {}
 
+/// What an Avio external compositor may route to a claiming view.
+enum AvioHitRegionKind { claim, outputCapture }
+
+abstract class AvioHitRegionEngineLayer implements EngineLayer {}
+
 abstract class ColorFilterEngineLayer implements EngineLayer {}
 
 abstract class ImageFilterEngineLayer implements EngineLayer {}
@@ -50,6 +55,13 @@ abstract class ShaderMaskEngineLayer implements EngineLayer {}
 abstract class SceneBuilder {
   factory SceneBuilder() => engine.renderer.createSceneBuilder();
 
+  AvioHitRegionEngineLayer pushAvioHitRegion({
+    required Rect rect,
+    bool enabled = true,
+    AvioHitRegionKind kind = AvioHitRegionKind.claim,
+    Offset offset = Offset.zero,
+    AvioHitRegionEngineLayer? oldLayer,
+  });
   AvioItemEffectEngineLayer pushAvioItemEffect({
     required double opacity,
     int declarationId = 1,

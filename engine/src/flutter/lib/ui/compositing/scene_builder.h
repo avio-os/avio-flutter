@@ -104,6 +104,16 @@ class SceneBuilder : public RefCountedDartWrappable<SceneBuilder> {
                              double corner_radius,
                              bool replace_children,
                              const fml::RefPtr<EngineLayer>& old_layer);
+  void pushAvioHitRegion(Dart_Handle layer_handle,
+                         double left,
+                         double top,
+                         double right,
+                         double bottom,
+                         bool enabled,
+                         uint32_t kind,
+                         double dx,
+                         double dy,
+                         const fml::RefPtr<EngineLayer>& old_layer);
   void pushAvioItemEffect(Dart_Handle layer_handle,
                           double opacity,
                           uint64_t declaration_id,

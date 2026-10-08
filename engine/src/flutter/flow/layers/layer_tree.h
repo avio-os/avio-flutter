@@ -13,6 +13,7 @@
 #include "flutter/common/graphics/texture.h"
 #include "flutter/flow/avio_compositor_material.h"
 #include "flutter/flow/avio_frame_facts.h"
+#include "flutter/flow/avio_hit_region.h"
 #include "flutter/flow/avio_window_preview.h"
 #include "flutter/flow/compositor_context.h"
 #include "flutter/flow/layers/layer.h"
@@ -36,9 +37,14 @@ class LayerTree {
   // - a boolean indicating whether or not the top level of the
   //   layer tree performs any operations that require readback
   //   from the root surface.
+  //
+  // Only the frame-facts preroll (|collect_frame_facts|) clears and collects
+  // the frame's hit regions. A later raster preroll, whatever its cull, leaves
+  // them exactly as the facts pass found them.
   bool Preroll(CompositorContext::ScopedFrame& frame,
                bool ignore_raster_cache = false,
-               DlRect cull_rect = kGiantRect);
+               DlRect cull_rect = kGiantRect,
+               bool collect_frame_facts = false);
 
 #if !SLIMPELLER
   static void TryToRasterCache(
@@ -88,6 +94,9 @@ class LayerTree {
   bool avio_compositor_materials_invalid() const {
     return avio_compositor_materials_invalid_;
   }
+  // The complete input claim of this frame, in device pixels, as of the last
+  // frame-facts preroll. Empty until one ran.
+  const AvioHitRegionSet& avio_hit_regions() const { return avio_hit_regions_; }
 
  private:
   std::shared_ptr<Layer> root_layer_;
@@ -102,6 +111,7 @@ class LayerTree {
   bool avio_compositor_materials_invalid_ = false;
   std::vector<AvioWindowPreview> avio_window_previews_;
   bool avio_window_previews_invalid_ = false;
+  AvioHitRegionSet avio_hit_regions_;
 
   FML_DISALLOW_COPY_AND_ASSIGN(LayerTree);
 };

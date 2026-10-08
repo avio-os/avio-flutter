@@ -1855,3 +1855,53 @@ fade step is a narrow raster again. `rootFactsOnlyChangeRastersWholeTargetWithEx
 `metadataPathRootFactsChangeIsNotNoVisualChange` fail without the change;
 `contentAfterAcceptedEmptyFrameIsWholeDamaged` pins Patch 63's empty-frame rule
 and `FrameDamageCatchUpLeavesFrameDamageExact` pins the damage split.
+
+### Patch 65: shell hit regions are collected from the frame they describe
+
+Avio Shell input claims used to travel beside the frame: Dart measured boxes
+after the frame (`localToGlobal`, post-frame callbacks), sent them over a
+separate WM command and the compositor paired them with whichever pixels were
+bound when the command arrived. Flutter-on-Fuchsia, viz `HitTestRegionList`
+and SurfaceFlinger all commit the hit regions in the same present as the
+content. This patch is the Flow and `dart:ui` half of that model; the embedder
+ABI that delivers the set is added separately and nothing exposes it yet.
+
+`SceneBuilder.pushAvioHitRegion({rect, enabled, kind, offset, oldLayer})`
+pushes a retained `AvioHitRegionLayer`. It is a `ContainerLayer` with an
+offset, like `AvioFrameMetadataLayer`: its children paint unchanged
+(translated), it adds no paint bounds (a tree holding only a hot zone stays
+empty content), passes the children's renderable-state flags through (an
+ancestor opacity never becomes a saveLayer) and diffs as pixels only through
+its offset. A changed rect, enabled bit or kind is never damage. Dart rejects
+non-finite or negative rects and offsets; the layer still fails closed on a
+malformed rect, offset or unknown kind if that check is bypassed.
+`subtree_has_avio_hit_region` propagates through `ContainerLayer::Add` and the
+`SceneBuilder` ancestor stack, including retained subtrees.
+
+Collection happens only in the frame-facts preroll: `LayerTree::Preroll` gains
+`collect_frame_facts`, which the rasterizer's whole-scene fact pass (the one
+that already decides empty content before target acquisition) sets. Only that
+preroll clears and refills the tree's inline `AvioHitRegionSet` (at most
+`kMaxAvioHitRegionsPerFrame` = 64, no heap allocation, order-exact equality),
+so a later raster preroll with a partial damage cull, or a raster-side
+zero-damage exit, cannot lose or alter the claim. Each enabled layer is
+resolved with the same state that positions its pixels: the current matrix,
+the scene cull (every ancestor clip over the whole frame, also when the facts
+preroll is given a partial cull) and the outstanding opacity. Regions are
+device-space, collected pre-order. A disabled layer, a layer under zero
+outstanding opacity, an empty rect and a fully clipped rect claim nothing. A
+transform that is not axis-aligned (rotation other than a multiple of 90
+degrees within 1e-5, skew or perspective), a non-finite result or a 65th
+region invalidates the whole set: the frame fails closed rather than claiming
+a derived bounding box. A hit-region layer may sit in the sole-child root
+prefix above root frame facts, like a transform. Scene image snapshots ignore
+claims; they never collect them.
+
+`AvioHitRegionLayerTest`, `AvioHitRegionLayerTreeTest` and
+`AvioHitRegionDiffTest` (flow_unittests) cover transform, clip, offset,
+opacity zero, axis alignment, malformed authoring, the cap, root versus nested
+pre-order, paint bounds and flag pass-through, paint, the root prefix, facts
+versus raster prerolls and diff damage.
+`AvioHitRegionSceneBuilderCollectsRetainedClaims` (ui_unittests) covers the
+`dart:ui` path, retained subtrees under a moved parent, a disabled update of
+the same engine layer and Dart-side rect validation.

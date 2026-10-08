@@ -19,6 +19,7 @@ source_set("avio_frame_facts") {
 source_set("flow") {
   sources = [
     "avio_compositor_material.h",
+    "avio_hit_region.h",
     "avio_window_preview.h",
     "compositor_context.cc",
     "compositor_context.h",
@@ -32,6 +33,8 @@ source_set("flow") {
     "layers/avio_compositor_material_layer.h",
     "layers/avio_frame_metadata_layer.cc",
     "layers/avio_frame_metadata_layer.h",
+    "layers/avio_hit_region_layer.cc",
+    "layers/avio_hit_region_layer.h",
     "layers/avio_window_preview_layer.cc",
     "layers/avio_window_preview_layer.h",
     "layers/backdrop_filter_layer.cc",
@@ -173,6 +176,7 @@ if (enable_unittests) {
       "gl_context_switch_unittests.cc",
       "layers/avio_compositor_material_layer_unittests.cc",
       "layers/avio_frame_metadata_layer_unittests.cc",
+      "layers/avio_hit_region_layer_unittests.cc",
       "layers/avio_window_preview_layer_unittests.cc",
       "layers/backdrop_filter_layer_unittests.cc",
       "layers/clip_path_layer_unittests.cc",

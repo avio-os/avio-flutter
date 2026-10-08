@@ -31,7 +31,8 @@ inline SkColorSpace* GetColorSpace(DlCanvas* canvas) {
 
 bool LayerTree::Preroll(CompositorContext::ScopedFrame& frame,
                         bool ignore_raster_cache,
-                        DlRect cull_rect) {
+                        DlRect cull_rect,
+                        bool collect_frame_facts) {
   TRACE_EVENT0("flutter", "LayerTree::Preroll");
 
   if (!root_layer_) {
@@ -46,7 +47,9 @@ bool LayerTree::Preroll(CompositorContext::ScopedFrame& frame,
   const DlRect scene_cull_rect = DlRect::MakeSize(frame_size_);
   const bool has_window_preview =
       root_layer_->subtree_has_avio_window_preview();
-  if ((has_compositor_material || has_window_preview) &&
+  const bool collect_hit_regions =
+      collect_frame_facts && root_layer_->subtree_has_avio_hit_region();
+  if ((has_compositor_material || has_window_preview || collect_hit_regions) &&
       !cull_rect.Contains(scene_cull_rect)) {
     // Partial raster needs a second clip history so unchanged retained nodes
     // stay in the exact-frame sidecar. A full first frame already traverses
@@ -64,6 +67,9 @@ bool LayerTree::Preroll(CompositorContext::ScopedFrame& frame,
   avio_window_previews_.clear();
   avio_window_previews_invalid_ = false;
   avio_compositor_materials_invalid_ = false;
+  if (collect_frame_facts) {
+    avio_hit_regions_.Clear();
+  }
 
   PrerollContext context = {
 #if !SLIMPELLER
@@ -88,6 +94,7 @@ bool LayerTree::Preroll(CompositorContext::ScopedFrame& frame,
           has_window_preview ? &avio_window_previews_ : nullptr,
       .avio_window_previews_invalid =
           has_window_preview ? &avio_window_previews_invalid_ : nullptr,
+      .avio_hit_regions = collect_hit_regions ? &avio_hit_regions_ : nullptr,
   };
 
   root_layer_->Preroll(&context);

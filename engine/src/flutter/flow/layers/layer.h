@@ -14,6 +14,7 @@
 #include "flutter/common/macros.h"
 #include "flutter/display_list/dl_canvas.h"
 #include "flutter/flow/avio_compositor_material.h"
+#include "flutter/flow/avio_hit_region.h"
 #include "flutter/flow/avio_window_preview.h"
 #include "flutter/flow/diff_context.h"
 #include "flutter/flow/embedded_views.h"
@@ -37,6 +38,7 @@ class ContainerLayer;
 class AvioCompositorMaterialLayer;
 class AvioWindowPreviewLayer;
 class AvioFrameMetadataLayer;
+class AvioHitRegionLayer;
 class TransformLayer;
 class DisplayListLayer;
 class PerformanceOverlayLayer;
@@ -86,6 +88,9 @@ struct PrerollContext {
   bool* avio_compositor_materials_invalid = nullptr;
   std::vector<AvioWindowPreview>* avio_window_previews = nullptr;
   bool* avio_window_previews_invalid = nullptr;
+  // Set only by the frame-facts preroll (LayerTree::Preroll with
+  // collect_frame_facts). Raster prerolls never touch the frame's claims.
+  AvioHitRegionSet* avio_hit_regions = nullptr;
 };
 
 struct PaintContext {
@@ -227,6 +232,15 @@ class Layer {
   virtual const AvioFrameMetadataLayer* as_avio_frame_metadata_layer() const {
     return nullptr;
   }
+  bool subtree_has_avio_hit_region() const {
+    return subtree_has_avio_hit_region_;
+  }
+  void set_subtree_has_avio_hit_region(bool value) {
+    subtree_has_avio_hit_region_ = value;
+  }
+  virtual const AvioHitRegionLayer* as_avio_hit_region_layer() const {
+    return nullptr;
+  }
   virtual const TransformLayer* as_transform_layer() const { return nullptr; }
 
   // Returns the paint bounds in the layer's local coordinate system
@@ -303,6 +317,7 @@ class Layer {
   bool subtree_has_avio_compositor_material_ = false;
   bool subtree_has_avio_window_preview_ = false;
   bool subtree_has_avio_frame_metadata_ = false;
+  bool subtree_has_avio_hit_region_ = false;
 
   static uint64_t NextUniqueID();
 

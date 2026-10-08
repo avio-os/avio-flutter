@@ -284,6 +284,21 @@ class AvioReadyContentEngineLayer extends _EngineLayerWrapper {
   AvioReadyContentEngineLayer._(super.nativeLayer) : super._();
 }
 
+/// What an Avio external compositor may route to the view whose frame carries
+/// a [SceneBuilder.pushAvioHitRegion] claim.
+enum AvioHitRegionKind {
+  /// Pointer input inside the claimed rect.
+  claim,
+
+  /// Input for the whole output. Only an output-sized view may author it.
+  outputCapture,
+}
+
+/// An opaque handle created by [SceneBuilder.pushAvioHitRegion].
+class AvioHitRegionEngineLayer extends _EngineLayerWrapper {
+  AvioHitRegionEngineLayer._(super.nativeLayer) : super._();
+}
+
 /// Builds a [Scene] containing the given visuals.
 ///
 /// A [Scene] can then be rendered using [FlutterView.render].
@@ -520,6 +535,21 @@ abstract class SceneBuilder {
     double cornerRadius = 0,
     bool replaceChildren = false,
     AvioWindowPreviewEngineLayer? oldLayer,
+  });
+
+  /// Claims input for [rect] (in the coordinates of the children, after
+  /// [offset]) in the same frame as the children's pixels. The engine resolves
+  /// the claim with the scene's own transform, clip and opacity, so it moves,
+  /// clips and vanishes exactly with what is painted; it is never pixel damage.
+  /// A disabled layer or one under zero opacity claims nothing. A transform
+  /// that is not axis-aligned, or more than 64 claims in one frame, rejects
+  /// the frame. Children paint unchanged; stock embedders ignore the claim.
+  AvioHitRegionEngineLayer pushAvioHitRegion({
+    required Rect rect,
+    bool enabled = true,
+    AvioHitRegionKind kind = AvioHitRegionKind.claim,
+    Offset offset = Offset.zero,
+    AvioHitRegionEngineLayer? oldLayer,
   });
 
   /// Authors alpha for the exact view-root content revision. Only a sole-child
@@ -1063,6 +1093,67 @@ base class _NativeSceneBuilder extends NativeFieldWrapperClass1 implements Scene
     double maskRectBottom,
     int blendMode,
     int filterQualityIndex,
+    EngineLayer? oldLayer,
+  );
+
+  @override
+  AvioHitRegionEngineLayer pushAvioHitRegion({
+    required Rect rect,
+    bool enabled = true,
+    AvioHitRegionKind kind = AvioHitRegionKind.claim,
+    Offset offset = Offset.zero,
+    AvioHitRegionEngineLayer? oldLayer,
+  }) {
+    if (!rect.isFinite || rect.width < 0 || rect.height < 0) {
+      throw ArgumentError.value(rect, 'rect', 'Expected a finite, non-negative rect.');
+    }
+    if (!offset.isFinite) {
+      throw ArgumentError.value(offset, 'offset', 'Expected a finite offset.');
+    }
+    assert(_debugCheckCanBeUsedAsOldLayer(oldLayer, 'pushAvioHitRegion'));
+    final EngineLayer native = _NativeEngineLayer._();
+    _pushAvioHitRegion(
+      native,
+      rect.left,
+      rect.top,
+      rect.right,
+      rect.bottom,
+      enabled,
+      kind.index,
+      offset.dx,
+      offset.dy,
+      oldLayer?._nativeLayer,
+    );
+    final layer = AvioHitRegionEngineLayer._(native);
+    assert(_debugPushLayer(layer));
+    return layer;
+  }
+
+  @Native<
+    Void Function(
+      Pointer<Void>,
+      Handle,
+      Double,
+      Double,
+      Double,
+      Double,
+      Bool,
+      Uint32,
+      Double,
+      Double,
+      Handle,
+    )
+  >(symbol: 'SceneBuilder::pushAvioHitRegion')
+  external void _pushAvioHitRegion(
+    EngineLayer layer,
+    double left,
+    double top,
+    double right,
+    double bottom,
+    bool enabled,
+    int kind,
+    double dx,
+    double dy,
     EngineLayer? oldLayer,
   );
 

@@ -8,12 +8,16 @@ import 'dart:ui';
 import 'dart:isolate';
 import 'dart:ffi' hide Size;
 
+part 'avio_hit_region_test.dart';
 part 'avio_preview_test.dart';
 
 void main() {}
 
 @pragma('vm:entry-point')
 void validateAvioPreviewSceneBuilder() => runAvioPreviewSceneBuilder();
+
+@pragma('vm:entry-point')
+void validateAvioHitRegionSceneBuilder() => runAvioHitRegionSceneBuilder();
 
 /// Mutiple tests use this to signal to the C++ side that they are ready for
 /// validation.

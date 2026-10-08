@@ -79,8 +79,12 @@ void Collect(const Layer& layer,
   if (!container) {
     return;
   }
+  // A hit-region claim neither paints nor filters its child, so like a
+  // transform it may sit in the root prefix above the facts it encloses.
   const bool transparent_prefix =
-      root_prefix && (is_root || metadata || layer.as_transform_layer()) &&
+      root_prefix &&
+      (is_root || metadata || layer.as_transform_layer() ||
+       layer.as_avio_hit_region_layer()) &&
       container->layers().size() == 1u;
   for (const auto& child : container->layers()) {
     if (child->subtree_has_avio_frame_metadata()) {

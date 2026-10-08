@@ -973,6 +973,28 @@ need "catch-up damage leaves frame damage exact (test)" \
 need "root-facts catch-up damage is documented" \
   AVIO_PATCHES.md 'Patch 64: a root-facts change is whole-target catch-up damage'
 
+echo "--- Patch 65: shell hit regions are collected from the frame they describe ---"
+need "hit-region set is bounded and inline" \
+  "$F/flow/avio_hit_region.h" 'kMaxAvioHitRegionsPerFrame = 64'
+need "hit-region layer collects from the scene cull" \
+  "$F/flow/layers/avio_hit_region_layer.cc" 'device_scene_cull_rect\(\)'
+need "only the frame-facts preroll collects hit regions" \
+  "$F/flow/layers/layer_tree.cc" 'collect_frame_facts && root_layer_->subtree_has_avio_hit_region\(\)'
+need "the rasterizer fact pass collects frame facts" \
+  "$F/shell/common/rasterizer.cc" '/\*collect_frame_facts=\*/true'
+need "hit-region subtree flag reaches every scene ancestor" \
+  "$F/lib/ui/compositing/scene_builder.cc" 'set_subtree_has_avio_hit_region\(true\)'
+need "dart:ui authors hit regions" \
+  "$F/lib/ui/compositing.dart" 'AvioHitRegionEngineLayer pushAvioHitRegion'
+need "raster preroll leaves the collected set exact (test)" \
+  "$F/flow/layers/avio_hit_region_layer_unittests.cc" 'OnlyTheFactsPrerollClearsAndCollects'
+need "zero opacity claims nothing (test)" \
+  "$F/flow/layers/avio_hit_region_layer_unittests.cc" 'ZeroOutstandingOpacityClaimsNothing'
+need "retained dart:ui claims follow their new parent (test)" \
+  "$F/lib/ui/compositing/avio_hit_region_scene_builder_unittests.cc" 'AvioHitRegionSceneBuilderCollectsRetainedClaims'
+need "frame-collected hit regions are documented" \
+  AVIO_PATCHES.md 'Patch 65: shell hit regions are collected from the frame they describe'
+
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"

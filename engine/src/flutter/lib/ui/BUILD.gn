@@ -265,6 +265,7 @@ if (enable_unittests) {
     public_configs = [ "//flutter:export_dynamic_symbols" ]
 
     sources = [
+      "compositing/avio_hit_region_scene_builder_unittests.cc",
       "compositing/avio_preview_scene_builder_unittests.cc",
       "compositing/scene_builder_unittests.cc",
       "hooks_unittests.cc",

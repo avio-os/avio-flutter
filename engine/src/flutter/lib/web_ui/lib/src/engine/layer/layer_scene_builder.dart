@@ -48,6 +48,15 @@ class LayerSceneBuilder implements ui.SceneBuilder {
   late ContainerLayer currentLayer;
 
   @override
+  ui.AvioHitRegionEngineLayer pushAvioHitRegion({
+    required ui.Rect rect,
+    bool enabled = true,
+    ui.AvioHitRegionKind kind = ui.AvioHitRegionKind.claim,
+    ui.Offset offset = ui.Offset.zero,
+    ui.AvioHitRegionEngineLayer? oldLayer,
+  }) => throw UnsupportedError("Avio hit regions require the native root-frame contract.");
+
+  @override
   ui.AvioItemEffectEngineLayer pushAvioItemEffect({
     required double opacity,
     int declarationId = 1,

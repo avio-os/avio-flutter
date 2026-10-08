@@ -28,9 +28,10 @@ class AvioFrameMetadataLayer final : public ContainerLayer {
   DlPoint offset_;
 };
 
-// Only the sole-child root prefix (including ordinary root transforms) may
-// author these facts. Duplicates, siblings and effect/filter ancestors reject
-// the scene. The collector is allocation-free and also checks retained layers.
+// Only the sole-child root prefix (including ordinary root transforms and
+// hit-region claims) may author these facts. Duplicates, siblings and
+// effect/filter ancestors reject the scene. The collector is allocation-free
+// and also checks retained layers.
 AvioFrameFacts CollectAvioRootFrameFacts(const Layer& root);
 
 }  // namespace flutter
