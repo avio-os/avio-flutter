@@ -1236,7 +1236,14 @@ void EmbedderExternalViewEmbedder::SubmitRootRenderTarget(
   auto& root_view = root_found->second;
   const bool has_previous_root_frame =
       root_paint_regions_.find(flutter_view_id) != root_paint_regions_.end();
-  if ((!selected_target_damage_ || !has_previous_root_frame) &&
+  // A frame without engine pixels is not a frame without change when the
+  // embedder distinguishes empty revisions: it may carry a new claim or clear
+  // a previous one, and the rasterizer records it as the accepted baseline.
+  // Emptiness is decided once, by the rasterizer, before any target exists
+  // (EmptyContent). A frame that reached here holds or is about to take a
+  // target, so it renders (a clear) and is Presented with its revision.
+  if (!SupportsAvioEmptyFrames() &&
+      (!selected_target_damage_ || !has_previous_root_frame) &&
       !root_view->HasEngineRenderedContents() && compositor_materials.empty() &&
       window_previews.empty()) {
     CompleteRootRenderTarget(

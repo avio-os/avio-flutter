@@ -1948,6 +1948,19 @@ pixels is a fresh buffered generation with exact, empty logical damage
 (Patch 56 and 64), never `NoVisualChange`. The external view embedder re-checks
 the set at both submission edges as it does the other sidecars.
 
+Emptiness is decided once, by the rasterizer's structural paint fact, before a
+target exists. The root-target submission therefore no longer maps a frame
+without engine-rendered contents (for example a hit box painted only in a
+transparent colour, whose paint bounds are not empty) to `NoVisualChange` when
+the embedder negotiated `EmptyFrame`. That upstream shortcut fired on a view's
+first frame and after every `EmptyContent` (which erases the retained paint
+region), reported no claim, and let the rasterizer record the new tree as its
+baseline, so the new claim never reached the host. Such a frame holds (selected
+targets) or takes a target, renders a clear and is `Presented` with its claim.
+It cannot become `EmptyContent` after acquisition: that status carries no
+backing store, and a leased target collected without a terminal history result
+is poisoned and quarantined by the host.
+
 `hitRegionOnlyChangeIsNotNoVisualChange` and
 `invalidHitRegionSetIsRejectedBeforeTargetAcquisition` (shell_unittests) fail
 without the change. `hitRegionOnlyChangeOnRootTargetCarriesTheNewClaim`,
@@ -1957,5 +1970,7 @@ without the change. `hitRegionOnlyChangeOnRootTargetCarriesTheNewClaim`,
 `HitRegionCoordinatesApplyDprExactlyOnceAndKeepOrderAndKind` (DPR 1.25 and 2.0),
 `EmptyContentCarriesItsHitRegionsInLogicalPixels` and
 `EmptyContentRefusesUnnegotiatedOrInvalidHitRegions` cover the embedder;
+`TransparentOnlyFrameAfterEmptyContentDeliversItsHitRegions` (selected and
+unselected targets) fails without the shortcut change;
 `HitRegionsWithoutEmptyFramesFailBeforeLaunch` and
 `HitRegionsCanBeNegotiatedWithEmptyFrames` cover negotiation.

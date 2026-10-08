@@ -1016,6 +1016,10 @@ need "invalid hit set is refused before acquisition (test)" \
   "$F/shell/common/rasterizer_unittests.cc" 'invalidHitRegionSetIsRejectedBeforeTargetAcquisition'
 need "empty content carries its hit regions (test)" \
   "$F/shell/platform/embedder/embedder_external_view_embedder_unittests.cc" 'EmptyContentCarriesItsHitRegionsInLogicalPixels'
+need "a frame without engine pixels is never NoVisualChange for empty-frame hosts" \
+  "$F/shell/platform/embedder/embedder_external_view_embedder.cc" 'if \(!SupportsAvioEmptyFrames\(\) &&'
+need "transparent-only frame delivers its claim (test)" \
+  "$F/shell/platform/embedder/embedder_external_view_embedder_unittests.cc" 'TransparentOnlyFrameAfterEmptyContentDeliversItsHitRegions'
 need "hit-region negotiation (test)" \
   "$F/shell/platform/embedder/tests/embedder_unittests.cc" 'HitRegionsWithoutEmptyFramesFailBeforeLaunch'
 need "frame-carried hit-region ABI is documented" \

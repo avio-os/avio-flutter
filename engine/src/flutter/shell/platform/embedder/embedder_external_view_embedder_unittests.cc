@@ -4,7 +4,9 @@
 
 #include "flutter/shell/platform/embedder/embedder_external_view_embedder.h"
 
+#include "flutter/shell/platform/embedder/embedder_render_target_skia.h"
 #include "gtest/gtest.h"
+#include "third_party/skia/include/core/SkSurface.h"
 
 namespace flutter {
 namespace testing {
@@ -469,6 +471,100 @@ TEST(EmbedderExternalViewEmbedderTest,
       EXPECT_TRUE(presented.empty());
     }
     EXPECT_EQ(target->acquisitions, 0u);
+  }
+}
+
+// A frame whose only paint is transparent (an invisible hit box) is a new
+// revision, not "no visual change": its claim must reach the host even when
+// the view has no previous pixel frame (its first frame, or after an empty
+// revision). The rasterizer records such a frame as the accepted baseline, so
+// a claim dropped here would never be delivered.
+TEST(EmbedderExternalViewEmbedderTest,
+     TransparentOnlyFrameAfterEmptyContentDeliversItsHitRegions) {
+  for (const bool selected_target_damage : {true, false}) {
+    SCOPED_TRACE(selected_target_damage ? "selected" : "unselected");
+    size_t acquisitions = 0;
+    std::vector<FlutterPresentRenderTargetStatus> statuses;
+    std::vector<PresentedHitRegions> hit_regions;
+    EmbedderExternalViewEmbedder embedder(
+        kFlutterCompositorModeRootRenderTarget, selected_target_damage,
+        /*avoid_backing_store_cache=*/true,
+        /*create_render_target_callback=*/nullptr,
+        [&](GrDirectContext*, const std::shared_ptr<impeller::AiksContext>&,
+            const FlutterBackingStoreConfig& config, FlutterFrameOpportunityId,
+            FlutterEngineDisplayId) {
+          ++acquisitions;
+          FlutterBackingStore store = {};
+          store.struct_size = sizeof(store);
+          store.type = kFlutterBackingStoreTypeSoftware;
+          auto surface = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(
+              config.size.width, config.size.height));
+          return EmbedderExternalViewEmbedder::RenderTargetAcquisition{
+              .status =
+                  ExternalViewEmbedder::RootRenderTargetAcquisition::kGranted,
+              .target = std::make_unique<EmbedderRenderTargetSkia>(
+                  store, surface, [] {}, nullptr, nullptr),
+          };
+        },
+        /*present_callback=*/nullptr,
+        [&](FlutterViewId, FlutterFrameOpportunityId, FlutterEngineDisplayId,
+            FlutterPresentRenderTargetStatus status, const FlutterBackingStore*,
+            const FlutterBackingStorePresentInfo*,
+            const std::vector<FlutterAvioCompositorMaterial>&, bool,
+            const std::vector<FlutterAvioWindowPreview>&, bool,
+            const AvioFrameFacts&, const FlutterAvioHitRegion* regions,
+            size_t count) {
+          statuses.push_back(status);
+          hit_regions.emplace_back(regions, regions + count);
+          return true;
+        },
+        kEmptyFrameWithHitRegions);
+    ExternalViewEmbedder& boundary = embedder;
+    const DlISize frame_size(200, 100);
+
+    // Frame N: an empty revision claiming A.
+    AvioHitRegionSet a;
+    a.Add({DlRect::MakeLTRB(0, 90, 200, 100), AvioHitRegionKind::kClaim});
+    boundary.BeginFrame(nullptr, nullptr);
+    boundary.SetFrameOpportunity(
+        FrameOpportunityContext{.id = 1, .display_id = 11, .target_ids = {29}});
+    boundary.PrepareFlutterView(frame_size, 1.0);
+    SurfaceFrame::SubmitInfo empty_info;
+    empty_info.avio_hit_regions = a;
+    ASSERT_TRUE(boundary.SubmitAvioEmptyFrame(29, empty_info));
+
+    // Frame N+1: a hit box whose only paint is transparent, claiming B.
+    AvioHitRegionSet b;
+    b.Add({DlRect::MakeLTRB(10, 20, 50, 60), AvioHitRegionKind::kClaim});
+    boundary.BeginFrame(nullptr, nullptr);
+    boundary.SetFrameOpportunity(
+        FrameOpportunityContext{.id = 2, .display_id = 11, .target_ids = {29}});
+    boundary.PrepareFlutterView(frame_size, 1.0);
+    boundary.AcquireRootRenderTarget(29, nullptr, nullptr);
+    boundary.GetRootCanvas()->DrawRect(DlRect::MakeLTRB(10, 20, 50, 60),
+                                       DlPaint(DlColor::kTransparent()));
+    auto frame = std::make_unique<SurfaceFrame>(
+        /*surface=*/nullptr, SurfaceFrame::FramebufferInfo{},
+        /*encode_callback=*/[](const SurfaceFrame&, DlCanvas*) { return true; },
+        /*submit_callback=*/[](const SurfaceFrame&) { return true; },
+        frame_size);
+    SurfaceFrame::SubmitInfo submit_info;
+    submit_info.avio_hit_regions = b;
+    submit_info.buffer_damage = DlRegion(DlIRect::MakeSize(frame_size));
+    frame->set_submit_info(std::move(submit_info));
+    boundary.SubmitFlutterView(29, nullptr, nullptr, std::move(frame));
+
+    ASSERT_EQ(statuses.size(), 2u);
+    EXPECT_EQ(statuses[0], kFlutterPresentRenderTargetStatusEmptyContent);
+    EXPECT_EQ(statuses[1], kFlutterPresentRenderTargetStatusPresented);
+    EXPECT_EQ(boundary.GetRootRenderTargetResult(29),
+              ExternalViewEmbedder::RootRenderTargetResult::kPresented);
+    ASSERT_EQ(hit_regions[1].size(), 1u);
+    EXPECT_DOUBLE_EQ(hit_regions[1][0].rect.left, 10.0);
+    EXPECT_DOUBLE_EQ(hit_regions[1][0].rect.top, 20.0);
+    EXPECT_DOUBLE_EQ(hit_regions[1][0].rect.right, 50.0);
+    EXPECT_DOUBLE_EQ(hit_regions[1][0].rect.bottom, 60.0);
+    EXPECT_EQ(acquisitions, 1u);
   }
 }
 
