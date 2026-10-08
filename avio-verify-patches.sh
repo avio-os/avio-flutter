@@ -954,8 +954,12 @@ need "diff baseline rule is documented" \
   AVIO_PATCHES.md 'Patch 63: a diff baseline is a tree that was diffed'
 
 echo "--- Patch 64: a root-facts change is whole-target catch-up damage ---"
-need "a root-facts change adds whole-frame catch-up damage" \
+need "a root-facts change requires non-empty buffer damage (64b)" \
+  "$F/shell/common/rasterizer.cc" 'damage->RequireNonEmptyBufferDamage\(\)'
+absent_in "a root-facts change no longer adds whole-frame damage (64b)" \
   "$F/shell/common/rasterizer.cc" 'damage->AddAdditionalDamage\(DlIRect::MakeSize\(layer_tree.frame_size\(\)\)\)'
+need "only empty buffer damage is widened to the whole target (64b)" \
+  "$F/flow/compositor_context.cc" 'require_non_empty_buffer_damage_ && damage_->buffer_damage.isEmpty\(\)'
 absent_in "a root-facts change never skips the diff" \
   "$F/shell/common/rasterizer.cc" 'supports_partial_repaint && !(root|frame)_facts_changed'
 need "facts-only frame rasters whole with exact frame damage (test)" \
@@ -970,6 +974,16 @@ need "metadata path never treats a facts change as no-change (test)" \
   "$F/shell/common/rasterizer_unittests.cc" 'metadataPathRootFactsChangeIsNotNoVisualChange'
 need "catch-up damage leaves frame damage exact (test)" \
   "$F/flow/diff_context_unittests.cc" 'FrameDamageCatchUpLeavesFrameDamageExact'
+need "required non-empty damage keeps exact buffer damage (test)" \
+  "$F/flow/diff_context_unittests.cc" 'FrameDamageRequiredNonEmptyKeepsExactBufferDamage'
+need "facts change with pixel damage rasters partially (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'rootFactsChangeWithPixelDamageRastersOnlyItsBufferDamage'
+need "hit change with pixel damage rasters partially (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'hitRegionChangeWithPixelDamageRastersOnlyItsBufferDamage'
+need "stale target catches up only its existing damage (test)" \
+  "$F/shell/common/rasterizer_unittests.cc" 'rootFactsOnlyChangeOnAStaleTargetRastersItsExistingDamage'
+need "catch-up amendment is documented" \
+  AVIO_PATCHES.md 'Patch 64b amendment: catch-up only where the raster would be empty'
 need "root-facts catch-up damage is documented" \
   AVIO_PATCHES.md 'Patch 64: a root-facts change is whole-target catch-up damage'
 

@@ -192,10 +192,11 @@ TEST_F(DiffContextTest, FrameDamageNarrowsAgainstADiffedPreviousTree) {
   EXPECT_EQ(frame_damage->bounds(), DlIRect::MakeLTRB(680, 220, 780, 380));
 }
 
-// A root-facts change (Patch 64) makes the whole target stale without changing
-// a pixel. It is catch-up damage on a diffed frame: the buffer repaints whole,
-// the logical damage stays the exact (empty) pixel change, and the tree still
-// records its paint regions as the next frame's baseline.
+// A root-facts change (Patch 64) must render the target without changing a
+// pixel. On a diffed frame whose buffer damage would be empty it is catch-up
+// damage (Patch 64b): the buffer repaints whole, the logical damage stays the
+// exact (empty) pixel change, and the tree still records its paint regions as
+// the next frame's baseline.
 TEST_F(DiffContextTest, FrameDamageCatchUpLeavesFrameDamageExact) {
   const DlISize frame_size(800, 600);
   auto kept = CreateDisplayListLayer(CreateDisplayList(
@@ -209,7 +210,7 @@ TEST_F(DiffContextTest, FrameDamageCatchUpLeavesFrameDamageExact) {
   LayerTree current(CreateContainerLayer({kept}), frame_size);
   FrameDamage damage;
   damage.SetPreviousLayerTree(&previous);
-  damage.AddAdditionalDamage(DlIRect::MakeSize(frame_size));
+  damage.RequireNonEmptyBufferDamage();
   damage.ComputeDamage(current, /*has_raster_cache=*/false,
                        /*impeller_enabled=*/true);
 
@@ -220,6 +221,38 @@ TEST_F(DiffContextTest, FrameDamageCatchUpLeavesFrameDamageExact) {
   ASSERT_TRUE(buffer_damage.has_value());
   EXPECT_EQ(buffer_damage->bounds(), DlIRect::MakeSize(frame_size));
   EXPECT_TRUE(current.has_paint_regions());
+}
+
+// A frame that must render and already changes pixels keeps its exact buffer
+// damage (Patch 64b): only an otherwise empty buffer damage is widened.
+TEST_F(DiffContextTest, FrameDamageRequiredNonEmptyKeepsExactBufferDamage) {
+  const DlISize frame_size(800, 600);
+  const auto changed = DlIRect::MakeLTRB(680, 220, 780, 380);
+  auto kept = CreateDisplayListLayer(CreateDisplayList(
+      DlRect::MakeLTRB(20, 220, 120, 380), DlColor(0xFF1EB45A)));
+  auto before = CreateDisplayListLayer(
+      CreateDisplayList(DlRect::Make(changed), DlColor(0xFFAA46D2)));
+  auto after = CreateDisplayListLayer(
+      CreateDisplayList(DlRect::Make(changed), DlColor(0xFF2A46D2)));
+  LayerTree previous(CreateContainerLayer({kept, before}), frame_size);
+  FrameDamage initial_damage;
+  initial_damage.ComputeDamage(previous, /*has_raster_cache=*/false,
+                               /*impeller_enabled=*/true);
+  ASSERT_TRUE(previous.has_paint_regions());
+
+  LayerTree current(CreateContainerLayer({kept, after}), frame_size);
+  FrameDamage damage;
+  damage.SetPreviousLayerTree(&previous);
+  damage.RequireNonEmptyBufferDamage();
+  damage.ComputeDamage(current, /*has_raster_cache=*/false,
+                       /*impeller_enabled=*/true);
+
+  const auto frame_damage = damage.GetFrameDamage();
+  const auto buffer_damage = damage.GetBufferDamage();
+  ASSERT_TRUE(frame_damage.has_value());
+  EXPECT_EQ(frame_damage->bounds(), changed);
+  ASSERT_TRUE(buffer_damage.has_value());
+  EXPECT_EQ(buffer_damage->bounds(), changed);
 }
 
 }  // namespace testing

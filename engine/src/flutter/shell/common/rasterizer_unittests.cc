@@ -695,6 +695,58 @@ TEST(RasterizerTest,
   EXPECT_TRUE(view.BaselineHasPaintRegions());
 }
 
+// Patch 64b: the catch-up widens buffer damage to the whole target only when
+// the frame would otherwise raster nothing. A facts change that also changes
+// pixels is already a freshly rendered generation, so it rasters exactly its
+// buffer damage.
+TEST(RasterizerTest, rootFactsChangeWithPixelDamageRastersOnlyItsBufferDamage) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true);
+  const auto changed = DlIRect::MakeLTRB(40, 40, 48, 48);
+  auto kept =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  auto before =
+      RootFactsHarness::Rect(DlRect::Make(changed), DlColor::kGreen());
+  auto after = RootFactsHarness::Rect(DlRect::Make(changed), DlColor::kBlue());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {kept, before})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {kept, after})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 2u);
+  const auto& step = view.submitted[1];
+  ASSERT_TRUE(step.frame_damage.has_value());
+  EXPECT_EQ(step.frame_damage->bounds(), changed);
+  ASSERT_TRUE(step.buffer_damage.has_value());
+  EXPECT_EQ(step.buffer_damage->bounds(), changed);
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+  EXPECT_TRUE(view.BaselineHasPaintRegions());
+}
+
+// A target that is behind (its pool slot missed earlier frames) already has
+// buffer damage to catch up on, so a facts-only change rasters that, not the
+// whole target: it is non-empty, so the frame is never a no-change.
+TEST(RasterizerTest,
+     rootFactsOnlyChangeOnAStaleTargetRastersItsExistingDamage) {
+  const auto stale = DlIRect::MakeLTRB(0, 0, 16, 16);
+  auto target = PreservedTarget(false);
+  target.existing_damage = DlRegion(stale);
+  RootFactsHarness view(target, /*selected=*/true);
+  auto child =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(1.0, {child})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Faded(0.5, {child})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 2u);
+  const auto& fade = view.submitted[1];
+  ASSERT_TRUE(fade.frame_damage.has_value());
+  EXPECT_TRUE(fade.frame_damage->isEmpty());
+  ASSERT_TRUE(fade.buffer_damage.has_value());
+  EXPECT_EQ(fade.buffer_damage->bounds(), stale);
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+}
+
 // The facts frame is a diffed baseline: the next frame's damage is only what
 // it changed, not the whole frame Patch 63 gives an undiffed baseline.
 TEST(RasterizerTest, frameAfterRootFactsChangeDiffsNarrowly) {
@@ -868,7 +920,34 @@ TEST(RasterizerTest, hitRegionOnlyChangeOnRootTargetCarriesTheNewClaim) {
   ASSERT_TRUE(enable.frame_damage.has_value());
   EXPECT_TRUE(enable.frame_damage->isEmpty());
   ASSERT_TRUE(enable.buffer_damage.has_value());
-  EXPECT_FALSE(enable.buffer_damage->isEmpty());
+  EXPECT_EQ(enable.buffer_damage->bounds(), RootFactsHarness::Whole());
+  EXPECT_TRUE(view.LastDrawBecameBaseline());
+}
+
+// Patch 64b: a claim that changes together with pixels rides the ordinary
+// partial raster; only a claim-only change is widened to the whole target.
+TEST(RasterizerTest, hitRegionChangeWithPixelDamageRastersOnlyItsBufferDamage) {
+  RootFactsHarness view(PreservedTarget(false), /*selected=*/true,
+                        /*empty_frames=*/true, /*hit_regions=*/true);
+  const auto changed = DlIRect::MakeLTRB(40, 40, 48, 48);
+  const auto rect = DlRect::MakeLTRB(4, 4, 28, 28);
+  auto kept =
+      RootFactsHarness::Rect(DlRect::MakeLTRB(8, 8, 24, 24), DlColor::kRed());
+  auto before =
+      RootFactsHarness::Rect(DlRect::Make(changed), DlColor::kGreen());
+  auto after = RootFactsHarness::Rect(DlRect::Make(changed), DlColor::kBlue());
+  ASSERT_EQ(view.Draw(RootFactsHarness::Claim(rect, false, {kept, before})),
+            DrawSurfaceStatus::kSuccess);
+  ASSERT_EQ(view.Draw(RootFactsHarness::Claim(rect, true, {kept, after})),
+            DrawSurfaceStatus::kSuccess);
+
+  ASSERT_EQ(view.submitted.size(), 2u);
+  const auto& enable = view.submitted[1];
+  EXPECT_EQ(enable.hit_regions, Claims({rect}));
+  ASSERT_TRUE(enable.frame_damage.has_value());
+  EXPECT_EQ(enable.frame_damage->bounds(), changed);
+  ASSERT_TRUE(enable.buffer_damage.has_value());
+  EXPECT_EQ(enable.buffer_damage->bounds(), changed);
   EXPECT_TRUE(view.LastDrawBecameBaseline());
 }
 

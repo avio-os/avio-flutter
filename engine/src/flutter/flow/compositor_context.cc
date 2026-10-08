@@ -52,6 +52,10 @@ void FrameDamage::ComputeDamage(flutter::LayerTree& layer_tree,
 
   damage_ = context.ComputeDamage(
       additional_damage_, horizontal_clip_alignment_, vertical_clip_alignment_);
+  if (require_non_empty_buffer_damage_ && damage_->buffer_damage.isEmpty()) {
+    damage_->buffer_damage =
+        DlRegion(DlIRect::MakeSize(layer_tree.frame_size()));
+  }
   raster_damage_ = damage_->buffer_damage.isEmpty()
                        ? DlRegion()
                        : DlRegion(damage_->buffer_damage.bounds());

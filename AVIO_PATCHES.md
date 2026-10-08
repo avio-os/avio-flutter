@@ -1381,9 +1381,9 @@ including at external alpha zero. Framework composited-layer updates reuse the
 same framework layer and retain child painting. Changing root facts promotes the
 root to a fresh ordinary buffered raster; it does not reuse a held producer BO
 through an unimplemented metadata-only custody shortcut. Since Patch 64 that
-promotion is whole-target catch-up damage on a diffed frame: the buffer is
-rendered whole while the published logical frame damage stays the exact pixel
-change (usually empty).
+promotion is catch-up damage on a diffed frame: the published logical frame
+damage stays the exact pixel change, and (Patch 64b) the buffer is rendered
+whole only when its damage would otherwise be empty.
 
 Nullable root effect opacity means no author. An authored identity opacity is
 an explicit group declaration; its nonzero monotonic declaration ID travels with
@@ -1855,6 +1855,32 @@ fade step is a narrow raster again. `rootFactsOnlyChangeRastersWholeTargetWithEx
 `metadataPathRootFactsChangeIsNotNoVisualChange` fail without the change;
 `contentAfterAcceptedEmptyFrameIsWholeDamaged` pins Patch 63's empty-frame rule
 and `FrameDamageCatchUpLeavesFrameDamageExact` pins the damage split.
+
+**Patch 64b amendment: catch-up only where the raster would be empty.** Adding
+the whole frame to every facts-changed frame made a facts change that also
+moved pixels (a panel's claim riding its slide, an opacity step under an
+animating child) a whole-target raster too, which it never needed: such a
+frame already rasters its buffer damage, so it is already a fresh generation
+and cannot become `NoVisualChange` (that exit and the embedder's selected-target
+exit both require empty buffer damage). The obligation Patch 64 carries is only
+that the frame must not raster nothing. `FrameDamage::RequireNonEmptyBufferDamage`
+states exactly that in the damage owner: after `ComputeDamage` has diffed the
+tree and folded in the target's `existing_damage`, an empty buffer damage
+becomes the whole target, any other buffer damage stays exact, and logical
+frame damage is never widened. The rasterizer sets it on a frame-facts change
+instead of adding whole-frame damage. A facts-only change with pixel-exact
+pool history therefore still renders the whole target (Impeller's cost
+heuristic or the multisampled branch then resets it as before); a target that
+is behind rasters only its existing damage; a facts change with pixel damage
+rasters only that damage. Completeness of the partial raster is the ordinary
+`FrameDamage` contract every unchanged-facts frame already relies on.
+`rootFactsChangeWithPixelDamageRastersOnlyItsBufferDamage`,
+`hitRegionChangeWithPixelDamageRastersOnlyItsBufferDamage` and
+`rootFactsOnlyChangeOnAStaleTargetRastersItsExistingDamage` fail without the
+change; `rootFactsOnlyChangeRastersWholeTargetWithExactFrameDamage`,
+`hitRegionOnlyChangeOnRootTargetCarriesTheNewClaim` (whole-target bounds),
+`FrameDamageCatchUpLeavesFrameDamageExact` and
+`FrameDamageRequiredNonEmptyKeepsExactBufferDamage` pin both branches.
 
 ### Patch 65: shell hit regions are collected from the frame they describe
 

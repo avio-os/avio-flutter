@@ -1095,11 +1095,13 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
     // Frame facts are not pixels: the metadata and hit-region layers paint
     // their children unchanged, so a root-facts or hit-region change never
     // changes the diff. A changed revision must still reach the producer as a
-    // freshly rendered buffered generation (Patch 56), so it makes the whole
-    // target stale for this frame. That is catch-up damage, never a skipped
-    // diff: the frame is still diffed against the accepted baseline, publishes
-    // exact logical damage and records its paint regions for the next frame
-    // (Patch 64). Both trees' hit sets come from their own facts prerolls.
+    // freshly rendered buffered generation (Patch 56), so this frame may not
+    // raster nothing. That is never a skipped diff: the frame is still diffed
+    // against the accepted baseline, publishes exact logical damage and
+    // records its paint regions for the next frame (Patch 64). Only a frame
+    // whose buffer damage would otherwise be empty renders the whole target;
+    // one that already rasters pixels keeps its exact buffer damage (Patch
+    // 64b). Both trees' hit sets come from their own facts prerolls.
     const auto* previous_tree = GetLastLayerTree(view_id);
     const bool frame_facts_changed =
         previous_tree &&
@@ -1168,7 +1170,7 @@ DrawSurfaceStatus Rasterizer::DrawToSurfaceUnsafe(
       }
     }
     if (damage && frame_facts_changed) {
-      damage->AddAdditionalDamage(DlIRect::MakeSize(layer_tree.frame_size()));
+      damage->RequireNonEmptyBufferDamage();
     }
 
     bool ignore_raster_cache = true;

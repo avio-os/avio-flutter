@@ -87,6 +87,15 @@ class FrameDamage {
     return raster_replaces_whole_target_;
   }
 
+  // This frame must render the target even if no pixel changed (Avio Patch
+  // 64b: its frame facts changed, so it is a new buffered revision). If the
+  // buffer damage would otherwise be empty it becomes the whole target; a
+  // frame that already rasters something keeps its exact buffer damage.
+  // Logical frame damage is never widened.
+  void RequireNonEmptyBufferDamage() {
+    require_non_empty_buffer_damage_ = true;
+  }
+
   // Calculates logical frame damage and the region that this renderer will
   // actually replace in the backing target. The logical damage remains
   // sparse. The current canvas and Impeller dispatch paths admit one
@@ -129,6 +138,7 @@ class FrameDamage {
   int horizontal_clip_alignment_ = 1;
   bool ignore_damage_ = false;
   bool raster_replaces_whole_target_ = false;
+  bool require_non_empty_buffer_damage_ = false;
 };
 
 class CompositorContext {
