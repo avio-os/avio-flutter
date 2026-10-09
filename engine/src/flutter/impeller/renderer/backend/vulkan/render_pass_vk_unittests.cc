@@ -154,9 +154,8 @@ TEST(RenderPassVK, PolicyDistinguishesLoadActionAndInitialLayout) {
   EXPECT_EQ(clear.attachments[0].loadOp, vk::AttachmentLoadOp::eClear);
   EXPECT_EQ(clear.attachments[0].initialLayout, vk::ImageLayout::eUndefined);
   // A clear discards contents whatever the current layout is.
-  EXPECT_TRUE(clear ==
-              policy(LoadAction::kClear,
-                     vk::ImageLayout::eShaderReadOnlyOptimal));
+  EXPECT_TRUE(clear == policy(LoadAction::kClear,
+                              vk::ImageLayout::eShaderReadOnlyOptimal));
   const auto load = policy(LoadAction::kLoad, vk::ImageLayout::eGeneral);
   EXPECT_FALSE(clear == load);
   EXPECT_EQ(load.attachments[0].loadOp, vk::AttachmentLoadOp::eLoad);

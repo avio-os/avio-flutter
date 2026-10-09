@@ -67,7 +67,7 @@ std::optional<AvioContinuousClip> AvioContinuousClip::Geometry(
                    params.inner_radii_y.z, params.inner_radii_y.w};
   p.vectors[11] = {params.arc.x, params.arc.y, params.arc.z, params.arc.w};
   const float join = !params.stroke || params.stroke->join == Join::kMiter ? 0.f
-                     : params.stroke->join == Join::kBevel                 ? 1.f
+                     : params.stroke->join == Join::kBevel ? 1.f
                                                            : 2.f;
   p.vectors[12] = {params.stroke ? params.stroke->width : 0,
                    params.stroke ? 1.f : 0.f, join,

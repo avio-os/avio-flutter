@@ -124,8 +124,7 @@ bool RenderPassPolicyVK::operator==(const RenderPassPolicyVK& other) const {
         a.loadOp != b.loadOp || a.storeOp != b.storeOp ||
         a.stencilLoadOp != b.stencilLoadOp ||
         a.stencilStoreOp != b.stencilStoreOp ||
-        a.initialLayout != b.initialLayout ||
-        a.finalLayout != b.finalLayout) {
+        a.initialLayout != b.initialLayout || a.finalLayout != b.finalLayout) {
       return false;
     }
   }

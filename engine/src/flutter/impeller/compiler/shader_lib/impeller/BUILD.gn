@@ -6,11 +6,11 @@ copy("impeller") {
   sources = [
     "blending.glsl",
     "branching.glsl",
-    "color.glsl",
     "clip_coverage.glsl",
-    "coverage_geometry.glsl",
+    "color.glsl",
     "conical_gradient_uniform_fill.glsl",
     "constants.glsl",
+    "coverage_geometry.glsl",
     "dithering.glsl",
     "external_texture_oes.glsl",
     "gaussian.glsl",

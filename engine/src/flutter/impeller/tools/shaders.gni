@@ -165,7 +165,11 @@ template("impeller_shaders") {
   }
 
   if (!impeller_enable_vulkan) {
-    not_needed(invoker, [ "vulkan_only_shaders", "vulkan_include_dirs" ])
+    not_needed(invoker,
+               [
+                 "vulkan_only_shaders",
+                 "vulkan_include_dirs",
+               ])
   }
 
   if (!impeller_supports_rendering) {

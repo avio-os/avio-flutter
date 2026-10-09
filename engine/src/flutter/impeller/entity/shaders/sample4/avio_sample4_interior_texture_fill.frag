@@ -7,7 +7,8 @@ precision highp float;
 #include "../texture_fill.frag"
 #undef main
 void main() {
-  if (AvioJointClipMask4() != 15u) discard;
+  if (AvioJointClipMask4() != 15u)
+    discard;
   AvioOriginalSourceMain();
   gl_SampleMask[0] = -1;
 }

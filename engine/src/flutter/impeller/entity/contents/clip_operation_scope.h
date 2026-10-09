@@ -27,4 +27,4 @@ class AvioClipOperationScope {
 };
 
 }  // namespace impeller
-#endif
+#endif  // FLUTTER_IMPELLER_ENTITY_CONTENTS_CLIP_OPERATION_SCOPE_H_

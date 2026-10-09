@@ -26,7 +26,7 @@ void main() {
   // Sampling decodes BGRA storage through its declared format. Reconstruct the
   // stored UNORM codes in highp before coverage, instead of introducing the
   // original source shader's f16 approximation of an already encoded byte.
-  vec4 encoded = round(textureLod(texture_sampler, v_texture_coords, 0.0) *
-                       255.0) / 255.0;
+  vec4 encoded =
+      round(textureLod(texture_sampler, v_texture_coords, 0.0) * 255.0) / 255.0;
   frag_color = encoded * (frag_info.alpha * AvioResolveJointClip4());
 }

@@ -7,7 +7,8 @@
 uniform FrameInfo {
   mat4 mvp;
   float depth;
-} frame_info;
+}
+frame_info;
 
 in vec2 position;
 out highp vec2 v_logical_position;

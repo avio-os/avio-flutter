@@ -293,8 +293,8 @@ if (enable_unittests) {
 
     sources = [
       "avio_coverage_root_target_unittests.cc",
-      "embedder_external_view_embedder_unittests.cc",
       "embedder_external_resource_custody_unittests.cc",
+      "embedder_external_view_embedder_unittests.cc",
       "embedder_render_target_impeller_unittests.cc",
       "platform_view_embedder_unittests.cc",
       "tests/embedder_config_builder.cc",
@@ -674,7 +674,10 @@ executable("avio_coverage_contract_tests") {
     "avio_render_resource_report.h",
     "tests/avio_coverage_contract_tests.cc",
   ]
-  include_dirs = [ "//", "//flutter" ]
+  include_dirs = [
+    "//",
+    "//flutter",
+  ]
   deps = [
     ":embedder_headers",
     "//flutter/flow:avio_frame_facts",

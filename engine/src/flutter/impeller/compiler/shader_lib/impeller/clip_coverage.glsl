@@ -7,9 +7,10 @@
 
 // Bit identity matches kClipSampleLocations4. Caller coordinates are top-left,
 // physical pixels on the original pass grid, even when drawing an atlas tile.
-const highp vec2 kIPClipSampleLocations4[4] =
-    vec2[4](vec2(0.375, 0.125), vec2(0.875, 0.375),
-            vec2(0.125, 0.625), vec2(0.625, 0.875));
+const highp vec2 kIPClipSampleLocations4[4] = vec2[4](vec2(0.375, 0.125),
+                                                      vec2(0.875, 0.375),
+                                                      vec2(0.125, 0.625),
+                                                      vec2(0.625, 0.875));
 
 highp uint IPClipRectMask4(highp vec4 bounds, highp vec2 pixel_origin) {
   highp uint mask = 0u;
@@ -54,8 +55,9 @@ highp uint IPClipMask4Difference(highp uint parent, highp uint shape) {
 highp float IPClipMask4Coverage(highp uint mask) {
   mask &= 15u;
   // No bitCount requirement: usable by the existing GLES3 shader targets too.
-  return float((mask & 1u) + ((mask >> 1u) & 1u) +
-               ((mask >> 2u) & 1u) + ((mask >> 3u) & 1u)) * 0.25;
+  return float((mask & 1u) + ((mask >> 1u) & 1u) + ((mask >> 2u) & 1u) +
+               ((mask >> 3u) & 1u)) *
+         0.25;
 }
 
 bool IPClipMask4CoversSample(highp uint mask, highp uint sample_index) {

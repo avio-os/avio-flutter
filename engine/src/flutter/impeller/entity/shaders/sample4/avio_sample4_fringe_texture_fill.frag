@@ -8,7 +8,8 @@ precision highp float;
 #undef main
 void main() {
   uint mask = AvioJointClipMask4();
-  if (mask == 0u || mask == 15u) discard;
+  if (mask == 0u || mask == 15u)
+    discard;
   AvioOriginalSourceMain();
   // The captured source independently proves geometry on every surviving
   // clip lane. Keep those lanes through the original destination operator.

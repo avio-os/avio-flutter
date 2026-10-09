@@ -44,8 +44,8 @@ impeller_component("vulkan_unittests") {
     "test/pipeline_compile_queue_vulkan_unittests.cc",
     "test/sampler_library_vk_unittests.cc",
     "test/swapchain_unittests.cc",
-    "timeline_completion_vk_unittests.cc",
     "timeline_completion_custody_vk_unittests.cc",
+    "timeline_completion_vk_unittests.cc",
     "transients_sharing_vk_unittests.cc",
   ]
   deps = [

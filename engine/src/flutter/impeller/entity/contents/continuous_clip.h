@@ -33,4 +33,4 @@ struct AvioContinuousClip {
 float CombineAvioContinuousDistance(float parent, float child, bool difference);
 float AvioContinuousCoverage(float signed_pixel_distance);
 }  // namespace impeller
-#endif
+#endif  // FLUTTER_IMPELLER_ENTITY_CONTENTS_CONTINUOUS_CLIP_H_

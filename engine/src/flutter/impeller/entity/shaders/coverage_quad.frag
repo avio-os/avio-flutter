@@ -9,13 +9,14 @@ precision highp int;
 
 uniform QuadInfo {
   mat4 lines;
-} quad_info;
+}
+quad_info;
 
 in highp vec2 v_logical_position;
 
 void main() {
   // Preserve all four canonical Vulkan sample identities until stencil/depth
   // combines them with the parent clip. Never multiply resolved coverages.
-  gl_SampleMask[0] = int(IPCoverageConvexQuadMask4(
-      floor(v_logical_position), quad_info.lines));
+  gl_SampleMask[0] = int(
+      IPCoverageConvexQuadMask4(floor(v_logical_position), quad_info.lines));
 }

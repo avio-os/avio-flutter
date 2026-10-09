@@ -22,7 +22,8 @@ void main() {
   gl_Position = frame_info.mvp * vec4(position, 0.0, 1.0);
   v_texture_coords = texture_coords;
 #ifdef IMPELLER_TARGET_VULKAN
-  vec2 ndc=gl_Position.xy/gl_Position.w;
-  v_parent_position=vec2((ndc.x+1.0)*.5,(1.0-ndc.y)*.5)*frame_info.parent_size;
+  vec2 ndc = gl_Position.xy / gl_Position.w;
+  v_parent_position =
+      vec2((ndc.x + 1.0) * .5, (1.0 - ndc.y) * .5) * frame_info.parent_size;
 #endif
 }

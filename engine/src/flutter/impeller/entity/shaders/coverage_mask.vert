@@ -7,7 +7,8 @@
 uniform FrameInfo {
   mat4 mvp;
   float depth;
-} frame_info;
+}
+frame_info;
 
 in vec2 position;
 in vec2 texture_coords;

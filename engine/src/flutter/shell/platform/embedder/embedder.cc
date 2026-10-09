@@ -93,12 +93,12 @@ extern const intptr_t kPlatformStrongDillSize;
 #include "flutter/shell/platform/embedder/embedder_render_target_impeller.h"  // nogncheck
 #include "flutter/shell/platform/embedder/embedder_surface_gl_impeller.h"  // nogncheck
 #include "flutter/shell/platform/embedder/embedder_surface_gl_skia.h"  // nogncheck
-#include "impeller/core/texture.h"                        // nogncheck
-#include "impeller/renderer/backend/gles/context_gles.h"  // nogncheck
+#include "impeller/core/texture.h"                                // nogncheck
+#include "impeller/renderer/backend/gles/context_gles.h"          // nogncheck
 #include "impeller/renderer/backend/gles/native_coverage_gles.h"  // nogncheck
-#include "impeller/renderer/backend/gles/texture_gles.h"  // nogncheck
-#include "impeller/renderer/context.h"                    // nogncheck
-#include "impeller/renderer/render_target.h"              // nogncheck
+#include "impeller/renderer/backend/gles/texture_gles.h"          // nogncheck
+#include "impeller/renderer/context.h"                            // nogncheck
+#include "impeller/renderer/render_target.h"                      // nogncheck
 #endif  // IMPELLER_SUPPORTS_RENDERING
 #endif  // SHELL_ENABLE_GL
 

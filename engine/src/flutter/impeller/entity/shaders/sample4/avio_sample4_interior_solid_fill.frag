@@ -9,6 +9,7 @@ precision highp float;
 void main() {
   // All four native lanes agree: original source and blend run once at 1x.
   // No source alpha is multiplied by a second clip coverage.
-  if (AvioJointClipMask4() != 15u) discard;
+  if (AvioJointClipMask4() != 15u)
+    discard;
   AvioOriginalSourceMain();
 }

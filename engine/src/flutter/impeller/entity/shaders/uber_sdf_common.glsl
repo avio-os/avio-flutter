@@ -17,9 +17,9 @@ precision mediump float;
 #include <impeller/texture.glsl>
 #include <impeller/types.glsl>
 
+#include "continuous_clip.glsl"
 #include "sdf_functions.glsl"
 #include "sdf_utils.glsl"
-#include "continuous_clip.glsl"
 
 uniform FragInfo {
   /// The RGBA color of the shape; for a gradient, color.a is the paint's
@@ -305,14 +305,18 @@ vec2 filledSDF(vec2 p) {
         frag_info.superellipse_scale);
     pixel_size = pixelSize(sdf);
   } else if (frag_info.type < 5.5) {  // Bordered rounded rectangle
-    float outer = avioRoundedRectDistance(p,frag_info.size,frag_info.radii,frag_info.bordered_radii_y);
-    float inner = min(frag_info.inner_size.x,frag_info.inner_size.y)>0.0 ? avioRoundedRectDistance(
-        p + frag_info.center - frag_info.inner_center,
-        frag_info.inner_size,frag_info.inner_radii,frag_info.inner_radii_y) : 1e20;
-    sdf = max(outer,-inner);
+    float outer = avioRoundedRectDistance(p, frag_info.size, frag_info.radii,
+                                          frag_info.bordered_radii_y);
+    float inner = min(frag_info.inner_size.x, frag_info.inner_size.y) > 0.0
+                      ? avioRoundedRectDistance(
+                            p + frag_info.center - frag_info.inner_center,
+                            frag_info.inner_size, frag_info.inner_radii,
+                            frag_info.inner_radii_y)
+                      : 1e20;
+    sdf = max(outer, -inner);
     pixel_size = pixelSize(sdf);
   } else {  // Filled ellipse arc / sector / chord segment
-    sdf = avioArcFillDistance(p,frag_info.size,frag_info.arc);
+    sdf = avioArcFillDistance(p, frag_info.size, frag_info.arc);
     pixel_size = pixelSize(sdf);
   }
   return vec2(sdf, pixel_size);
@@ -322,8 +326,12 @@ vec2 filledSDF(vec2 p) {
 // Returns vec2(sdf, pixel_size).
 vec2 strokedSDF(vec2 p) {
   if (frag_info.type > 5.5) {
-    float sdf = avioArcStrokeDistance(p,frag_info.size,frag_info.arc,vec3(max(frag_info.stroke_width,pixelSize(distanceFromOval(p,frag_info.size))),frag_info.stroke_join,frag_info.stroke_miter_limit));
-    return vec2(sdf,pixelSize(sdf));
+    float sdf = avioArcStrokeDistance(
+        p, frag_info.size, frag_info.arc,
+        vec3(max(frag_info.stroke_width,
+                 pixelSize(distanceFromOval(p, frag_info.size))),
+             frag_info.stroke_join, frag_info.stroke_miter_limit));
+    return vec2(sdf, pixelSize(sdf));
   }
   vec2 base_sdf_and_pixel_size = filledSDF(p);
   float base_sdf = base_sdf_and_pixel_size.x;
@@ -394,7 +402,9 @@ void main() {
   avio_external_linear_backdrop = frag_info.external_linear_backdrop;
   float alpha = 1.0;
 #else
-  float alpha = frag_info.defer_geometry_coverage > .5 ? 1.0 : SDFAlpha(sdf, pixel_size, frag_info.aa_pixels);
+  float alpha = frag_info.defer_geometry_coverage > .5
+                    ? 1.0
+                    : SDFAlpha(sdf, pixel_size, frag_info.aa_pixels);
 #endif
   // Clamp alpha in case floating point precision errors cause it to be outside
   // [0.0, 1.0].
@@ -422,12 +432,12 @@ void main() {
     // shape, and srcOver would add it to whatever lies underneath.
     frag_color = finishGradientColor(IPPremultiply(color)) * alpha;
   }
-  #ifndef AVIO_CONTINUOUS_COVERAGE
+#ifndef AVIO_CONTINUOUS_COVERAGE
   if (frag_info.defer_coverage_transform < 0.5) {
     frag_color = IPApplyExternalLinearBackdropCoverage(
         frag_color, frag_info.external_linear_backdrop);
   }
-  #endif
+#endif
 }
 
 #endif  // UBER_SDF_COMMON_GLSL_

@@ -30,4 +30,4 @@ struct GeometryResult {
 };
 
 }  // namespace impeller
-#endif
+#endif  // FLUTTER_IMPELLER_ENTITY_GEOMETRY_GEOMETRY_RESULT_H_

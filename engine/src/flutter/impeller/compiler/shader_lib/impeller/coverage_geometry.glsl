@@ -23,8 +23,8 @@ bool IPCoverageConvexQuadContains(vec2 point, mat4 lines) {
 uint IPCoverageConvexQuadMask4(vec2 pixel_origin, mat4 lines) {
   uint mask = 0u;
   for (int sample_index = 0; sample_index < 4; sample_index++) {
-    if (IPCoverageConvexQuadContains(pixel_origin + kIPClipSampleLocations4[sample_index],
-                                    lines)) {
+    if (IPCoverageConvexQuadContains(
+            pixel_origin + kIPClipSampleLocations4[sample_index], lines)) {
       mask |= 1u << uint(sample_index);
     }
   }
