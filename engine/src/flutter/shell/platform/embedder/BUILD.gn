@@ -487,7 +487,6 @@ if (enable_unittests) {
         "//flutter/impeller/renderer/backend/gles/command_buffer_gles_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/native_coverage_gles_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/render_pass_gles_unittests.cc",
-        "//flutter/impeller/renderer/backend/gles/test/mock_gles.cc",
         "//flutter/impeller/renderer/backend/gles/test/proc_table_gles_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/test/reactor_unittests.cc",
         "avio_coverage_root_target_unittests.cc",
@@ -500,6 +499,7 @@ if (enable_unittests) {
         ":embedder_gpu_configuration",
         "//flutter/impeller/display_list",
         "//flutter/impeller/renderer/backend/gles",
+        "//flutter/impeller/renderer/backend/gles:mock_gles",
         "//flutter/testing",
       ]
     }
