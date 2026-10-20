@@ -121,6 +121,25 @@ AvioRenderResourceReport ContextGLES::GetAvioRenderResourceReport(
   if (report.available) {
     report.Merge(GetAvioCoverageRegionResourceReport(start_new_interval));
     report.Merge(GetAvioCoverageUsageReport(start_new_interval));
+    std::lock_guard lock(external_targets_mutex_);
+    AvioRenderResourceEntry bindings;
+    bindings.kind_id =
+        static_cast<uint32_t>(AvioRenderResourceKind::kExternalTargetBindings);
+    bindings.fields_supported =
+        kAvioResourceFieldCounts | kAvioResourceFieldLeases;
+    bindings.unsupported_reason_id =
+        kAvioResourceReasonPhysicalAllocationUnavailable;
+    bindings.usage.entries = external_targets_.size();
+    bindings.usage.created_entries = external_targets_created_;
+    bindings.usage.orphans_released_entries = external_targets_retired_;
+    for (const auto& [id, target] : external_targets_) {
+      bindings.usage.leased_entries += target.use_count() > 1 ? 1 : 0;
+    }
+    report.AddEntry(bindings);
+    if (start_new_interval) {
+      external_targets_created_ = 0;
+      external_targets_retired_ = 0;
+    }
   }
   return report;
 }
@@ -145,10 +164,24 @@ bool ContextGLES::RemoveReactorWorker(ReactorGLES::WorkerID id) {
 }
 
 bool ContextGLES::IsValid() const {
-  return is_valid_;
+  return is_valid_ && reactor_->IsValid() &&
+         !external_completion_unobservable_.load();
 }
 
-void ContextGLES::Shutdown() {}
+void ContextGLES::Shutdown() {
+  reactor_->Shutdown();
+}
+
+void ContextGLES::MarkExternalCompletionUnobservable() {
+  external_completion_unobservable_.store(true);
+}
+
+bool ContextGLES::IsSafeToDestroyNativeResources() const {
+  // The host must also observe every successfully exported completion fence.
+  // Failure is sticky: thread joins and reactor shutdown cannot recover it.
+  std::lock_guard lock(external_targets_mutex_);
+  return !external_completion_unobservable_.load() && external_targets_.empty();
+}
 
 // |Context|
 std::string ContextGLES::DescribeGpuModel() const {

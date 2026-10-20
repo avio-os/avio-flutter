@@ -93,7 +93,18 @@ ReactorGLES::~ReactorGLES() {
 }
 
 bool ReactorGLES::IsValid() const {
-  return is_valid_;
+  return is_valid_ && !shutdown_.load();
+}
+
+void ReactorGLES::Shutdown() {
+  decltype(ops_) abandoned;
+  {
+    Lock lock(ops_mutex_);
+    shutdown_.store(true);
+    abandoned.swap(ops_);
+  }
+  // Destruction of a queued render pass may release its texture source, whose
+  // collection callback can reenter the reactor. Never run it under ops_mutex_.
 }
 
 bool ReactorGLES::CanSetDebugLabels() const {
@@ -177,6 +188,9 @@ bool ReactorGLES::AddOperation(Operation operation, bool defer) {
   auto thread_id = std::this_thread::get_id();
   {
     Lock ops_lock(ops_mutex_);
+    if (shutdown_.load()) {
+      return false;
+    }
     ops_[thread_id].emplace_back(std::move(operation));
   }
   // Attempt a reaction if able but it is not an error if this isn't possible.
@@ -253,7 +267,7 @@ void ReactorGLES::CollectHandle(HandleGLES handle) {
 }
 
 bool ReactorGLES::React() {
-  if (!CanReactOnCurrentThread()) {
+  if (!IsValid() || !CanReactOnCurrentThread()) {
     return false;
   }
   TRACE_EVENT0("impeller", "ReactorGLES::React");

@@ -130,6 +130,22 @@ std::shared_ptr<TextureGLES> TextureGLES::CreatePlaceholder(
   return TextureGLES::WrapFBO(std::move(reactor), desc, 0u);
 }
 
+TextureGLES::~TextureGLES() {
+  // Borrowed FBO sources own no native GL objects. Registered membership owns
+  // its attachment separately and cannot retire while this callback retains it.
+  if (external_resource_callback_) {
+    external_resource_callback_();
+  }
+}
+
+bool TextureGLES::AdoptExternalResourceCallback(fml::closure callback) {
+  if (!wrapped_fbo_ || external_resource_callback_ || !callback) {
+    return false;
+  }
+  external_resource_callback_ = std::move(callback);
+  return true;
+}
+
 TextureGLES::TextureGLES(std::shared_ptr<ReactorGLES> reactor,
                          TextureDescriptor desc,
                          bool threadsafe)
@@ -151,7 +167,8 @@ TextureGLES::TextureGLES(std::shared_ptr<ReactorGLES> reactor,
           GetTextureDescriptor(),
           reactor_->GetProcTable().GetCapabilities())),
       handle_(
-          external_handle.has_value()
+          fbo.has_value() ? UniqueHandleGLES{}
+          : external_handle.has_value()
               ? UniqueHandleGLES(reactor_, external_handle.value())
               : (threadsafe
                      ? UniqueHandleGLES(reactor_, ToHandleType(type_))

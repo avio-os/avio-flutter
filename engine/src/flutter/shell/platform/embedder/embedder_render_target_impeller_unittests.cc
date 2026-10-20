@@ -95,7 +95,10 @@ TEST(EmbedderRenderTargetImpellerTest,
 // needed: a skipped target must never invoke its factory, and a failed factory
 // must prove no submission without falling into Slimpeller's fatal
 // backend-switch path.
-void CheckDeferredTerminal(bool unchanged, bool accept_terminal = true) {
+void CheckDeferredTerminal(
+    bool unchanged,
+    bool accept_terminal = true,
+    FlutterBackingStoreType backend = kFlutterBackingStoreTypeVulkan) {
   int creations = 0;
   int releases = 0;
   int presents = 0;
@@ -110,7 +113,7 @@ void CheckDeferredTerminal(bool unchanged, bool accept_terminal = true) {
   };
   FlutterBackingStore store{
       .struct_size = sizeof(FlutterBackingStore),
-      .type = kFlutterBackingStoreTypeVulkan,
+      .type = backend,
       .content_state = &contents,
   };
   EmbedderExternalViewEmbedder embedder(
@@ -215,6 +218,15 @@ TEST(EmbedderRenderTargetImpellerTest,
 TEST(EmbedderRenderTargetImpellerTest,
      AllocationFailureHasOneNoSubmissionOutcome) {
   CheckDeferredTerminal(false);
+}
+
+TEST(EmbedderRenderTargetImpellerTest, OpenGLUnchangedLeaseKeepsExactHistory) {
+  CheckDeferredTerminal(true, true, kFlutterBackingStoreTypeOpenGL);
+}
+
+TEST(EmbedderRenderTargetImpellerTest,
+     OpenGLAllocationFailureHasOneNoSubmissionOutcome) {
+  CheckDeferredTerminal(false, true, kFlutterBackingStoreTypeOpenGL);
 }
 
 }  // namespace

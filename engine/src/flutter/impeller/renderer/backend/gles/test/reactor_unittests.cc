@@ -105,15 +105,13 @@ TEST(ReactorGLES, NameUntrackedHandle) {
   ProcTableGLES::Resolver resolver = kMockResolverGLES;
   auto proc_table = std::make_unique<ProcTableGLES>(resolver);
 
-  if (!proc_table->SupportsDebugLabels()) {
-    GTEST_SKIP() << "This device doesn't support labelling.";
-  }
+  const bool labels_available = proc_table->SupportsDebugLabels();
 
   EXPECT_CALL(*raw_mock_gles, GenTextures(1, _))
       .WillOnce([](GLsizei size, GLuint* queries) { queries[0] = 1234; });
   EXPECT_CALL(*raw_mock_gles,
               ObjectLabelKHR(_, 1234, _, ::testing::StrEq("hello, joe!")))
-      .Times(1);
+      .Times(labels_available ? 1 : 0);
   ON_CALL(*raw_mock_gles, IsTexture).WillByDefault(::testing::Return(GL_TRUE));
 
   auto worker = std::make_shared<TestWorker>();

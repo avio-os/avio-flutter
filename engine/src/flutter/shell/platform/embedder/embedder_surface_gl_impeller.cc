@@ -96,7 +96,9 @@ EmbedderSurfaceGLImpeller::EmbedderSurfaceGLImpeller(
   }
   // Certain GL backends need to made current before any GL
   // state can be accessed.
-  gl_dispatch_table_.gl_make_current_callback();
+  if (!gl_dispatch_table_.gl_make_current_callback()) {
+    return;
+  }
 
   auto gl = std::make_unique<impeller::ProcTableGLES>(
       gl_dispatch_table_.gl_proc_resolver,
@@ -146,9 +148,9 @@ bool EmbedderSurfaceGLImpeller::IsValid() const {
 // |GPUSurfaceGLDelegate|
 std::unique_ptr<GLContextResult>
 EmbedderSurfaceGLImpeller::GLContextMakeCurrent() {
-  worker_->SetReactionsAllowedOnCurrentThread(true);
-  return std::make_unique<GLContextDefaultResult>(
-      gl_dispatch_table_.gl_make_current_callback());
+  const bool current = gl_dispatch_table_.gl_make_current_callback();
+  worker_->SetReactionsAllowedOnCurrentThread(current);
+  return std::make_unique<GLContextDefaultResult>(current);
 }
 
 // |GPUSurfaceGLDelegate|

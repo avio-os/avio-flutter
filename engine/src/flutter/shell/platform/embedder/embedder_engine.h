@@ -139,6 +139,11 @@ class EmbedderEngine {
 
   bool PostRenderThreadTask(const fml::closure& task);
 
+  bool SupportsOpenGLSelectedTargets() const {
+    return (avio_extension_features_ &
+            kFlutterAvioExtensionFeatureOpenGLSelectedTarget) != 0;
+  }
+
   bool RequestAvioRenderResourceReport(
       bool start_new_interval,
       FlutterAvioRenderResourceReportCallback callback,

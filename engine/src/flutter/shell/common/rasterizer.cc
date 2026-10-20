@@ -153,6 +153,9 @@ void Rasterizer::Teardown() {
     auto context_switch = surface_->MakeRenderContextCurrent();
     if (context_switch->GetResult()) {
       compositor_context_->OnGrContextDestroyed();
+      if (auto context = GetSurfaceImpellerContext()) {
+        context->RetireExternalRenderTargets();
+      }
 #if !SLIMPELLER
       if (auto* context = surface_->GetContext()) {
         context->purgeUnlockedResources(GrPurgeResourceOptions::kAllResources);
@@ -229,6 +232,25 @@ std::shared_ptr<impeller::Context> Rasterizer::GetSurfaceImpellerContext()
   }
   auto aiks_context = surface_->GetAiksContext();
   return aiks_context ? aiks_context->GetContext() : nullptr;
+}
+
+bool Rasterizer::RunWithCurrentImpellerContext(
+    const std::function<void(const std::shared_ptr<impeller::Context>&)>&
+        task) {
+  if (!surface_ || !task) {
+    return false;
+  }
+  auto current = surface_->MakeRenderContextCurrent();
+  if (!current || !current->GetResult()) {
+    return false;
+  }
+  auto context = GetSurfaceImpellerContext();
+  if (context) {
+    task(context);
+  }
+  current.reset();
+  const bool cleared = surface_->ClearRenderContext();
+  return context && cleared;
 }
 
 void Rasterizer::TrimIdleResourceCaches() const {

@@ -127,6 +127,8 @@ template("embedder_source_set") {
 
       if (impeller_supports_rendering) {
         sources += [
+          "embedder_opengl_selected_target.cc",
+          "embedder_opengl_selected_target.h",
           "embedder_surface_gl_impeller.cc",
           "embedder_surface_gl_impeller.h",
         ]
@@ -337,6 +339,7 @@ if (enable_unittests) {
       sources += [
         "//flutter/impeller/renderer/backend/gles/test/mock_gles.cc",
         "//flutter/impeller/renderer/backend/gles/test/mock_gles.h",
+        "embedder_opengl_selected_target_unittests.cc",
         "tests/embedder_test_backingstore_producer_gl.cc",
         "tests/embedder_test_backingstore_producer_gl.h",
         "tests/embedder_test_compositor_gl.cc",
@@ -466,6 +469,40 @@ if (enable_unittests) {
       #"$dart_src/runtime/bin:elf_loader",
       #"//flutter/skia",
     ]
+  }
+
+  if (test_enable_gl && impeller_supports_rendering) {
+    # Exercise the production embedder/renderer contracts without booting a Dart
+    # application or building unrelated playground graphics implementations.
+    # Every source also remains in its existing full unit-test suite.
+    executable("embedder_gles_contract_unittests") {
+      testonly = true
+      configs += [
+        ":embedder_gpu_configuration_config",
+        "//flutter:export_dynamic_symbols",
+      ]
+      include_dirs = [ "." ]
+      defines = [ "FLUTTER_ENGINE_NO_PROTOTYPES" ]
+      sources = [
+        "//flutter/impeller/renderer/backend/gles/command_buffer_gles_unittests.cc",
+        "//flutter/impeller/renderer/backend/gles/native_coverage_gles_unittests.cc",
+        "//flutter/impeller/renderer/backend/gles/render_pass_gles_unittests.cc",
+        "//flutter/impeller/renderer/backend/gles/test/mock_gles.cc",
+        "//flutter/impeller/renderer/backend/gles/test/proc_table_gles_unittests.cc",
+        "//flutter/impeller/renderer/backend/gles/test/reactor_unittests.cc",
+        "avio_coverage_root_target_unittests.cc",
+        "embedder_opengl_selected_target_unittests.cc",
+        "embedder_render_target_impeller_unittests.cc",
+        "tests/embedder_unittests_proctable.cc",
+      ]
+      deps = [
+        ":embedder",
+        ":embedder_gpu_configuration",
+        "//flutter/impeller/display_list",
+        "//flutter/impeller/renderer/backend/gles",
+        "//flutter/testing",
+      ]
+    }
   }
 }
 

@@ -544,17 +544,21 @@ void PipelineLifetimeAndIntervalDoNotAllocate() {
   heap_allocations = 0;
   track_heap = true;
   {
-    Registration warm(ledger, false);
-    Registration first(ledger, true);
-    Registration variant(ledger, true);
+    Registration warm(ledger, {.raster_frame = false});
+    Registration first(ledger, {.raster_frame = true});
+    Registration variant(ledger, {.raster_frame = true});
     Registration moved(std::move(variant));
     auto report = ledger->Report(true);
     assert(report.entries_count == 1 && report.entries[0].usage.entries == 3 &&
            report.entries[0].usage.created_entries == 3 &&
            report.entries[0].usage.real_bytes == 0 &&
            report.counters_supported ==
-               impeller::kAvioCounterFirstUseCompiles &&
-           report.first_use_compiles == 2);
+               (impeller::kAvioCounterFirstUseCompiles |
+                impeller::kAvioCounterRasterThreadAllocations |
+                impeller::kAvioCounterSnapshotAllocations) &&
+           report.first_use_compiles == 2 &&
+           report.raster_thread_allocations == 2 &&
+           report.snapshot_allocations == 0);
     report = ledger->Report(false);
     assert(report.entries[0].usage.entries == 3 &&
            report.entries[0].usage.created_entries == 0 &&
@@ -567,7 +571,7 @@ void PipelineLifetimeAndIntervalDoNotAllocate() {
   assert(heap_allocations == 0);
   const std::weak_ptr<impeller::PipelineResourceLedger> lifetime = ledger;
   {
-    Registration submitted(ledger, false);
+    Registration submitted(ledger, {.raster_frame = false});
     ledger.reset();
     assert(!lifetime.expired());
   }
@@ -577,14 +581,14 @@ void PipelineLifetimeAndIntervalDoNotAllocate() {
 void PipelineFirstUseOriginSurvivesAsyncWorker() {
   auto ledger = std::make_shared<impeller::PipelineResourceLedger>();
   assert(!impeller::IsAvioRasterFrameActive());
-  bool captured_origin = false;
+  impeller::AvioPipelineCreationOrigin captured_origin;
   heap_allocations = 0;
   track_heap = true;
   {
     const impeller::AvioRasterFrameScope outer;
     {
       const impeller::AvioRasterFrameScope inner;
-      captured_origin = impeller::IsAvioRasterFrameActive();
+      captured_origin = impeller::AvioPipelineCreationOrigin::Capture();
     }
     assert(impeller::IsAvioRasterFrameActive());
   }
@@ -612,7 +616,8 @@ void ConcurrentPipelineIntervalsLoseNoSuccessfulCreations() {
   std::atomic_bool done = false;
   std::thread worker([&] {
     for (size_t i = 0; i < kCreations; i++) {
-      impeller::PipelineResourceLedger::Registration created(ledger, i % 2);
+      impeller::PipelineResourceLedger::Registration created(
+          ledger, {.raster_frame = (i % 2) != 0});
     }
     done.store(true);
   });
@@ -633,7 +638,14 @@ void ConcurrentPipelineIntervalsLoseNoSuccessfulCreations() {
 }  // namespace
 
 int main() {
-  static_assert(FLUTTER_AVIO_EXTENSION_VERSION == 10);
+  static_assert(FLUTTER_AVIO_EXTENSION_VERSION == 11);
+  static_assert(kFlutterAvioExtensionFeatureOpenGLSelectedTarget == 0x100000);
+  static_assert(offsetof(FlutterBackingStore, open_gl_synchronization) >
+                offsetof(FlutterBackingStore, content_state));
+  static_assert(
+      offsetof(FlutterOpenGLBackingStoreSynchronization, selected_target_id) >
+      offsetof(FlutterOpenGLBackingStoreSynchronization,
+               export_render_complete_sync_fd));
   static_assert(kFlutterAvioResourceFieldDescriptorMultiplicity == 16);
   static_assert(kFlutterAvioResourceFieldLeases == 32);
   static_assert(kFlutterAvioContinuousKnownClasses ==
@@ -650,11 +662,20 @@ int main() {
   static_assert(kFlutterAvioRenderResourceCoverageCpuStorage ==
                 static_cast<uint32_t>(
                     impeller::AvioRenderResourceKind::kCoverageCpuStorage));
+  static_assert(kFlutterAvioRenderResourceExternalTargetBindings ==
+                static_cast<uint32_t>(
+                    impeller::AvioRenderResourceKind::kExternalTargetBindings));
   static_assert(offsetof(FlutterProjectArgs, avio_antialiasing_config) >
                 offsetof(FlutterProjectArgs, avio_resource_lifecycle_config));
   static_assert(
       offsetof(FlutterEngineProcTable, RequestAvioRenderResourceReport) >
       offsetof(FlutterEngineProcTable, SetAvioViewVisibility));
+  static_assert(
+      offsetof(FlutterEngineProcTable, RegisterOpenGLSelectedTarget) >
+      offsetof(FlutterEngineProcTable, RequestAvioRenderResourceReport));
+  static_assert(
+      offsetof(FlutterEngineProcTable, UnregisterOpenGLSelectedTarget) >
+      offsetof(FlutterEngineProcTable, RegisterOpenGLSelectedTarget));
   CapabilityRowsHonorExactAppendBoundsWithoutAllocation();
   ContinuousClassAdmissionIsBackendSpecific();
   RootFrameFactsStayBorrowedValidatedAndAllocationFree();

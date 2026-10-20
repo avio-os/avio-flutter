@@ -5,6 +5,11 @@
 #ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_CONTEXT_GLES_H_
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_CONTEXT_GLES_H_
 
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+
 #include "impeller/base/backend_cast.h"
 #include "impeller/core/runtime_types.h"
 #include "impeller/renderer/backend/gles/allocator_gles.h"
@@ -24,6 +29,24 @@ class ContextGLES final : public Context,
                           public BackendCast<ContextGLES, Context>,
                           public std::enable_shared_from_this<ContextGLES> {
  public:
+  struct ExternalTarget {
+    GLuint texture = 0;
+    GLuint framebuffer = 0;
+    ISize size;
+  };
+
+  enum class ExternalTargetRetirement { kSuccess, kUnknown, kInUse, kFailed };
+
+  // Membership operations run with the raster context current. The host keeps
+  // the texture alive until retirement succeeds. Acquisitions retain the entry
+  // through every queued source reader; numeric GL names are never identities.
+  uint64_t RegisterExternalTarget(GLuint texture, ISize size);
+  std::shared_ptr<const ExternalTarget> AcquireExternalTarget(uint64_t id,
+                                                              GLuint texture,
+                                                              ISize size) const;
+  ExternalTargetRetirement RetireExternalTarget(uint64_t id);
+  bool RetireExternalRenderTargets() override;
+
   static std::shared_ptr<ContextGLES> Create(
       const Flags& flags,
       std::unique_ptr<ProcTableGLES> gl,
@@ -55,6 +78,12 @@ class ContextGLES final : public Context,
   const std::shared_ptr<GpuSubmissionTracker>& GetMutableSubmissionTracker()
       const;
 
+  /// A selected external target lost its native completion dependency. Reactor
+  /// consumption cannot turn this into a proof that native resources are idle.
+  void MarkExternalCompletionUnobservable();
+
+  bool IsSafeToDestroyNativeResources() const override;
+
  private:
   std::shared_ptr<ReactorGLES> reactor_;
   std::shared_ptr<GpuSubmissionTracker> submission_tracker_ =
@@ -64,6 +93,13 @@ class ContextGLES final : public Context,
   std::shared_ptr<SamplerLibraryGLES> sampler_library_;
   std::shared_ptr<AllocatorGLES> resource_allocator_;
   std::shared_ptr<CommandQueue> command_queue_;
+  std::atomic_bool external_completion_unobservable_ = false;
+  mutable std::mutex external_targets_mutex_;
+  std::optional<std::thread::id> external_target_owner_;
+  mutable size_t external_targets_created_ = 0;
+  mutable size_t external_targets_retired_ = 0;
+  std::unordered_map<uint64_t, std::shared_ptr<ExternalTarget>>
+      external_targets_;
   std::shared_ptr<GPUTracerGLES> gpu_tracer_;
 
   // Note: This is stored separately from the ProcTableGLES CapabilitiesGLES

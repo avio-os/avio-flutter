@@ -76,6 +76,7 @@ impeller_component("gles") {
     "command_buffer_gles.cc",
     "command_buffer_gles.h",
     "context_gles.cc",
+    "external_target_gles.cc",
     "context_gles.h",
     "description_gles.cc",
     "description_gles.h",

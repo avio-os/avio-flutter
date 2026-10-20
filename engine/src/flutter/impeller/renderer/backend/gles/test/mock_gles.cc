@@ -370,6 +370,13 @@ void mockGenFramebuffers(GLsizei n, GLuint* ids) {
 static_assert(CheckSameSignature<decltype(mockGenFramebuffers),  //
                                  decltype(glGenFramebuffers)>::value);
 
+void mockDeleteFramebuffers(GLsizei count, const GLuint* framebuffers) {
+  CallMockMethod(&IMockGLESImpl::DeleteFramebuffers, count, framebuffers);
+}
+
+static_assert(CheckSameSignature<decltype(mockDeleteFramebuffers),
+                                 decltype(glDeleteFramebuffers)>::value);
+
 void mockBindFramebuffer(GLenum target, GLuint framebuffer) {
   return CallMockMethod(&IMockGLESImpl::BindFramebuffer, target, framebuffer);
 }
@@ -633,6 +640,8 @@ const ProcTableGLES::Resolver kMockResolverGLES = [](const char* name) {
     return reinterpret_cast<void*>(mockReadPixels);
   } else if (strcmp(name, "glGenFramebuffers") == 0) {
     return reinterpret_cast<void*>(mockGenFramebuffers);
+  } else if (strcmp(name, "glDeleteFramebuffers") == 0) {
+    return reinterpret_cast<void*>(mockDeleteFramebuffers);
   } else if (strcmp(name, "glBindFramebuffer") == 0) {
     return reinterpret_cast<void*>(mockBindFramebuffer);
   } else if (strcmp(name, "glDiscardFramebufferEXT") == 0) {

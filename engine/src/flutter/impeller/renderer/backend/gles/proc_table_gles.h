@@ -5,7 +5,9 @@
 #ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_PROC_TABLE_GLES_H_
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_PROC_TABLE_GLES_H_
 
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -26,19 +28,26 @@ bool GLErrorIsFatal(GLenum value);
 
 struct AutoErrorCheck {
   const PFNGLGETERRORPROC error_fn;
+  std::atomic<GLenum>* const captured_error;
 
   /// Name of the GL call being wrapped.
   /// should not be stored beyond the caller's lifetime.
   std::string_view name;
 
-  AutoErrorCheck(PFNGLGETERRORPROC error, std::string_view name)
-      : error_fn(error), name(name) {}
+  AutoErrorCheck(PFNGLGETERRORPROC error,
+                 std::string_view name,
+                 std::atomic<GLenum>* captured_error = nullptr)
+      : error_fn(error), captured_error(captured_error), name(name) {}
 
   ~AutoErrorCheck() {
     if (error_fn) {
       auto error = error_fn();
       if (error == GL_NO_ERROR) {
         return;
+      }
+      if (captured_error) {
+        GLenum expected = GL_NO_ERROR;
+        captured_error->compare_exchange_strong(expected, error);
       }
       if (GLErrorIsFatal(error)) {
         FML_LOG(FATAL) << "Fatal GL Error " << GLErrorToString(error) << "("
@@ -115,6 +124,7 @@ struct GLProc {
   /// tracing is hard. Expect log spam and only use during development.
   ///
   bool log_calls = false;
+  std::atomic<GLenum>* captured_error = nullptr;
 
   //----------------------------------------------------------------------------
   /// @brief      Call the GL function with the appropriate parameters. Lookup
@@ -125,7 +135,7 @@ struct GLProc {
   template <class... Args>
   auto operator()(Args&&... args) const {
 #if defined(IMPELLER_DEBUG) && !defined(NDEBUG)
-    AutoErrorCheck error(error_fn, name);
+    AutoErrorCheck error(error_fn, name, captured_error);
     // We check for the existence of extensions, and reset the function pointer
     // but it's still called unconditionally below, and will segfault. This
     // validation log will at least give us a hint as to what's going on.
@@ -143,6 +153,7 @@ struct GLProc {
   void Reset() {
     function = nullptr;
     error_fn = nullptr;
+    captured_error = nullptr;
   }
 };
 
@@ -337,6 +348,21 @@ class ProcTableGLES {
 
   bool IsValid() const;
 
+  // Explicitly inspect the current context at external resource boundaries.
+  // This must not itself use GLProc's post-call error check, which would
+  // consume a second error and obscure the result.
+  GLenum GetError() const {
+    const auto error = error_fn_ ? error_fn_() : GL_INVALID_OPERATION;
+    if (error != GL_NO_ERROR) {
+      GLenum expected = GL_NO_ERROR;
+      captured_error_->compare_exchange_strong(expected, error);
+    }
+    // Debug logging may already have consumed GL_CONTEXT_LOST. Preserve that
+    // failure for external completion checks instead of returning false
+    // success.
+    return captured_error_->load();
+  }
+
   /// @brief Set the source for the attached [shader].
   ///
   /// Optionally, [defines] may contain a string value that will be
@@ -378,6 +404,9 @@ class ProcTableGLES {
 
  private:
   bool is_valid_ = false;
+  PFNGLGETERRORPROC error_fn_ = nullptr;
+  std::shared_ptr<std::atomic<GLenum>> captured_error_ =
+      std::make_shared<std::atomic<GLenum>>(GL_NO_ERROR);
   std::unique_ptr<DescriptionGLES> description_;
   std::shared_ptr<const CapabilitiesGLES> capabilities_;
   GLint debug_label_max_length_ = 0;

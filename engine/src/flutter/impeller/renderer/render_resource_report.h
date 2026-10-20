@@ -29,6 +29,9 @@ enum class AvioRenderResourceKind : uint32_t {
   // nominal_bytes: capacity bytes reserved inside the standing allocations;
   // real_bytes: high-water element bytes, the bound on what can be resident.
   kCoverageCpuStorage = 10,
+  // Cold registered external-image framebuffer bindings. The image remains
+  // host-owned; only binding counts and active source leases are available.
+  kExternalTargetBindings = 11,
 };
 
 inline constexpr uint64_t kAvioCounterRasterThreadAllocations = 1u << 0;

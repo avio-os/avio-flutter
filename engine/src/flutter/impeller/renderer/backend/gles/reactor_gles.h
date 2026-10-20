@@ -5,6 +5,7 @@
 #ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_REACTOR_GLES_H_
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_REACTOR_GLES_H_
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -106,6 +107,12 @@ class ReactorGLES {
   /// @return     If this reactor is valid.
   ///
   bool IsValid() const;
+
+  /// Stop accepting work and release queued operations without issuing GL.
+  /// Called after rendering is stopped. Destruction runs outside the queue
+  /// lock, so discarded commands can return borrowed resources and report
+  /// failure. This does not certify completion of already issued GPU writes.
+  void Shutdown();
 
   //----------------------------------------------------------------------------
   /// @brief      Adds a worker to the reactor. Each new worker must ensure that
@@ -310,6 +317,7 @@ class ReactorGLES {
 
   bool can_set_debug_labels_ = false;
   bool is_valid_ = false;
+  std::atomic_bool shutdown_ = false;
 
   bool ReactOnce();
 

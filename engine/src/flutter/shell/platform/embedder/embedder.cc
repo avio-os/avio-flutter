@@ -90,6 +90,7 @@ extern const intptr_t kPlatformStrongDillSize;
 #include "third_party/skia/include/gpu/ganesh/gl/GrGLBackendSurface.h"
 #include "third_party/skia/include/gpu/ganesh/gl/GrGLTypes.h"
 #ifdef IMPELLER_SUPPORTS_RENDERING
+#include "flutter/shell/platform/embedder/embedder_opengl_selected_target.h"  // nogncheck
 #include "flutter/shell/platform/embedder/embedder_render_target_impeller.h"  // nogncheck
 #include "flutter/shell/platform/embedder/embedder_surface_gl_impeller.h"  // nogncheck
 #include "flutter/shell/platform/embedder/embedder_surface_gl_skia.h"  // nogncheck
@@ -207,6 +208,9 @@ static constexpr FlutterAvioExtensionFeatures kAvioSupportedFeatures =
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
     | kFlutterAvioExtensionFeatureResourceLifecycleConfig
 #endif
+#if FML_OS_LINUX && defined(SHELL_ENABLE_GL) && IMPELLER_SUPPORTS_RENDERING
+    | kFlutterAvioExtensionFeatureOpenGLSelectedTarget
+#endif
 #if FML_OS_LINUX &&                                               \
     (defined(SHELL_ENABLE_VULKAN) || defined(SHELL_ENABLE_GL)) && \
     IMPELLER_SUPPORTS_RENDERING
@@ -234,6 +238,17 @@ static const char* ValidateAvioExtensionRequest(
   if (const char* error =
           flutter::ValidateAvioFrameFactFeatures(request->required_features)) {
     return error;
+  }
+  constexpr auto kOpenGLSelectedRequirements =
+      kFlutterAvioExtensionFeatureSelectedTargetDamage |
+      kFlutterAvioExtensionFeatureAntialiasingPolicy |
+      kFlutterAvioExtensionFeatureRenderResourceReport;
+  if ((request->required_features &
+       kFlutterAvioExtensionFeatureOpenGLSelectedTarget) != 0 &&
+      (request->required_features & kOpenGLSelectedRequirements) !=
+          kOpenGLSelectedRequirements) {
+    return "OpenGL selected targets require selected-target damage, "
+           "antialiasing policy and resource reports.";
   }
   if ((request->required_features &
        kFlutterAvioExtensionFeatureExactVsyncCancellation) != 0 &&
@@ -2052,6 +2067,18 @@ static std::unique_ptr<flutter::EmbedderRenderTarget> MakeEmbedderRenderTarget(
   };
   fml::ScopedCleanupClosure collect_callback(collect_closure);
 
+#if defined(SHELL_ENABLE_GL) && IMPELLER_SUPPORTS_RENDERING
+  if (selected_target_damage &&
+      backing_store.type == kFlutterBackingStoreTypeOpenGL) {
+    auto result = flutter::MakeOpenGLSelectedRenderTarget(
+        backing_store, collect_closure, aiks_context, config);
+    if (result) {
+      collect_callback.Release();
+    }
+    return result;
+  }
+#endif
+
   // No safe access checks on the renderer are necessary since we allocated
   // the struct.
 
@@ -2272,11 +2299,17 @@ InferExternalViewEmbedderFromArgs(
       (negotiated_avio_features &
        kFlutterAvioExtensionFeatureSelectedTargetDamage) != 0;
 
+  const bool opengl_selected_target =
+      (negotiated_avio_features &
+       kFlutterAvioExtensionFeatureOpenGLSelectedTarget) != 0;
   if (selected_target_damage &&
-      (!enable_impeller || renderer_type != kVulkan)) {
+      (!enable_impeller ||
+       (renderer_type != kVulkan &&
+        !(renderer_type == kOpenGL && opengl_selected_target)))) {
     return fml::Status(
         fml::StatusCode::kInvalidArgument,
-        "Selected-target damage requires the Vulkan Impeller renderer.");
+        "Selected-target damage requires Vulkan Impeller or the negotiated "
+        "OpenGL selected-target contract.");
   }
 
   // Make sure the required callbacks are present
@@ -3014,6 +3047,15 @@ static FlutterEngineResult FlutterEngineInitializeImpl(
   const bool coverage_policy =
       settings.avio_antialiasing_config.has_value() &&
       settings.avio_antialiasing_config->UsesCoverage();
+  if ((negotiated_avio_features &
+       kFlutterAvioExtensionFeatureOpenGLSelectedTarget) != 0 &&
+      (config->type != kOpenGL || !settings.enable_impeller ||
+       !coverage_policy)) {
+    return LOG_EMBEDDER_ERROR(
+        kInvalidArguments,
+        "OpenGL selected targets require OpenGL Impeller with bounded "
+        "four-sample coverage antialiasing.");
+  }
   if (coverage_policy && config->type == kVulkan &&
       (negotiated_avio_features &
        (kFlutterAvioExtensionFeatureRootRenderTarget |
@@ -4796,6 +4838,139 @@ FlutterEngineResult FlutterEnginePostRenderThreadTask(
                                   "Could not post the render thread task.");
 }
 
+#if defined(SHELL_ENABLE_GL) && defined(IMPELLER_SUPPORTS_RENDERING)
+static FlutterEngineResult PostOpenGLSelectedTargetOperation(
+    FlutterEngine engine,
+    uint64_t target_id,
+    FlutterOpenGLSelectedTargetCallback callback,
+    void* user_data,
+    std::function<std::pair<FlutterOpenGLSelectedTargetStatus, uint64_t>(
+        impeller::ContextGLES&)> operation) {
+  if (!engine || !callback) {
+    return kInvalidArguments;
+  }
+  auto* embedder = reinterpret_cast<flutter::EmbedderEngine*>(engine);
+  if (!embedder->IsValid() || !embedder->SupportsOpenGLSelectedTargets()) {
+    return kInvalidArguments;
+  }
+  auto notify = [callback, user_data](FlutterOpenGLSelectedTargetStatus status,
+                                      uint64_t id) {
+    const FlutterOpenGLSelectedTargetResult result = {
+        sizeof(FlutterOpenGLSelectedTargetResult), user_data, status, id};
+    callback(&result);
+  };
+  // Even a task discarded during thread teardown settles its accepted baton.
+  auto cancelled =
+      std::make_shared<fml::ScopedCleanupClosure>([notify, target_id] {
+        notify(kFlutterOpenGLSelectedTargetEngineUnavailable, target_id);
+      });
+  auto rasterizer = embedder->GetShell().GetRasterizer();
+  const bool posted = embedder->PostRenderThreadTask(
+      [rasterizer, operation = std::move(operation), cancelled, notify,
+       target_id] {
+        if (!rasterizer) {
+          return;
+        }
+        auto result = std::make_pair(
+            kFlutterOpenGLSelectedTargetContextUnavailable, target_id);
+        std::shared_ptr<impeller::Context> used_context;
+        const bool context_ok = rasterizer->RunWithCurrentImpellerContext(
+            [&](const std::shared_ptr<impeller::Context>& context) {
+              if (context->IsValid() &&
+                  context->GetBackendType() ==
+                      impeller::Context::BackendType::kOpenGLES) {
+                used_context = context;
+                result = operation(impeller::ContextGLES::Cast(*context));
+              }
+            });
+        if (!context_ok) {
+          if (used_context) {
+            impeller::ContextGLES::Cast(*used_context)
+                .MarkExternalCompletionUnobservable();
+          }
+          result.first = kFlutterOpenGLSelectedTargetContextUnavailable;
+        }
+        cancelled->Release();
+        notify(result.first, result.second);
+      });
+  if (!posted) {
+    cancelled->Release();
+    return kInternalInconsistency;
+  }
+  return kSuccess;
+}
+#endif
+
+FlutterEngineResult FlutterEngineRegisterOpenGLSelectedTarget(
+    FlutterEngine engine,
+    const FlutterOpenGLSelectedTargetInfo* info) {
+#if defined(SHELL_ENABLE_GL) && defined(IMPELLER_SUPPORTS_RENDERING)
+  if (!info || !STRUCT_HAS_MEMBER(info, callback) || !info->callback ||
+      !info->prepare_callback || info->texture.name == 0 ||
+      info->texture.target != GL_TEXTURE_2D ||
+      info->texture.format != GL_RGBA8 || info->texture.width == 0 ||
+      info->texture.height == 0 ||
+      info->texture.width > std::numeric_limits<int32_t>::max() ||
+      info->texture.height > std::numeric_limits<int32_t>::max()) {
+    return kInvalidArguments;
+  }
+  const auto texture = info->texture;
+  return PostOpenGLSelectedTargetOperation(
+      engine, 0, info->callback, info->user_data,
+      [texture, prepare = info->prepare_callback,
+       user_data = info->user_data](impeller::ContextGLES& context) {
+        if (!prepare(user_data)) {
+          context.MarkExternalCompletionUnobservable();
+          return std::make_pair(kFlutterOpenGLSelectedTargetContextUnavailable,
+                                uint64_t{0});
+        }
+        const auto id = context.RegisterExternalTarget(
+            texture.name, {static_cast<int32_t>(texture.width),
+                           static_cast<int32_t>(texture.height)});
+        return std::make_pair(id ? kFlutterOpenGLSelectedTargetSuccess
+                                 : kFlutterOpenGLSelectedTargetRejected,
+                              id);
+      });
+#else
+  return kInvalidArguments;
+#endif
+}
+
+FlutterEngineResult FlutterEngineUnregisterOpenGLSelectedTarget(
+    FlutterEngine engine,
+    uint64_t target_id,
+    FlutterOpenGLSelectedTargetCallback callback,
+    void* user_data) {
+#if defined(SHELL_ENABLE_GL) && defined(IMPELLER_SUPPORTS_RENDERING)
+  if (target_id == 0) {
+    return kInvalidArguments;
+  }
+  return PostOpenGLSelectedTargetOperation(
+      engine, target_id, callback, user_data,
+      [target_id](impeller::ContextGLES& context) {
+        using Retirement = impeller::ContextGLES::ExternalTargetRetirement;
+        FlutterOpenGLSelectedTargetStatus status;
+        switch (context.RetireExternalTarget(target_id)) {
+          case Retirement::kSuccess:
+            status = kFlutterOpenGLSelectedTargetSuccess;
+            break;
+          case Retirement::kUnknown:
+            status = kFlutterOpenGLSelectedTargetRejected;
+            break;
+          case Retirement::kInUse:
+            status = kFlutterOpenGLSelectedTargetInUse;
+            break;
+          case Retirement::kFailed:
+            status = kFlutterOpenGLSelectedTargetContextUnavailable;
+            break;
+        }
+        return std::make_pair(status, target_id);
+      });
+#else
+  return kInvalidArguments;
+#endif
+}
+
 uint64_t FlutterEngineGetCurrentTime() {
   return fml::TimePoint::Now().ToEpochDelta().ToNanoseconds();
 }
@@ -5341,6 +5516,10 @@ FlutterEngineResult FlutterEngineGetProcAddresses(
   SET_PROC(TraceEventDurationEnd, FlutterEngineTraceEventDurationEnd);
   SET_PROC(TraceEventInstant, FlutterEngineTraceEventInstant);
   SET_PROC(PostRenderThreadTask, FlutterEnginePostRenderThreadTask);
+  SET_PROC(RegisterOpenGLSelectedTarget,
+           FlutterEngineRegisterOpenGLSelectedTarget);
+  SET_PROC(UnregisterOpenGLSelectedTarget,
+           FlutterEngineUnregisterOpenGLSelectedTarget);
   SET_PROC(GetCurrentTime, FlutterEngineGetCurrentTime);
   SET_PROC(RunTask, FlutterEngineRunTask);
   SET_PROC(UpdateLocales, FlutterEngineUpdateLocales);

@@ -99,17 +99,28 @@ ProcTableGLES::ProcTableGLES(  // NOLINT(google-readability-function-size)
 
   resolver = WrappedResolver(resolver);
 
+#define CAPTURE_ERROR(name) name.captured_error = captured_error_.get();
+  FOR_EACH_IMPELLER_PROC(CAPTURE_ERROR);
+  FOR_EACH_IMPELLER_ES_ONLY_PROC(CAPTURE_ERROR);
+  FOR_EACH_IMPELLER_DESKTOP_ONLY_PROC(CAPTURE_ERROR);
+  FOR_EACH_IMPELLER_GLES3_PROC(CAPTURE_ERROR);
+  FOR_EACH_IMPELLER_TEXTURE_ARRAY_PROC(CAPTURE_ERROR);
+  FOR_EACH_IMPELLER_EXT_PROC(CAPTURE_ERROR);
+#undef CAPTURE_ERROR
+
   auto error_fn = reinterpret_cast<PFNGLGETERRORPROC>(resolver("glGetError"));
   if (!error_fn) {
     VALIDATION_LOG << "Could not resolve " << "glGetError";
     return;
   }
+  error_fn_ = error_fn;
 
 #define IMPELLER_PROC(proc_ivar)                                \
   if (auto fn_ptr = resolver(proc_ivar.name.data())) {          \
     proc_ivar.function =                                        \
         reinterpret_cast<decltype(proc_ivar.function)>(fn_ptr); \
     proc_ivar.error_fn = error_fn;                              \
+    proc_ivar.captured_error = captured_error_.get();           \
   } else {                                                      \
     VALIDATION_LOG << "Could not resolve " << proc_ivar.name;   \
     return;                                                     \
@@ -136,6 +147,7 @@ ProcTableGLES::ProcTableGLES(  // NOLINT(google-readability-function-size)
     proc_ivar.function =                                        \
         reinterpret_cast<decltype(proc_ivar.function)>(fn_ptr); \
     proc_ivar.error_fn = error_fn;                              \
+    proc_ivar.captured_error = captured_error_.get();           \
   }
 
   const bool supports_gl3 = description_->GetGlVersion().IsAtLeast(Version(3));

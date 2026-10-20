@@ -73,7 +73,7 @@ extern "C" {
 // Flutter embedder ABI. The engine reports supported semantics through
 // FlutterEngineGetAvioExtensionCapabilities and validates the request again
 // during initialization, before creating a view or GPU resource.
-#define FLUTTER_AVIO_EXTENSION_VERSION 10u
+#define FLUTTER_AVIO_EXTENSION_VERSION 11u
 
 typedef uint64_t FlutterAvioExtensionFeatures;
 
@@ -104,6 +104,9 @@ typedef uint64_t FlutterAvioExtensionFeatures;
 /// Shell input claims collected from the exact frame that carries the pixels.
 /// Requires EmptyFrame, RootRenderTarget and FrameOpportunityOutcomes.
 #define kFlutterAvioExtensionFeatureHitRegions 0x0000000000080000ULL
+/// Selected OpenGL targets with preserved coverage rendering and native fences.
+/// Requires SelectedTargetDamage, AntialiasingPolicy and RenderResourceReport.
+#define kFlutterAvioExtensionFeatureOpenGLSelectedTarget 0x0000000000100000ULL
 #define FLUTTER_AVIO_MAX_RENDER_RESOURCE_ENTRIES 64u
 #define FLUTTER_AVIO_MAX_COVERAGE_REASONS 32u
 #define FLUTTER_AVIO_MAX_WINDOW_PREVIEWS 64u
@@ -266,6 +269,9 @@ typedef enum {
 /// entries: constructed high-water elements; nominal_bytes: fixed capacity;
 /// real_bytes: high-water element bytes (bounds resident CPU memory).
 #define kFlutterAvioRenderResourceCoverageCpuStorage 10u
+/// Engine-owned attachment bindings of borrowed external images. Counts and
+/// leases are reported; image or driver allocation bytes are unavailable.
+#define kFlutterAvioRenderResourceExternalTargetBindings 11u
 
 #define kFlutterAvioResourceFieldCounts 0x1ULL
 #define kFlutterAvioResourceFieldDescriptorBytes 0x2ULL
@@ -2568,6 +2574,70 @@ typedef struct {
   const FlutterRegion* existing_damage;
 } FlutterBackingStoreContentState;
 
+/// Completion of rendering into an embedder-owned OpenGL target.
+///
+/// Used only with kFlutterAvioExtensionFeatureOpenGLSelectedTarget. The host
+/// must first admit native fence export on the actual EGL display/context.
+typedef struct {
+  /// The size of this struct. Must be
+  /// sizeof(FlutterOpenGLBackingStoreSynchronization).
+  size_t struct_size;
+
+  /// Baton that remains valid through backing-store collection.
+  void* user_data;
+
+  /// Called at most once for a rendered lease, on the raster thread with the
+  /// render context current, after its GL commands have been issued. Not called
+  /// for an unchanged target. The host must verify its expected current EGL
+  /// context, insert EGL_SYNC_NATIVE_FENCE_ANDROID, flush, duplicate the native
+  /// fence fd and destroy the EGLSync. It must not wait for GPU completion.
+  ///
+  /// Returns an owned sync_file fd, transferring ownership to the engine, or
+  /// -1 on failure. Failure is a post-submission failure: the target must be
+  /// quarantined until its completion can be established. Neither a signaled
+  /// eventfd nor a CPU wait is a substitute. This callback must not mutate GL
+  /// bindings or reenter the engine.
+  int (*export_render_complete_sync_fd)(void* user_data);
+
+  /// The registration returned by FlutterEngineRegisterOpenGLSelectedTarget.
+  /// Required for texture targets. Zero is permitted only for a host-owned
+  /// framebuffer target; that framebuffer must already exist on the raster
+  /// context and remain valid through collection.
+  uint64_t selected_target_id;
+} FlutterOpenGLBackingStoreSynchronization;
+
+typedef enum {
+  kFlutterOpenGLSelectedTargetSuccess = 0,
+  kFlutterOpenGLSelectedTargetEngineUnavailable = 1,
+  kFlutterOpenGLSelectedTargetRejected = 2,
+  kFlutterOpenGLSelectedTargetInUse = 3,
+  kFlutterOpenGLSelectedTargetContextUnavailable = 4,
+} FlutterOpenGLSelectedTargetStatus;
+
+typedef struct {
+  size_t struct_size;
+  void* user_data;
+  FlutterOpenGLSelectedTargetStatus status;
+  uint64_t target_id;
+} FlutterOpenGLSelectedTargetResult;
+
+typedef void (*FlutterOpenGLSelectedTargetCallback)(
+    const FlutterOpenGLSelectedTargetResult* result);
+
+/// One imported texture's membership, independent of frame acquisitions.
+typedef struct {
+  size_t struct_size;
+  /// GL_TEXTURE_2D, RGBA8, one sample. The engine borrows the texture and
+  /// ignores its destruction callback; the host owns it until retirement.
+  FlutterOpenGLTexture texture;
+  void* user_data;
+  /// Required. Invoked with the engine raster context current, before
+  /// attaching the texture. Queue the import-ready native fence server wait
+  /// here; return false on failure. Must not block or reenter the engine.
+  bool (*prepare_callback)(void* user_data);
+  FlutterOpenGLSelectedTargetCallback callback;
+} FlutterOpenGLSelectedTargetInfo;
+
 typedef struct {
   /// The size of this struct. Must be sizeof(FlutterBackingStore).
   size_t struct_size;
@@ -2599,6 +2669,13 @@ typedef struct {
   /// `kFlutterAvioExtensionFeatureSelectedTargetDamage` was negotiated. NULL
   /// means the target has unknown contents and must be fully repainted.
   const FlutterBackingStoreContentState* content_state;
+
+  /// Native completion for a selected OpenGL framebuffer or GL_TEXTURE_2D.
+  /// The descriptor and baton remain valid through backing-store collection.
+  /// OpenGL names are borrowed. A framebuffer must belong to the render
+  /// context; a texture may belong to its share group, with import visibility
+  /// established before acquisition. The embedder owns reader synchronization.
+  const FlutterOpenGLBackingStoreSynchronization* open_gl_synchronization;
 } FlutterBackingStore;
 
 /// The logical request class for a backing store allocation.
@@ -4562,6 +4639,30 @@ FlutterEngineResult FlutterEnginePostRenderThreadTask(
     VoidCallback callback,
     void* callback_data);
 
+/// Register one immutable imported texture on the engine raster context.
+/// Callable from any thread before shutdown begins. Copies |info| and queues
+/// work; kSuccess means accepted, followed by exactly one result callback.
+/// Other immediate results mean no callback. A cancelled task reports
+/// EngineUnavailable on the thread that discards it. The host must retain the
+/// texture and callback baton until the result and, after successful
+/// registration, until successful unregistration or a successful native engine
+/// shutdown receipt. The successful result's identity is never a GL name.
+FLUTTER_EXPORT
+FlutterEngineResult FlutterEngineRegisterOpenGLSelectedTarget(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    const FlutterOpenGLSelectedTargetInfo* info);
+
+/// Retire membership after host acquisitions and readers have stopped.
+/// Success means the engine has detached and deleted its raster-context FBO.
+/// InUse leaves membership intact; the host must retain the texture.
+/// The asynchronous acceptance/callback rules match registration.
+FLUTTER_EXPORT
+FlutterEngineResult FlutterEngineUnregisterOpenGLSelectedTarget(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    uint64_t target_id,
+    FlutterOpenGLSelectedTargetCallback callback,
+    void* user_data);
+
 //------------------------------------------------------------------------------
 /// @brief      Get the current time in nanoseconds from the clock used by the
 ///             flutter engine. This is the system monotonic clock.
@@ -5056,6 +5157,15 @@ typedef FlutterEngineResult (*FlutterEnginePublishDmabufTextureFnPtr)(
 #endif  // __linux__
 
 /// Function-pointer-based versions of the APIs above.
+typedef FlutterEngineResult (*FlutterEngineRegisterOpenGLSelectedTargetFnPtr)(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    const FlutterOpenGLSelectedTargetInfo* info);
+typedef FlutterEngineResult (*FlutterEngineUnregisterOpenGLSelectedTargetFnPtr)(
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
+    uint64_t target_id,
+    FlutterOpenGLSelectedTargetCallback callback,
+    void* user_data);
+
 typedef struct {
   /// The size of this struct. Must be sizeof(FlutterEngineProcs).
   size_t struct_size;
@@ -5123,6 +5233,9 @@ typedef struct {
   FlutterEngineSetAvioViewVisibilityFnPtr SetAvioViewVisibility;
   FlutterEngineRequestAvioRenderResourceReportFnPtr
       RequestAvioRenderResourceReport;
+  FlutterEngineRegisterOpenGLSelectedTargetFnPtr RegisterOpenGLSelectedTarget;
+  FlutterEngineUnregisterOpenGLSelectedTargetFnPtr
+      UnregisterOpenGLSelectedTarget;
 } FlutterEngineProcTable;
 
 //------------------------------------------------------------------------------

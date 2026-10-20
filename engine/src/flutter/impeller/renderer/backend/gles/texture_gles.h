@@ -81,6 +81,12 @@ class TextureGLES final : public Texture,
               TextureDescriptor desc,
               bool threadsafe = false);
 
+  ~TextureGLES() override;
+
+  /// Adopt once on a borrowed framebuffer source after acquisition succeeds.
+  /// Follows queued source references; it is not a GPU completion signal.
+  bool AdoptExternalResourceCallback(fml::closure callback);
+
   // |Texture|
   bool IsValid() const override;
 
@@ -198,6 +204,7 @@ class TextureGLES final : public Texture,
   std::array<std::bitset<kMaxTrackedMipLevels>, 6> slice_mip_initialized_ = {};
   const bool is_wrapped_;
   const std::optional<GLuint> wrapped_fbo_;
+  fml::closure external_resource_callback_;
   UniqueHandleGLES cached_fbo_;
   uint32_t cached_fbo_mip_level_ = 0;
   uint32_t cached_fbo_slice_ = 0;

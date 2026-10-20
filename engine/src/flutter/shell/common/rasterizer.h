@@ -140,6 +140,12 @@ class Rasterizer final : public SnapshotDelegate,
                          public Stopwatch::RefreshRateUpdater,
                          public SnapshotController::Delegate {
  public:
+  /// Run cold external-resource membership work on the raster thread, with
+  /// the actual surface context current. Always clears the context afterwards.
+  bool RunWithCurrentImpellerContext(
+      const std::function<void(const std::shared_ptr<impeller::Context>&)>&
+          task);
+
   //----------------------------------------------------------------------------
   /// @brief      Used to forward events from the rasterizer to interested
   ///             subsystems. Currently, the shell sets itself up as the

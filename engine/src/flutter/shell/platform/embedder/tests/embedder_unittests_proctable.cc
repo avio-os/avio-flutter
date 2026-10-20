@@ -91,7 +91,11 @@ TEST(EmbedderProcTable, ReportsAvioSemanticCapabilities) {
       kFlutterAvioExtensionFeatureEmptyFrame |
       kFlutterAvioExtensionFeatureItemEffects |
       kFlutterAvioExtensionFeatureOutputGround |
-      kFlutterAvioExtensionFeatureReadyContent;
+      kFlutterAvioExtensionFeatureReadyContent |
+      kFlutterAvioExtensionFeatureHitRegions;
+#if FML_OS_LINUX && defined(SHELL_ENABLE_GL) && IMPELLER_SUPPORTS_RENDERING
+  expected_features |= kFlutterAvioExtensionFeatureOpenGLSelectedTarget;
+#endif
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
   expected_features |= kFlutterAvioExtensionFeatureResourceLifecycleConfig;
 #endif
@@ -117,7 +121,7 @@ TEST(EmbedderProcTable, ReportsAvioSemanticCapabilities) {
   EXPECT_EQ(capabilities.continuous_supported_classes, expected_vulkan);
 }
 
-TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion9) {
+TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion11) {
   FlutterEngineProcTable procs = {};
   procs.struct_size = sizeof(procs);
   ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
@@ -125,8 +129,8 @@ TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion9) {
   FlutterAvioExtensionCapabilities capabilities = {};
   capabilities.struct_size = sizeof(capabilities);
   ASSERT_EQ(procs.GetAvioExtensionCapabilities(&capabilities), kSuccess);
-  EXPECT_EQ(capabilities.minimum_version, 9u);
-  EXPECT_EQ(capabilities.maximum_version, 9u);
+  EXPECT_EQ(capabilities.minimum_version, 11u);
+  EXPECT_EQ(capabilities.maximum_version, 11u);
   uint64_t expected_vulkan = 0;
 #if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
   expected_vulkan = impeller::AvioContinuousSupportedClasses(
@@ -136,6 +140,44 @@ TEST(EmbedderProcTable, CapabilitiesAdvertiseVersion9) {
   EXPECT_EQ(capabilities.continuous_supported_classes_gles, 0u);
   EXPECT_EQ(capabilities.continuous_supported_classes_metal, 0u);
   EXPECT_EQ(capabilities.continuous_supported_classes, expected_vulkan);
+}
+
+TEST(EmbedderProcTable, SelectedTargetMembershipHonorsCallerStructSize) {
+  FlutterEngineProcTable procs = {};
+  procs.struct_size =
+      offsetof(FlutterEngineProcTable, RegisterOpenGLSelectedTarget);
+  ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
+  EXPECT_EQ(procs.RegisterOpenGLSelectedTarget, nullptr);
+  EXPECT_EQ(procs.UnregisterOpenGLSelectedTarget, nullptr);
+  procs.struct_size = sizeof(procs);
+  ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
+  EXPECT_NE(procs.RegisterOpenGLSelectedTarget, nullptr);
+  EXPECT_NE(procs.UnregisterOpenGLSelectedTarget, nullptr);
+}
+
+TEST(EmbedderProcTable, SelectedTargetRejectsMissingEngineWithoutCallback) {
+  FlutterEngineProcTable procs = {};
+  procs.struct_size = sizeof(procs);
+  ASSERT_EQ(FlutterEngineGetProcAddresses(&procs), kSuccess);
+  bool called = false;
+  FlutterOpenGLSelectedTargetInfo info = {};
+  info.struct_size = sizeof(info);
+  info.texture.target = 0x0DE1;  // GL_TEXTURE_2D
+  info.texture.name = 1;
+  info.texture.format = 0x8058;  // GL_RGBA8
+  info.texture.width = 8;
+  info.texture.height = 8;
+  info.user_data = &called;
+  info.prepare_callback = [](void*) { return true; };
+  info.callback = [](const FlutterOpenGLSelectedTargetResult* result) {
+    *static_cast<bool*>(result->user_data) = true;
+  };
+  EXPECT_EQ(procs.RegisterOpenGLSelectedTarget(nullptr, &info),
+            kInvalidArguments);
+  EXPECT_EQ(
+      procs.UnregisterOpenGLSelectedTarget(nullptr, 1, info.callback, &called),
+      kInvalidArguments);
+  EXPECT_FALSE(called);
 }
 
 TEST(EmbedderProcTable, AppendedCapabilityHonorsCallerStructSize) {

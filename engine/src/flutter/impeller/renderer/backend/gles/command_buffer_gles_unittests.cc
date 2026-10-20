@@ -137,6 +137,83 @@ TEST(CommandBufferGLES, DeferredSubmissionRetainsOwnersUntilReaction) {
   EXPECT_TRUE(witness.expired());
 }
 
+TEST(CommandBufferGLES, BorrowedTargetCollectionFollowsQueuedSourceReferences) {
+  auto implementation = std::make_unique<::testing::NiceMock<MockGLESImpl>>();
+  auto& gl = *implementation;
+  auto mock = MockGLES::Init(std::move(implementation));
+  auto context = CreateFakeGLESContext();
+  auto worker = std::make_shared<ToggleWorker>(false);
+  context->AddReactorWorker(worker);
+  TextureDescriptor descriptor;
+  descriptor.format = PixelFormat::kR8G8B8A8UNormInt;
+  descriptor.size = {10, 10};
+  descriptor.usage = TextureUsage::kRenderTarget;
+  EXPECT_CALL(gl, GenTextures(_, _)).Times(0);
+  EXPECT_CALL(gl, DeleteTextures(_, _)).Times(0);
+  auto source = TextureGLES::WrapFBO(context->GetReactor(), descriptor, 91);
+  ASSERT_TRUE(source);
+  std::vector<int> order;
+  ASSERT_TRUE(
+      source->AdoptExternalResourceCallback([&] { order.push_back(2); }));
+  EXPECT_FALSE(source->AdoptExternalResourceCallback([] {}));
+  ASSERT_TRUE(context->GetReactor()->AddOperation(
+      [source, &order](const ReactorGLES&) {
+        EXPECT_EQ(source->GetFBO(), 91u);
+        order.push_back(1);
+      },
+      true));
+  source.reset();
+  EXPECT_TRUE(order.empty());
+  worker->SetAllowed(true);
+  ASSERT_TRUE(context->GetReactor()->React());
+  EXPECT_EQ(order, (std::vector<int>{1, 2}));
+}
+
+TEST(CommandBufferGLES, ShutdownReleasesQueuedBorrowedSourcesWithoutExecution) {
+  auto mock = MockGLES::Init();
+  auto context = CreateFakeGLESContext();
+  auto base = std::static_pointer_cast<Context>(context);
+  auto worker = std::make_shared<ToggleWorker>(false);
+  context->AddReactorWorker(worker);
+  TextureDescriptor descriptor;
+  descriptor.format = PixelFormat::kR8G8B8A8UNormInt;
+  descriptor.size = {10, 10};
+  descriptor.usage = TextureUsage::kRenderTarget;
+  auto source = TextureGLES::WrapFBO(context->GetReactor(), descriptor, 91);
+  ASSERT_TRUE(source);
+  int collections = 0;
+  bool executed = false;
+  ASSERT_TRUE(source->AdoptExternalResourceCallback([&] {
+    collections++;
+    EXPECT_FALSE(
+        context->GetReactor()->AddOperation([](const ReactorGLES&) {}, true));
+  }));
+  ASSERT_TRUE(context->GetReactor()->AddOperation(
+      [source, &executed](const ReactorGLES&) { executed = true; }, true));
+  auto command = base->CreateCommandBuffer();
+  int completions = 0;
+  EXPECT_TRUE(base->GetCommandQueue()
+                  ->Submit({command},
+                           [&](CommandBuffer::Status status) {
+                             completions++;
+                             EXPECT_EQ(status, CommandBuffer::Status::kError);
+                           })
+                  .ok());
+  source.reset();
+  command.reset();
+  EXPECT_EQ(collections, 0);
+  base->Shutdown();
+  EXPECT_FALSE(executed);
+  EXPECT_EQ(collections, 1);
+  EXPECT_EQ(completions, 1);
+  EXPECT_FALSE(base->IsValid());
+  worker->SetAllowed(true);
+  EXPECT_FALSE(context->GetReactor()->React());
+  base->Shutdown();
+  EXPECT_EQ(collections, 1);
+  EXPECT_EQ(completions, 1);
+}
+
 TEST(CommandBufferGLES, DiscardedSubmissionHasNoReactorOwnerCycle) {
   auto mock_gles = MockGLES::Init();
   auto owner = std::make_shared<int>(23);

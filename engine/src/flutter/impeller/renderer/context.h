@@ -224,6 +224,10 @@ class Context {
   /// @brief Return the graphics queue for submitting command buffers.
   virtual std::shared_ptr<CommandQueue> GetCommandQueue() const = 0;
 
+  // Release registered external-target attachment metadata while the rendering
+  // context is current, before its raster thread stops. This issues no wait.
+  virtual bool RetireExternalRenderTargets() { return true; }
+
   //----------------------------------------------------------------------------
   /// @brief      Force all pending asynchronous work to finish. This is
   ///             achieved by deleting all owned concurrent message loops.
