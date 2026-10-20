@@ -4840,7 +4840,7 @@ FlutterEngineResult FlutterEnginePostRenderThreadTask(
 
 #if defined(SHELL_ENABLE_GL) && defined(IMPELLER_SUPPORTS_RENDERING)
 static FlutterEngineResult PostOpenGLSelectedTargetOperation(
-    FlutterEngine engine,
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
     uint64_t target_id,
     FlutterOpenGLSelectedTargetCallback callback,
     void* user_data,
@@ -4902,7 +4902,7 @@ static FlutterEngineResult PostOpenGLSelectedTargetOperation(
 #endif
 
 FlutterEngineResult FlutterEngineRegisterOpenGLSelectedTarget(
-    FlutterEngine engine,
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
     const FlutterOpenGLSelectedTargetInfo* info) {
 #if defined(SHELL_ENABLE_GL) && defined(IMPELLER_SUPPORTS_RENDERING)
   if (!info || !STRUCT_HAS_MEMBER(info, callback) || !info->callback ||
@@ -4937,7 +4937,7 @@ FlutterEngineResult FlutterEngineRegisterOpenGLSelectedTarget(
 }
 
 FlutterEngineResult FlutterEngineUnregisterOpenGLSelectedTarget(
-    FlutterEngine engine,
+    FLUTTER_API_SYMBOL(FlutterEngine) engine,
     uint64_t target_id,
     FlutterOpenGLSelectedTargetCallback callback,
     void* user_data) {
