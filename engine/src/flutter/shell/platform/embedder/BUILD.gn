@@ -60,6 +60,7 @@ template("embedder_source_set") {
       "avio_antialiasing_config.h",
       "avio_frame_facts.h",
       "avio_render_resource_report.h",
+      "avio_resource_lifecycle_config.h",
       "embedder.cc",
       "embedder_engine.cc",
       "embedder_engine.h",
@@ -709,6 +710,7 @@ executable("avio_coverage_contract_tests") {
     "avio_antialiasing_config.h",
     "avio_frame_facts.h",
     "avio_render_resource_report.h",
+    "avio_resource_lifecycle_config.h",
     "tests/avio_coverage_contract_tests.cc",
   ]
   include_dirs = [

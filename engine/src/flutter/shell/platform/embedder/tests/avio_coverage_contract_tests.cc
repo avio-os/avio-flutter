@@ -18,6 +18,7 @@
 #include "flutter/shell/platform/embedder/avio_antialiasing_config.h"
 #include "flutter/shell/platform/embedder/avio_frame_facts.h"
 #include "flutter/shell/platform/embedder/avio_render_resource_report.h"
+#include "flutter/shell/platform/embedder/avio_resource_lifecycle_config.h"
 #include "impeller/renderer/pipeline_resource_ledger.h"
 #include "impeller/renderer/render_resource_scope.h"
 
@@ -339,6 +340,138 @@ void AntialiasingValidationFailsClosed() {
   assert(!flutter::ValidateAvioAntialiasingConfig(&config, kAA, false));
   config.layer_region_max_bytes = 1;
   assert(flutter::ValidateAvioAntialiasingConfig(&config, kAA, false));
+}
+
+constexpr auto kCoverageResourceFeatures =
+    kFlutterAvioExtensionFeatureRootRenderTarget |
+    kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+    kFlutterAvioExtensionFeatureRenderResourceReport |
+    kFlutterAvioExtensionFeatureAntialiasingPolicy;
+constexpr auto kGlesResourceFeatures =
+    kCoverageResourceFeatures | kFlutterAvioExtensionFeatureOpenGLSelectedTarget;
+
+FlutterAvioResourceLifecycleConfig DisabledResources() {
+  return {sizeof(FlutterAvioResourceLifecycleConfig), 0, 0,
+          kFlutterAvioPipelineCacheDisabled, -1, 0};
+}
+
+void GlesSelectedTargetLifecycleAdmitsExactHostPolicy() {
+  auto aa = Coverage();
+  auto resources = DisabledResources();
+  FlutterRendererConfig renderer = {};
+  renderer.type = kOpenGL;
+  assert(!flutter::ValidateAvioAntialiasingConfig(&aa, kGlesResourceFeatures));
+  assert(!flutter::ValidateAvioAntialiasingBackend(
+      aa, impeller::AvioCoverageBackend::kGLES));
+  const bool coverage = flutter::CopyAvioAntialiasingConfig(aa).UsesCoverage();
+  assert(!flutter::ValidateAvioResourceLifecycleConfig(
+      kGlesResourceFeatures, &resources, &renderer, true, coverage));
+  for (auto policy : {kFlutterAvioPipelineCacheReadOnly,
+                      kFlutterAvioPipelineCacheReadWrite}) {
+    resources.pipeline_cache_policy = policy;
+    resources.pipeline_cache_directory_fd = 0;
+    resources.pipeline_cache_max_bytes = 64u * 1024u * 1024u;
+    assert(flutter::ValidateAvioResourceLifecycleConfig(
+        kGlesResourceFeatures, &resources, &renderer, true, coverage));
+  }
+  resources = DisabledResources();
+  assert(flutter::ValidateAvioResourceLifecycleConfig(
+      kCoverageResourceFeatures, &resources, &renderer, true, coverage));
+  assert(flutter::ValidateAvioResourceLifecycleConfig(
+      kGlesResourceFeatures, &resources, &renderer, false, coverage));
+  resources.transient_max_entries = 1;
+  resources.transient_max_bytes = 4096;
+  assert(flutter::ValidateAvioResourceLifecycleConfig(
+      kGlesResourceFeatures, &resources, &renderer, true, false));
+  assert(flutter::ValidateAvioResourceLifecycleConfig(
+      kGlesResourceFeatures, &resources, &renderer, true, coverage));
+}
+
+void GenericGlesCoverageKeepsItsExistingSurfaceContract() {
+  const auto aa = Coverage();
+  constexpr auto features = kFlutterAvioExtensionFeatureAntialiasingPolicy |
+                            kFlutterAvioExtensionFeatureRenderResourceReport;
+  FlutterRendererConfig renderer = {};
+  renderer.type = kOpenGL;
+  assert(!flutter::ValidateAvioAntialiasingConfig(&aa, features));
+  assert(!flutter::ValidateAvioResourceLifecycleConfig(
+      features, nullptr, &renderer, true, true));
+  // The exception is only the existing generic GLES surface route. Vulkan
+  // coverage and GLES selected-target requests still require root lifecycle.
+  renderer.type = kVulkan;
+  assert(flutter::ValidateAvioResourceLifecycleConfig(
+      features, nullptr, &renderer, true, true));
+  renderer.type = kOpenGL;
+  assert(flutter::ValidateAvioResourceLifecycleConfig(
+      features | kFlutterAvioExtensionFeatureOpenGLSelectedTarget,
+      nullptr, &renderer, true, true));
+}
+
+void ResourceLifecycleStructureAndVulkanPolicyStayStrict() {
+  auto resources = DisabledResources();
+  FlutterRendererConfig renderer = {};
+  renderer.type = kVulkan;
+  auto validate = [&](const FlutterAvioResourceLifecycleConfig* value) {
+    return flutter::ValidateAvioResourceLifecycleConfig(
+        kCoverageResourceFeatures, value, &renderer, true, true);
+  };
+  assert(!validate(&resources));
+  assert(validate(nullptr));
+  assert(!flutter::ValidateAvioResourceLifecycleConfig(
+      0, nullptr, nullptr, false, false));
+  assert(flutter::ValidateAvioResourceLifecycleConfig(
+      0, &resources, &renderer, true, false));
+  resources.struct_size =
+      offsetof(FlutterAvioResourceLifecycleConfig, pipeline_cache_max_bytes);
+  assert(validate(&resources));
+  resources = DisabledResources();
+  resources.pipeline_cache_directory_fd = 0;
+  assert(validate(&resources));
+  resources = DisabledResources();
+  resources.pipeline_cache_max_bytes = 1;
+  assert(validate(&resources));
+  resources = DisabledResources();
+  const uint32_t unknown_policy = 0xffffffffu;
+  std::memcpy(&resources.pipeline_cache_policy, &unknown_policy,
+              sizeof(unknown_policy));
+  assert(validate(&resources));
+  for (auto policy : {kFlutterAvioPipelineCacheReadOnly,
+                      kFlutterAvioPipelineCacheReadWrite}) {
+    resources = DisabledResources();
+    resources.pipeline_cache_policy = policy;
+    assert(validate(&resources));
+    resources.pipeline_cache_directory_fd = 0;
+    assert(validate(&resources));
+    resources.pipeline_cache_max_bytes = 64u * 1024u * 1024u;
+    // Structural admission only. Production still duplicates the descriptor
+    // and checks it names a directory before creating the Vulkan context.
+    assert(!validate(&resources));
+  }
+  resources = DisabledResources();
+  resources.transient_max_entries = 1;
+  assert(validate(&resources));
+  resources.transient_max_bytes = 4096;
+  assert(!flutter::ValidateAvioResourceLifecycleConfig(
+      kCoverageResourceFeatures, &resources, &renderer, true, false));
+  resources = DisabledResources();
+  for (auto type : {kSoftware, kMetal}) {
+    renderer.type = type;
+    assert(validate(&resources));
+  }
+}
+
+void CoverageLifecycleDependenciesApplyToBothBackends() {
+  const auto resources = DisabledResources();
+  FlutterRendererConfig renderer = {};
+  for (auto type : {kOpenGL, kVulkan}) {
+    renderer.type = type;
+    for (auto missing : {kFlutterAvioExtensionFeatureRootRenderTarget,
+                         kFlutterAvioExtensionFeatureResourceLifecycleConfig,
+                         kFlutterAvioExtensionFeatureRenderResourceReport}) {
+      assert(flutter::ValidateAvioResourceLifecycleConfig(
+          kGlesResourceFeatures & ~missing, &resources, &renderer, true, true));
+    }
+  }
 }
 
 struct Observation {
@@ -683,6 +816,10 @@ int main() {
   SplitGroundRegionsStayBoundedExactAndFailClosed();
   PartialBackendDescriptorsPreserveAvailabilityWithoutInventingBytes();
   AntialiasingValidationFailsClosed();
+  GlesSelectedTargetLifecycleAdmitsExactHostPolicy();
+  GenericGlesCoverageKeepsItsExistingSurfaceContract();
+  ResourceLifecycleStructureAndVulkanPolicyStayStrict();
+  CoverageLifecycleDependenciesApplyToBothBackends();
   UnknownKindsAndExcludedCountersSurviveWithoutAllocating();
   ReportsStayBoundedAndTagOverflow();
   MergeIndependentProvidersPreservesAvailabilityAndReasons();
@@ -693,7 +830,7 @@ int main() {
   PipelineFirstUseOriginSurvivesAsyncWorker();
   ConcurrentPipelineIntervalsLoseNoSuccessfulCreations();
   std::puts(
-      "Avio coverage ABI/report production contracts: 16 passed, 0 skipped");
+      "Avio coverage ABI/report production contracts: 20 passed, 0 skipped");
   std::printf(
       "Production readiness: coverage=%s, Vulkan_continuous_classes=0x%llx\n",
       impeller::kAvioCoveragePolicyImplemented ? "enabled" : "disabled",

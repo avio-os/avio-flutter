@@ -62,6 +62,7 @@ extern const intptr_t kPlatformStrongDillSize;
 #include "flutter/shell/common/switches.h"
 #include "flutter/shell/platform/embedder/avio_antialiasing_config.h"
 #include "flutter/shell/platform/embedder/avio_frame_facts.h"
+#include "flutter/shell/platform/embedder/avio_resource_lifecycle_config.h"
 #include "flutter/shell/platform/embedder/embedder.h"
 #include "flutter/shell/platform/embedder/embedder_engine.h"
 #include "flutter/shell/platform/embedder/embedder_external_resource_custody.h"
@@ -205,16 +206,14 @@ static constexpr FlutterAvioExtensionFeatures kAvioSupportedFeatures =
     kFlutterAvioExtensionFeatureOutputGround |
     kFlutterAvioExtensionFeatureReadyContent |
     kFlutterAvioExtensionFeatureHitRegions
-#if FML_OS_LINUX && defined(SHELL_ENABLE_VULKAN) && IMPELLER_SUPPORTS_RENDERING
-    | kFlutterAvioExtensionFeatureResourceLifecycleConfig
-#endif
 #if FML_OS_LINUX && defined(SHELL_ENABLE_GL) && IMPELLER_SUPPORTS_RENDERING
     | kFlutterAvioExtensionFeatureOpenGLSelectedTarget
 #endif
 #if FML_OS_LINUX &&                                               \
     (defined(SHELL_ENABLE_VULKAN) || defined(SHELL_ENABLE_GL)) && \
     IMPELLER_SUPPORTS_RENDERING
-    | kFlutterAvioExtensionFeatureRenderResourceReport |
+    | kFlutterAvioExtensionFeatureResourceLifecycleConfig |
+    kFlutterAvioExtensionFeatureRenderResourceReport |
     (impeller::kAvioCoveragePolicyImplemented
          ? kFlutterAvioExtensionFeatureAntialiasingPolicy
          : 0u)
@@ -242,13 +241,14 @@ static const char* ValidateAvioExtensionRequest(
   constexpr auto kOpenGLSelectedRequirements =
       kFlutterAvioExtensionFeatureSelectedTargetDamage |
       kFlutterAvioExtensionFeatureAntialiasingPolicy |
+      kFlutterAvioExtensionFeatureResourceLifecycleConfig |
       kFlutterAvioExtensionFeatureRenderResourceReport;
   if ((request->required_features &
        kFlutterAvioExtensionFeatureOpenGLSelectedTarget) != 0 &&
       (request->required_features & kOpenGLSelectedRequirements) !=
           kOpenGLSelectedRequirements) {
     return "OpenGL selected targets require selected-target damage, "
-           "antialiasing policy and resource reports.";
+           "antialiasing policy, resource limits and resource reports.";
   }
   if ((request->required_features &
        kFlutterAvioExtensionFeatureExactVsyncCancellation) != 0 &&
@@ -309,74 +309,40 @@ static const char* BuildAvioResourceLifecycleConfig(
     bool enable_impeller,
     bool coverage_policy,
     std::optional<flutter::EmbedderVulkanResourceLifecycleConfig>* result) {
-  const bool negotiated =
-      (negotiated_features &
-       kFlutterAvioExtensionFeatureResourceLifecycleConfig) != 0;
-  if (!negotiated) {
-    return config == nullptr
-               ? nullptr
-               : "A resource lifecycle configuration was supplied without "
-                 "negotiating its Avio extension feature.";
+  if (const char* error = flutter::ValidateAvioResourceLifecycleConfig(
+          negotiated_features, config, renderer_config, enable_impeller,
+          coverage_policy)) {
+    return error;
   }
-  if (config == nullptr) {
-    return "The negotiated Avio resource lifecycle configuration was missing.";
-  }
-  if (!STRUCT_HAS_MEMBER(config, pipeline_cache_max_bytes)) {
-    return "The Avio resource lifecycle configuration was truncated.";
-  }
-  constexpr uint64_t kMaxSizeT =
-      static_cast<uint64_t>(std::numeric_limits<size_t>::max());
-  if (coverage_policy ? (config->transient_max_entries != 0u ||
-                         config->transient_max_bytes != 0u)
-                      : (config->transient_max_entries == 0u ||
-                         config->transient_max_entries > kMaxSizeT ||
-                         config->transient_max_bytes == 0u ||
-                         config->transient_max_bytes > kMaxSizeT)) {
-    return "The Avio transient resource limits were invalid.";
+  result->reset();
+  if (!config || renderer_config->type == kOpenGL) {
+    // GLES admission above requires the disabled legacy-pool/cache shape.
+    // Its actual bounded coverage regions are passed separately to ContextGLES
+    // through the validated antialiasing config; no Vulkan policy is ignored.
+    return nullptr;
   }
 
   impeller::PipelineCacheAccessVK cache_access;
   fml::UniqueFD cache_directory;
   size_t cache_max_bytes = 0u;
-  // External C enum values must be rejected without first loading an invalid
-  // C++ enum. The complete configuration tail was bounded above.
-  static_assert(sizeof(config->pipeline_cache_policy) == sizeof(uint32_t));
-  uint32_t pipeline_cache_policy;
-  std::memcpy(&pipeline_cache_policy, &config->pipeline_cache_policy,
-              sizeof(pipeline_cache_policy));
-  switch (pipeline_cache_policy) {
+  switch (config->pipeline_cache_policy) {
     case kFlutterAvioPipelineCacheDisabled:
-      if (config->pipeline_cache_directory_fd != -1 ||
-          config->pipeline_cache_max_bytes != 0u) {
-        return "A disabled Avio pipeline cache must not carry a directory or "
-               "byte budget.";
-      }
       cache_access = impeller::PipelineCacheAccessVK::kDisabled;
       break;
     case kFlutterAvioPipelineCacheReadOnly:
     case kFlutterAvioPipelineCacheReadWrite:
-      if (config->pipeline_cache_directory_fd < 0 ||
-          config->pipeline_cache_max_bytes == 0u ||
-          config->pipeline_cache_max_bytes > kMaxSizeT) {
-        return "The Avio pipeline cache directory or byte budget was invalid.";
-      }
       cache_directory = fml::Duplicate(config->pipeline_cache_directory_fd);
       if (!cache_directory.is_valid() || !fml::IsDirectory(cache_directory)) {
         return "The Avio pipeline cache descriptor was not an open directory.";
       }
       cache_max_bytes = static_cast<size_t>(config->pipeline_cache_max_bytes);
-      cache_access = pipeline_cache_policy == kFlutterAvioPipelineCacheReadOnly
+      cache_access = config->pipeline_cache_policy ==
+                             kFlutterAvioPipelineCacheReadOnly
                          ? impeller::PipelineCacheAccessVK::kReadOnly
                          : impeller::PipelineCacheAccessVK::kReadWrite;
       break;
     default:
-      return "The Avio pipeline cache policy was unknown.";
-  }
-
-  if (renderer_config == nullptr || renderer_config->type != kVulkan ||
-      !enable_impeller) {
-    return "The Avio resource lifecycle configuration requires Vulkan "
-           "Impeller.";
+      FML_UNREACHABLE();  // The shared validator rejected unknown C enum values.
   }
 
   result->emplace(flutter::EmbedderVulkanResourceLifecycleConfig{
@@ -3056,19 +3022,6 @@ static FlutterEngineResult FlutterEngineInitializeImpl(
         "OpenGL selected targets require OpenGL Impeller with bounded "
         "four-sample coverage antialiasing.");
   }
-  if (coverage_policy && config->type == kVulkan &&
-      (negotiated_avio_features &
-       (kFlutterAvioExtensionFeatureRootRenderTarget |
-        kFlutterAvioExtensionFeatureResourceLifecycleConfig |
-        kFlutterAvioExtensionFeatureRenderResourceReport)) !=
-          (kFlutterAvioExtensionFeatureRootRenderTarget |
-           kFlutterAvioExtensionFeatureResourceLifecycleConfig |
-           kFlutterAvioExtensionFeatureRenderResourceReport)) {
-    return LOG_EMBEDDER_ERROR(
-        kInvalidArguments,
-        "Coverage requires root targets, resource limits and reports.");
-  }
-
   std::optional<flutter::EmbedderVulkanResourceLifecycleConfig>
       avio_resource_lifecycle_config;
   if (const char* error = BuildAvioResourceLifecycleConfig(

@@ -174,10 +174,16 @@ typedef enum {
   kFlutterAvioPipelineCacheReadWrite = 2,
 } FlutterAvioPipelineCachePolicy;
 
-/// Exact resource policy for one negotiated Vulkan Impeller engine.
+/// Exact resource policy for one negotiated Vulkan or OpenGL Impeller engine.
+/// OpenGL requires negotiated selected targets and bounded coverage antialiasing:
+/// both legacy transient limits must be zero and the Vulkan pipeline cache must
+/// be disabled with directory -1 and budget zero. Coverage/layer region limits
+/// remain mandatory in FlutterAvioAntialiasingConfig; zero legacy limits do not
+/// disable those limits. GLES rejects other configurations without fallback.
 ///
 /// The embedder retains ownership of `pipeline_cache_directory_fd`. The engine
-/// duplicates it during FlutterEngineInitialize. Principal isolation is
+/// duplicates it during FlutterEngineInitialize for an enabled Vulkan cache.
+/// Principal isolation is
 /// therefore expressed as a directory capability selected by the embedder,
 /// not as a path interpreted by the engine.
 typedef struct {
@@ -3761,7 +3767,8 @@ typedef struct {
   /// platform view or GPU resource. Stock embedders leave this null.
   const FlutterAvioExtensionRequest* avio_extension_request;
 
-  /// Exact resource policy for a negotiated Vulkan Impeller engine. This must
+  /// Exact resource policy for a negotiated Vulkan or OpenGL Impeller engine.
+  /// The supported per-backend policy is documented above. This must
   /// be present if and only if
   /// kFlutterAvioExtensionFeatureResourceLifecycleConfig was negotiated.
   const FlutterAvioResourceLifecycleConfig* avio_resource_lifecycle_config;
