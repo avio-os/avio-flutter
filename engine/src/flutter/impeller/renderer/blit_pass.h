@@ -10,6 +10,7 @@
 
 #include "impeller/core/device_buffer.h"
 #include "impeller/core/texture.h"
+#include "impeller/renderer/bounded_resource_owners.h"
 
 namespace impeller {
 
@@ -29,6 +30,16 @@ class BlitPass {
   virtual ~BlitPass();
 
   virtual bool IsValid() const = 0;
+
+  // Pins logical image-region claims while a pass is retained for deferred
+  // native command consumption. It does not establish GPU completion. The
+  // source/destination textures have separate native lifetime tracking.
+  // Admit owners before adding or encoding commands. Owners must not refer
+  // back to this pass, its buffer or execution queue.
+  bool TryRetainResource(std::shared_ptr<void> owner) {
+    return retained_resources_.Retain(std::move(owner));
+  }
+  bool HasValidResourceOwners() const { return retained_resources_.IsValid(); }
 
   void SetLabel(std::string_view label);
 
@@ -183,6 +194,8 @@ class BlitPass {
                                        std::string_view label) = 0;
 
  private:
+  BoundedResourceOwners retained_resources_;
+
   BlitPass(const BlitPass&) = delete;
 
   BlitPass& operator=(const BlitPass&) = delete;

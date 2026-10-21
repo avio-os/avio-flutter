@@ -60,7 +60,7 @@ bool BlitPassVK::IsValid() const {
 
 // |BlitPass|
 bool BlitPassVK::EncodeCommands() const {
-  return true;
+  return HasValidResourceOwners();
 }
 
 // |BlitPass|

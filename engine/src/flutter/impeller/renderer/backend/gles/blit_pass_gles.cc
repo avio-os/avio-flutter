@@ -74,7 +74,7 @@ void BlitPassGLES::OnSetLabel(std::string_view label) {
 
 // |BlitPass|
 bool BlitPassGLES::EncodeCommands() const {
-  if (!IsValid()) {
+  if (!IsValid() || !HasValidResourceOwners()) {
     return false;
   }
   if (commands_.empty()) {

@@ -24,10 +24,12 @@ impeller_component("display_list") {
   sources = [
     "aiks_context.cc",
     "aiks_context.h",
+    "backdrop_filter_support.h",
     "canvas.cc",
     "canvas.h",
     "color_filter.cc",
     "color_filter.h",
+    "coverage_backdrop.h",
     "coverage_classifier.cc",
     "coverage_classifier.h",
     "coverage_classifier_dispatcher.cc",

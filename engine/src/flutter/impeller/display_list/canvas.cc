@@ -24,7 +24,9 @@
 #include "flutter/impeller/geometry/round_superellipse_param.h"
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
+#include "impeller/display_list/backdrop_filter_support.h"
 #include "impeller/display_list/color_filter.h"
+#include "impeller/display_list/coverage_backdrop.h"
 #include "impeller/display_list/coverage_classifier.h"
 #include "impeller/display_list/dl_image_impeller.h"
 #include "impeller/display_list/dl_vertices_geometry.h"
@@ -76,6 +78,7 @@
 #include "impeller/geometry/scalar.h"
 #include "impeller/geometry/vector.h"
 #include "impeller/renderer/command_buffer.h"
+#include "impeller/renderer/command_queue.h"
 
 namespace impeller {
 
@@ -254,25 +257,33 @@ static std::unique_ptr<EntityPassTarget> CreateRenderTarget(
   );
 }
 
+}  // namespace
+
+namespace canvas_internal {
+
 // A shared backdrop keeps the exact completed prefix before the first card,
 // rather than a pointer to the parent that will be painted again. The region
 // bank owns physical storage; this immutable snapshot owns logical custody.
-static std::optional<Snapshot> CaptureCoverageBackdrop(
+std::optional<Snapshot> CaptureCoverageBackdrop(
     const ContentContext& renderer,
     const RenderTarget& source,
     Rect required_input,
     const std::optional<Rect>& opaque_prefix) {
   const auto texture = source.GetRenderTargetTexture();
-  if (!texture) {
+  if (!texture || !required_input.IsFinite()) {
     return std::nullopt;
   }
-  const auto bounds = source.GetContentRect().value_or(
+  const auto source_content = source.GetContentRect().value_or(
       IRect::MakeSize(source.GetRenderTargetSize()));
+  const auto bounds = IRect::MakeSize(source_content.GetSize());
   const auto roi =
       IRect::RoundOut(required_input.Expand(1)).Intersection(bounds);
   if (!roi || roi->IsEmpty()) {
     return std::nullopt;
   }
+  // Required input and the returned snapshot use logical parent coordinates.
+  // Only native image access includes the source's physical content offset.
+  const auto source_region = roi->Shift(source_content.GetOrigin());
   const auto allocation =
       renderer.GetAvioCoverageRegion()->AcquireLayer(roi->GetSize());
   if (!allocation.lease) {
@@ -283,32 +294,83 @@ static std::optional<Snapshot> CaptureCoverageBackdrop(
   destination.SetColorAttachment(leased.GetColorAttachment(0), 0);
   destination.SetContentRect(allocation.lease->GetContentRect());
   destination.SetResourceOwner(allocation.lease);
-  const auto commands = renderer.GetContext()->CreateCommandBuffer();
-  const auto prepare = commands ? commands->CreateBlitPass() : nullptr;
-  if (!prepare || !prepare->ConvertTextureToShaderRead(texture) ||
-      !prepare->EncodeCommands()) {
-    return std::nullopt;
-  }
-  const auto pass = commands->CreateRenderPass(destination);
-  if (!pass) {
-    return std::nullopt;
-  }
-  auto contents = TextureContents::MakeRect(Rect::MakeSize(roi->GetSize()));
-  contents->SetTexture(texture);
-  contents->SetResourceOwner(source.GetResourceOwner());
-  contents->SetSourceRect(Rect::Make(*roi));
-  contents->SetStencilEnabled(false);
   SamplerDescriptor sampler;
   sampler.min_filter = MinMagFilter::kNearest;
   sampler.mag_filter = MinMagFilter::kNearest;
   sampler.mip_filter = MipFilter::kBase;
-  contents->SetSamplerDescriptor(sampler);
-  Entity entity;
-  entity.SetBlendMode(BlendMode::kSrc);
-  entity.SetContents(contents);
-  if (!contents->Render(renderer, entity, *pass) || !pass->EncodeCommands() ||
-      !renderer.GetContext()->EnqueueCommandBuffer(commands)) {
+  const auto commands = renderer.GetContext()->CreateCommandBuffer();
+  const auto prepare = commands ? commands->CreateBlitPass() : nullptr;
+  if (!prepare) {
     return std::nullopt;
+  }
+  if (!(texture->GetTextureDescriptor().usage & TextureUsage::kShaderRead)) {
+    // Imported GLES roots are framebuffer attachments, not shader textures.
+    // Freeze only the required prefix into an admitted, sampleable layer.
+    // The native blit converts the wrapped FBO's logical Y coordinates.
+    const auto copy_texture = destination.GetRenderTargetTexture();
+    const auto content = allocation.lease->GetContentRect();
+    if (renderer.GetContext()->GetBackendType() !=
+            Context::BackendType::kOpenGLES ||
+        !copy_texture || content.GetSize() != roi->GetSize() ||
+        !IRect::MakeSize(copy_texture->GetSize()).Contains(content) ||
+        texture->GetTextureDescriptor().sample_count != SampleCount::kCount1 ||
+        copy_texture->GetTextureDescriptor().sample_count !=
+            SampleCount::kCount1 ||
+        texture->GetTextureDescriptor().format !=
+            copy_texture->GetTextureDescriptor().format ||
+        !prepare->TryRetainResource(source.GetResourceOwner()) ||
+        !prepare->TryRetainResource(allocation.lease) ||
+        !commands->TryRetainResource(source.GetResourceOwner()) ||
+        !commands->TryRetainResource(allocation.lease)) {
+      return std::nullopt;
+    }
+    // A warm physical image can exceed its logical content. Clear all of it
+    // before the ROI copy so filter taps cannot read a previous lease's data.
+    RenderTarget clear_target;
+    auto clear_color = destination.GetColorAttachment(0);
+    clear_color.load_action = LoadAction::kClear;
+    clear_color.store_action = StoreAction::kStore;
+    clear_color.clear_color = Color::BlackTransparent();
+    clear_target.SetColorAttachment(clear_color, 0);
+    clear_target.SetResourceOwner(allocation.lease);
+    const auto clear = commands->CreateRenderPass(clear_target);
+    if (!clear ||
+        !prepare->AddCopy(texture, copy_texture, source_region,
+                          content.GetOrigin(),
+                          "Coverage framebuffer backdrop") ||
+        !clear->EncodeCommands() || !prepare->EncodeCommands() ||
+        !renderer.GetContext()
+             ->GetCommandQueue()
+             ->Submit({commands}, nullptr, /*block_on_schedule=*/false)
+             .ok()) {
+      return std::nullopt;
+    }
+    // The queued BlitPass owns the exact logical leases independently of the
+    // command-buffer marker, including a failure to admit that later marker.
+    // Consumption is not GPU completion: the selected target still exports
+    // its real native completion before publication.
+  } else {
+    if (!prepare->ConvertTextureToShaderRead(texture) ||
+        !prepare->EncodeCommands()) {
+      return std::nullopt;
+    }
+    const auto pass = commands->CreateRenderPass(destination);
+    if (!pass) {
+      return std::nullopt;
+    }
+    auto contents = TextureContents::MakeRect(Rect::MakeSize(roi->GetSize()));
+    contents->SetTexture(texture);
+    contents->SetResourceOwner(source.GetResourceOwner());
+    contents->SetSourceRect(Rect::Make(source_region));
+    contents->SetStencilEnabled(false);
+    contents->SetSamplerDescriptor(sampler);
+    Entity entity;
+    entity.SetBlendMode(BlendMode::kSrc);
+    entity.SetContents(contents);
+    if (!contents->Render(renderer, entity, *pass) || !pass->EncodeCommands() ||
+        !renderer.GetContext()->EnqueueCommandBuffer(commands)) {
+      return std::nullopt;
+    }
   }
   auto snapshot = Snapshot::FromRenderTarget(
       destination, Matrix::MakeTranslation(Vector3(Point(roi->GetOrigin()))),
@@ -321,6 +383,39 @@ static std::optional<Snapshot> CaptureCoverageBackdrop(
           opaque->Shift(Point(allocation.lease->GetContentRect().GetOrigin()) -
                         Point(roi->GetOrigin()));
     }
+  }
+  return snapshot;
+}
+
+}  // namespace canvas_internal
+
+namespace {
+
+// The caller has ended the prefix pass. A sampleable attachment keeps its
+// existing direct view; a framebuffer-only attachment must cross this owned
+// copy boundary before any filter can bind it as a texture.
+static std::optional<Snapshot> ReadableCoverageSnapshot(
+    const ContentContext& renderer,
+    const RenderTarget& source,
+    const std::optional<Rect>& required_input,
+    const Matrix& transform = Matrix()) {
+  const auto texture = source.GetRenderTargetTexture();
+  if (!texture) {
+    return std::nullopt;
+  }
+  if (texture->GetTextureDescriptor().usage & TextureUsage::kShaderRead) {
+    return Snapshot::FromRenderTarget(source, transform);
+  }
+  const auto bounds = Rect::MakeSize(
+      source.GetContentRect()
+          .value_or(IRect::MakeSize(source.GetRenderTargetSize()))
+          .GetSize());
+  const Rect needed =
+      required_input && required_input->IsFinite() ? *required_input : bounds;
+  auto snapshot = canvas_internal::CaptureCoverageBackdrop(
+      renderer, source, needed, std::nullopt);
+  if (snapshot) {
+    snapshot->transform = transform * snapshot->transform;
   }
   return snapshot;
 }
@@ -2202,8 +2297,9 @@ void Canvas::SetupRenderPass() {
       return;
     }
     avio_raster_frame_open_ = true;
-    // Vulkan coverage targets can sample their completed 1x prefix directly.
-    // Destination reads still end the current pass before any sampling.
+    // Keep the exact selected 1x target. Destination reads end the prefix
+    // pass and capture a bounded readable snapshot when the root is only a
+    // framebuffer attachment; sampleable targets keep their direct view.
     requires_readback_ = false;
   }
   // One lease scope per replay. The cache ages once per raster frame (its
@@ -2496,10 +2592,14 @@ void Canvas::SaveLayer(const Paint& requested_paint,
                       backdrop_data->required_input_coverage
                   ? backdrop_data->required_input_coverage->Shift(
                         -GetGlobalPassPosition())
-                  : Rect::MakeSize(source.GetRenderTargetSize());
-          backdrop_data->frozen_prefix = CaptureCoverageBackdrop(
-              renderer_, source, needed,
-              render_passes_.back().GetOpaqueCoverage().GetOpaqueRect());
+                  : Rect::MakeSize(source.GetContentRect()
+                                       .value_or(IRect::MakeSize(
+                                           source.GetRenderTargetSize()))
+                                       .GetSize());
+          backdrop_data->frozen_prefix =
+              canvas_internal::CaptureCoverageBackdrop(
+                  renderer_, source, needed,
+                  render_passes_.back().GetOpaqueCoverage().GetOpaqueRect());
           if (!backdrop_data->frozen_prefix) {
             rendering_failed_ = true;
             SkipUntilMatchingRestore(total_content_depth);
@@ -2516,14 +2616,34 @@ void Canvas::SaveLayer(const Paint& requested_paint,
                           : backdrop_data->texture_slot;
     }
 
-    auto input = renderer_.UsesAvioCoverage()
-                     ? FilterInput::Make(will_cache_backdrop_texture
-                                             ? *backdrop_data->frozen_prefix
-                                             : Snapshot::FromRenderTarget(
-                                                   render_passes_.back()
-                                                       .GetEntityPassTarget()
-                                                       ->GetRenderTarget()))
-                     : FilterInput::Make(std::move(input_texture));
+    FilterInput::Ref input;
+    if (renderer_.UsesAvioCoverage()) {
+      std::optional<Snapshot> snapshot;
+      if (will_cache_backdrop_texture) {
+        snapshot = backdrop_data->frozen_prefix;
+      } else {
+        const auto& source =
+            render_passes_.back().GetEntityPassTarget()->GetRenderTarget();
+        std::optional<Rect> needed;
+        flutter::DlIRect input_bounds;
+        if (!BackdropFilterRequiresFullInput(backdrop_filter) &&
+            subpass_coverage.IsFinite() &&
+            backdrop_filter->get_input_device_bounds(
+                flutter::DlIRect::RoundOut(subpass_coverage),
+                transform_stack_.back().transform, input_bounds)) {
+          needed = Rect::Make(input_bounds).Shift(-GetGlobalPassPosition());
+        }
+        snapshot = ReadableCoverageSnapshot(renderer_, source, needed);
+      }
+      if (!snapshot) {
+        rendering_failed_ = true;
+        SkipUntilMatchingRestore(total_content_depth);
+        return;
+      }
+      input = FilterInput::Make(*snapshot);
+    } else {
+      input = FilterInput::Make(std::move(input_texture));
+    }
     backdrop_filter_contents =
         WrapInput(renderer_, backdrop_filter, std::move(input));
     backdrop_filter_contents->SetEffectTransform(
@@ -2739,15 +2859,25 @@ bool Canvas::Restore() {
           return true;
         }
 
+        FilterInput::Ref destination_input;
+        if (renderer_.UsesAvioCoverage()) {
+          auto snapshot = ReadableCoverageSnapshot(
+              renderer_,
+              render_passes_.back().GetEntityPassTarget()->GetRenderTarget(),
+              element_entity.GetCoverage(),
+              element_entity.GetTransform().Invert());
+          if (!snapshot) {
+            rendering_failed_ = true;
+            transform_stack_.pop_back();
+            return true;
+          }
+          destination_input = FilterInput::Make(*snapshot);
+        } else {
+          destination_input = FilterInput::Make(
+              input_texture, element_entity.GetTransform().Invert());
+        }
         FilterInput::Vector inputs = {
-            renderer_.UsesAvioCoverage()
-                ? FilterInput::Make(Snapshot::FromRenderTarget(
-                      render_passes_.back()
-                          .GetEntityPassTarget()
-                          ->GetRenderTarget(),
-                      element_entity.GetTransform().Invert()))
-                : FilterInput::Make(input_texture,
-                                    element_entity.GetTransform().Invert()),
+            std::move(destination_input),
             FilterInput::Make(element_entity.GetContents())};
         auto contents = ColorFilterContents::MakeBlend(
             element_entity.GetBlendMode(), inputs);
@@ -3226,16 +3356,23 @@ void Canvas::AddRenderEntityToCurrentPass(
       entity.GetContents()->SetCoverageHint(Rect::Intersection(
           element_coverage_hint, clip_coverage_stack_.CurrentClipCoverage()));
 
-      FilterInput::Vector inputs = {
-          renderer_.UsesAvioCoverage()
-              ? FilterInput::Make(
-                    Snapshot::FromRenderTarget(render_passes_.back()
-                                                   .GetEntityPassTarget()
-                                                   ->GetRenderTarget(),
-                                               entity.GetTransform().Invert()))
-              : FilterInput::Make(input_texture,
-                                  entity.GetTransform().Invert()),
-          FilterInput::Make(entity.GetContents())};
+      FilterInput::Ref destination_input;
+      if (renderer_.UsesAvioCoverage()) {
+        auto snapshot = ReadableCoverageSnapshot(
+            renderer_,
+            render_passes_.back().GetEntityPassTarget()->GetRenderTarget(),
+            entity.GetCoverage(), entity.GetTransform().Invert());
+        if (!snapshot) {
+          rendering_failed_ = true;
+          return;
+        }
+        destination_input = FilterInput::Make(*snapshot);
+      } else {
+        destination_input =
+            FilterInput::Make(input_texture, entity.GetTransform().Invert());
+      }
+      FilterInput::Vector inputs = {std::move(destination_input),
+                                    FilterInput::Make(entity.GetContents())};
       auto contents =
           ColorFilterContents::MakeBlend(entity.GetBlendMode(), inputs);
       entity.SetContents(std::move(contents));

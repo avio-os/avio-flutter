@@ -480,6 +480,13 @@ GLuint mockCreateProgram() {
 static_assert(CheckSameSignature<decltype(mockCreateProgram),  //
                                  decltype(glCreateProgram)>::value);
 
+GLboolean mockIsProgram(GLuint program) {
+  return CallMockMethod(&IMockGLESImpl::IsProgram, program);
+}
+
+static_assert(CheckSameSignature<decltype(mockIsProgram),  //
+                                 decltype(glIsProgram)>::value);
+
 void mockGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
   CallMockMethod(&IMockGLESImpl::GetShaderiv, shader, pname, params);
 }
@@ -674,6 +681,8 @@ const ProcTableGLES::Resolver kMockResolverGLES = [](const char* name) {
     return reinterpret_cast<void*>(mockCreateShader);
   } else if (strcmp(name, "glCreateProgram") == 0) {
     return reinterpret_cast<void*>(mockCreateProgram);
+  } else if (strcmp(name, "glIsProgram") == 0) {
+    return reinterpret_cast<void*>(mockIsProgram);
   } else if (strcmp(name, "glGetShaderiv") == 0) {
     return reinterpret_cast<void*>(mockGetShaderiv);
   } else if (strcmp(name, "glFramebufferTexture2D") == 0) {

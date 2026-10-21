@@ -18,6 +18,7 @@
 #include "fml/closure.h"
 #include "impeller/core/formats.h"
 #include "impeller/display_list/aiks_context.h"
+#include "impeller/display_list/backdrop_filter_support.h"
 #include "impeller/display_list/canvas.h"
 #include "impeller/display_list/dl_atlas_geometry.h"
 #include "impeller/display_list/dl_image_impeller.h"
@@ -1057,7 +1058,8 @@ void FirstPassDispatcher::saveLayer(const DlRect& bounds,
       flutter::DlIRect input;
       // The first pass cannot infer the affected bounds through an enclosing
       // image filter. Freeze the complete prefix rather than omit its input.
-      if (has_image_filter_ || output.IsMaximum() || !output.IsFinite() ||
+      if (has_image_filter_ || BackdropFilterRequiresFullInput(backdrop) ||
+          output.IsMaximum() || !output.IsFinite() ||
           !backdrop->get_input_device_bounds(flutter::DlIRect::RoundOut(output),
                                              matrix_, input)) {
         data.requires_full_backdrop = true;

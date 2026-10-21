@@ -21,7 +21,17 @@ using ::testing::_;
   EXPECT_FALSE(mock_gles->GetProcTable().proc_ivar.IsAvailable());
 
 TEST(ProcTableGLES, ResolvesCorrectClearDepthProcOnES) {
-  auto mock_gles = MockGLES::Init(std::nullopt, "OpenGL ES 3.0");
+  auto implementation = std::make_unique<MockGLESImpl>();
+  EXPECT_CALL(*implementation, IsProgram(7))
+      .WillOnce(::testing::Return(GL_TRUE));
+  EXPECT_CALL(*implementation, IsProgram(11))
+      .WillOnce(::testing::Return(GL_FALSE));
+  auto mock_gles =
+      MockGLES::Init(std::move(implementation), std::nullopt, "OpenGL ES 3.0");
+  // Return-valued entry points must resolve to typed mock adapters rather than
+  // the generic void fallback. Verify both the argument and returned value.
+  EXPECT_TRUE(mock_gles->GetProcTable().IsProgram(7));
+  EXPECT_FALSE(mock_gles->GetProcTable().IsProgram(11));
   EXPECT_TRUE(mock_gles->GetProcTable().GetDescription()->IsES());
 
   FOR_EACH_IMPELLER_ES_ONLY_PROC(EXPECT_AVAILABLE);

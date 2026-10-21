@@ -1290,6 +1290,44 @@ single-sample restore fix remain prerequisites. Region
 exhaustion may report an explicit layer overflow allocation; it must never
 silently re-enable full-root MSAA or omit geometric coverage.
 
+**Framebuffer-backed GLES destination reads.** A selected GLES root is a
+render-target-only borrowed FBO; it does not acquire a sampleable texture
+handle merely because its colour attachment came from an imported texture.
+The Canvas backdrop boundary first ends the painted prefix and captures the
+required input into an existing layer-region lease with a native FBO copy.
+This boundary covers grouped prefix capture, ungrouped filters, and destination
+reads at both ordinary and restored-layer advanced-blend sites. It does not
+make every root an offscreen image or change selected-target history, external
+source collection, antialiasing policy or final native completion authority.
+
+Finite clamp/decal input bounds include the filter halo and clip to the logical
+source extent. Repeat/mirror blur, runtime sampling and other nonlocal support
+preserve the complete logical prefix; composed/local-matrix filters and later
+members of a shared group participate in that support decision. Full-image
+sampling retains its existing explicit exact-extent layer normalization.
+Logical ROI coordinates are distinct from physical source content offsets.
+The returned Snapshot preserves that mapping, its crop, immutable-prefix fact
+and any intersected opaque certificate. Every captured warm physical image is
+fully cleared before copying its ROI, including on reuse.
+
+A queued GLES BlitPass retains the exact source logical owner and destination
+lease in the existing fixed inline owner container. Its source texture also
+retains selected-target collection custody. These owners survive caller or
+Snapshot destruction and refusal of a later command-buffer submission marker;
+command consumption is not GPU completion. Owner or region admission failure
+rejects the effect replay instead of silently dropping it. The public command
+queue submits without a scheduling wait; no CPU readback or Finish is added.
+
+The focused source regressions exercise the actual Canvas/coverage/copy code
+with mock GL, including sigma30, grouped prefixes, both advanced-blend sites,
+transformed and clipped halos, nonlocal tile modes, nonzero content origin,
+warm-image reuse, preserved-root loading and deferred/refused-copy custody.
+They join the existing focused embedder target; its expected inventory is112
+cases plus the separate20-group ABI/report executable. This source inventory
+is not an execution result. Native build, unskipped test execution, selected-
+target effect pixels and canonical installed greeter/desktop validation remain
+separate gates; no hardware performance or pixel approval follows from mocks.
+
 This bounded-memory renderer differs from the research sketch's anticipated
 per-draw scalar masks, fringe-only replay and image analytic fast paths. Those
 performance fast paths are not implemented here. Tiled replay can repeat work

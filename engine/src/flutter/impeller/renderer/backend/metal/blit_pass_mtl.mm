@@ -59,6 +59,9 @@ void BlitPassMTL::OnSetLabel(std::string_view label) {
 }
 
 bool BlitPassMTL::EncodeCommands() const {
+  if (!HasValidResourceOwners()) {
+    return false;
+  }
   [encoder_ endEncoding];
   did_finish_encoding_ = true;
   return true;

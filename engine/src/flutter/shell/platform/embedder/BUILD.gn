@@ -485,6 +485,7 @@ if (enable_unittests) {
       include_dirs = [ "." ]
       defines = [ "FLUTTER_ENGINE_NO_PROTOTYPES" ]
       sources = [
+        "//flutter/impeller/display_list/canvas_gles_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/command_buffer_gles_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/native_coverage_gles_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/render_pass_gles_unittests.cc",

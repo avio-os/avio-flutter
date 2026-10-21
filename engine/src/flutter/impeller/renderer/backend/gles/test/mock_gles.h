@@ -146,6 +146,7 @@ class IMockGLESImpl {
   }
   virtual GLuint CreateShader(GLenum type) { return 0; }
   virtual GLuint CreateProgram() { return 0; }
+  virtual GLboolean IsProgram(GLuint program) { return GL_FALSE; }
   virtual void GetShaderiv(GLuint shader, GLenum pname, GLint* params) {}
   virtual void ActiveTexture(GLenum texture) {}
   virtual void Uniform1i(GLint location, GLint v0) {}
@@ -364,6 +365,7 @@ class MockGLESImpl : public IMockGLESImpl {
               (override));
   MOCK_METHOD(GLuint, CreateShader, (GLenum type), (override));
   MOCK_METHOD(GLuint, CreateProgram, (), (override));
+  MOCK_METHOD(GLboolean, IsProgram, (GLuint program), (override));
   MOCK_METHOD(void,
               GetShaderiv,
               (GLuint shader, GLenum pname, GLint* params),
