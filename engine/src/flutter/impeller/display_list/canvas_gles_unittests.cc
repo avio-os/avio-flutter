@@ -22,6 +22,7 @@
 #include "impeller/display_list/dl_dispatcher.h"
 #include "impeller/entity/avio_coverage_region.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/contents/filters/gaussian_blur_filter_contents.h"
 #include "impeller/entity/geometry/rect_geometry.h"
 #include "impeller/entity/gles/entity_shaders_gles.h"
 #include "impeller/entity/gles/framebuffer_blend_shaders_gles.h"
@@ -873,6 +874,32 @@ TEST_F(CanvasCoverageFramebufferTest, ReusedWarmImageGetsANewFullClear) {
   EXPECT_GT(copies.back().clear_serial, first_copy.serial);
   EXPECT_EQ(detector->GetColorClearCount(first_copy.destination_texture),
             first_clear_count + 1u);
+}
+
+TEST_F(CanvasCoverageFramebufferTest, BlurUVsUseEvaluatedSnapshotTexelsOnce) {
+  // A cropped root's scene origin survives exact-extent normalization, but
+  // must not offset the physical texels sampled by the downsample pass.
+  for (const auto size : {ISize(40, 32), ISize(256, 256)}) {
+    auto descriptor = target.GetRenderTargetTexture()->GetTextureDescriptor();
+    descriptor.size = size;
+    auto texture =
+        TextureGLES::WrapFBO(context->GetReactor(), descriptor, kRoot);
+    ASSERT_TRUE(texture);
+    Snapshot snapshot;
+    snapshot.texture = texture;
+    snapshot.texture_rect = Rect::MakeSize(ISize(40, 32));
+    snapshot.transform = Matrix::MakeTranslation(Vector3(4, 7, 0));
+    const auto uvs = GaussianBlurFilterContents::CalculateUVs(
+        snapshot, Rect::MakeXYWH(-6, -6, 52, 44));
+    EXPECT_NEAR(uvs[0].x, -6.f / size.width, 1e-6f);
+    EXPECT_NEAR(uvs[0].y, -6.f / size.height, 1e-6f);
+    EXPECT_NEAR(uvs[1].x, 46.f / size.width, 1e-6f);
+    EXPECT_NEAR(uvs[1].y, -6.f / size.height, 1e-6f);
+    EXPECT_NEAR(uvs[2].x, -6.f / size.width, 1e-6f);
+    EXPECT_NEAR(uvs[2].y, 38.f / size.height, 1e-6f);
+    EXPECT_NEAR(uvs[3].x, 46.f / size.width, 1e-6f);
+    EXPECT_NEAR(uvs[3].y, 38.f / size.height, 1e-6f);
+  }
 }
 
 }  // namespace testing

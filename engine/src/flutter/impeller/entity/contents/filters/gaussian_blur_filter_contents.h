@@ -119,15 +119,10 @@ class GaussianBlurFilterContents final : public FilterContents {
   /// kernel size).
   static Scalar CalculateBlurRadius(Scalar sigma);
 
-  /// Calculate the UV coordinates for rendering the filter_input.
-  /// @param filter_input The FilterInput that should be rendered.
-  /// @param entity The associated entity for the filter_input.
-  /// @param source_rect The rect in source coordinates to convert to uvs.
-  /// @param texture_size The rect to convert in source coordinates.
-  static Quad CalculateUVs(const std::shared_ptr<FilterInput>& filter_input,
-                           const Entity& entity,
-                           const Rect& source_rect,
-                           const ISize& texture_size);
+  /// Convert physical texels of the evaluated snapshot to UVs. Snapshot
+  /// transforms place the result; they do not transform these texels again.
+  static Quad CalculateUVs(const Snapshot& input_snapshot,
+                           const Rect& source_rect);
 
   /// Calculate the scale factor for the downsample pass given a sigma value.
   ///

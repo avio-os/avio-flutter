@@ -266,7 +266,6 @@ DownsamplePassArgs CalculateDownsamplePassArgs(
     const Snapshot& input_snapshot,
     const std::optional<Rect>& source_expanded_coverage_hint,
     const std::optional<Quad>& source_bounds,
-    const std::shared_ptr<FilterInput>& input,
     const Entity& snapshot_entity) {
   Scalar desired_scalar =
       std::min(GaussianBlurFilterContents::CalculateScale(scaled_sigma.x),
@@ -334,7 +333,6 @@ DownsamplePassArgs CalculateDownsamplePassArgs(
             {aligned_coverage_hint.GetX(), aligned_coverage_hint.GetY(), 0})};
   } else {
     //////////////////////////////////////////////////////////////////////////////
-    auto input_snapshot_size = input_snapshot.texture->GetSize();
     Rect source_rect = input_snapshot.GetTextureRect();
     Rect source_rect_padded = source_rect.Expand(padding);
     Vector2 downsampled_size = source_rect_padded.GetSize() * downsample_scalar;
@@ -359,13 +357,11 @@ DownsamplePassArgs CalculateDownsamplePassArgs(
 
     Vector2 effective_scalar =
         Vector2(subpass_size) / source_rect_padded.GetSize();
-    Quad uvs =
-        input_snapshot.GetTextureRect() != Rect::MakeSize(input_snapshot_size)
-            ? source_rect_padded.GetTransformedPoints(
-                  Matrix::MakeScale(1.0f / Vector2(input_snapshot_size)))
-            : GaussianBlurFilterContents::CalculateUVs(input, snapshot_entity,
-                                                       source_rect_padded,
-                                                       input_snapshot_size);
+    // source_rect_padded is already in the evaluated snapshot's physical
+    // texels. Exact-extent rasterization can replace the original input and
+    // its local transform; applying that transform again shifts the blur.
+    Quad uvs = GaussianBlurFilterContents::CalculateUVs(input_snapshot,
+                                                        source_rect_padded);
     std::optional<Quad> uv_bounds;
     if (source_bounds.has_value()) {
       uv_bounds =
@@ -932,7 +928,7 @@ std::optional<Entity> GaussianBlurFilterContents::RenderFilter(
 
   DownsamplePassArgs downsample_pass_args = CalculateDownsamplePassArgs(
       blur_info.scaled_sigma, blur_info.padding, input_snapshot.value(),
-      source_expanded_coverage_hint, source_bounds, inputs[0], snapshot_entity);
+      source_expanded_coverage_hint, source_bounds, snapshot_entity);
 
   fml::StatusOr<RenderTarget> pass1_out = MakeDownsampleSubpass(
       renderer, command_buffer_1, *input_snapshot,
@@ -1096,17 +1092,10 @@ Scalar GaussianBlurFilterContents::CalculateBlurRadius(Scalar sigma) {
   return static_cast<Radius>(Sigma(sigma)).radius;
 }
 
-Quad GaussianBlurFilterContents::CalculateUVs(
-    const std::shared_ptr<FilterInput>& filter_input,
-    const Entity& entity,
-    const Rect& source_rect,
-    const ISize& texture_size) {
-  Matrix input_transform = filter_input->GetLocalTransform(entity);
-  Quad coverage_quad = source_rect.GetTransformedPoints(input_transform);
-
-  Matrix uv_transform = Matrix::MakeScale(
-      {1.0f / texture_size.width, 1.0f / texture_size.height, 1.0f});
-  return uv_transform.Transform(coverage_quad);
+Quad GaussianBlurFilterContents::CalculateUVs(const Snapshot& input_snapshot,
+                                              const Rect& source_rect) {
+  return source_rect.GetTransformedPoints(
+      Matrix::MakeScale(1.0f / Vector2(input_snapshot.texture->GetSize())));
 }
 
 // This function was calculated by observing Skia's behavior. Its blur at 500

@@ -2038,3 +2038,14 @@ without the change. `hitRegionOnlyChangeOnRootTargetCarriesTheNewClaim`,
 unselected targets) fails without the shortcut change;
 `HitRegionsWithoutEmptyFramesFailBeforeLaunch` and
 `HitRegionsCanBeNegotiatedWithEmptyFrames` cover negotiation.
+
+## Evaluated Gaussian snapshot coordinates (local VM repair)
+
+Gaussian downsampling samples the evaluated snapshot's physical texel rectangle.
+Exact-extent normalization of a cropped render-only backdrop can replace the
+original input texture while preserving a scene translation. Reapplying the
+original input's transform to those texels shifts the blur. UV conversion now
+uses the evaluated snapshot's actual physical extent once; its transform still
+places the output. A linked GLES contract covers translated cropped snapshots
+with exact and pooled physical extents. Real GPU effect and installed desktop
+acceptance remain separate from this coordinate test.
