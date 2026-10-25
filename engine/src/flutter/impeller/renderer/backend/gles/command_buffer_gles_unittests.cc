@@ -139,6 +139,93 @@ TEST(CommandBufferGLES, DeferredSubmissionRetainsOwnersUntilReaction) {
   EXPECT_TRUE(witness.expired());
 }
 
+TEST(CommandBufferGLES, ContextEnqueueRetainsOwnersUntilReaction) {
+  auto mock_gles = MockGLES::Init();
+  auto context = CreateFakeGLESContext();
+  auto context_base = std::static_pointer_cast<Context>(context);
+  auto worker = std::make_shared<ToggleWorker>(false);
+  context->AddReactorWorker(worker);
+  auto command = context_base->CreateCommandBuffer();
+  ASSERT_TRUE(command);
+  auto owner = std::make_shared<int>(17);
+  std::weak_ptr<int> witness = owner;
+  ASSERT_TRUE(command->TryRetainResource(owner));
+  ASSERT_TRUE(context_base->EnqueueCommandBuffer(command));
+  owner.reset();
+  command.reset();
+  EXPECT_FALSE(witness.expired());
+  worker->SetAllowed(true);
+  ASSERT_TRUE(context->GetReactor()->React());
+  EXPECT_TRUE(witness.expired());
+}
+
+TEST(CommandBufferGLES, ContextEnqueueConsumesImmediateCommands) {
+  auto mock_gles = MockGLES::Init();
+  auto context = CreateFakeGLESContext();
+  auto context_base = std::static_pointer_cast<Context>(context);
+  auto worker = std::make_shared<ToggleWorker>(true);
+  context->AddReactorWorker(worker);
+  auto command = context_base->CreateCommandBuffer();
+  ASSERT_TRUE(command);
+  bool consumed = false;
+  ASSERT_TRUE(context->GetReactor()->AddOperation(
+      [&consumed](const ReactorGLES&) { consumed = true; }, true));
+  ASSERT_TRUE(context_base->EnqueueCommandBuffer(command));
+  EXPECT_TRUE(consumed);
+  EXPECT_FALSE(command->IsValid());
+}
+
+TEST(CommandBufferGLES, ContextEnqueueAdmitsDeferredBufferOnlyOnce) {
+  auto mock_gles = MockGLES::Init();
+  auto context = CreateFakeGLESContext();
+  auto context_base = std::static_pointer_cast<Context>(context);
+  auto worker = std::make_shared<ToggleWorker>(false);
+  context->AddReactorWorker(worker);
+  auto command = context_base->CreateCommandBuffer();
+  ASSERT_TRUE(command);
+  EXPECT_TRUE(context_base->EnqueueCommandBuffer(command));
+  EXPECT_FALSE(context_base->EnqueueCommandBuffer(command));
+  worker->SetAllowed(true);
+  EXPECT_TRUE(context->GetReactor()->React());
+}
+
+TEST(CommandBufferGLES, ContextEnqueueRejectsMissingOrExhaustedCustody) {
+  auto mock_gles = MockGLES::Init();
+  auto context = CreateFakeGLESContext();
+  auto context_base = std::static_pointer_cast<Context>(context);
+  EXPECT_FALSE(context_base->EnqueueCommandBuffer(nullptr));
+  auto command = context_base->CreateCommandBuffer();
+  ASSERT_TRUE(command);
+  for (size_t index_value = 0; index_value < BoundedResourceOwners::kCapacity;
+       ++index_value) {
+    ASSERT_TRUE(
+        command->TryRetainResource(std::make_shared<size_t>(index_value)));
+  }
+  ASSERT_FALSE(command->TryRetainResource(std::make_shared<int>(17)));
+  EXPECT_FALSE(context_base->EnqueueCommandBuffer(command));
+}
+
+TEST(CommandBufferGLES, ContextEnqueueReleasesOwnersOnReactorTeardown) {
+  std::weak_ptr<int> witness;
+  {
+    auto mock_gles = MockGLES::Init();
+    auto context = CreateFakeGLESContext();
+    auto context_base = std::static_pointer_cast<Context>(context);
+    auto worker = std::make_shared<ToggleWorker>(false);
+    context->AddReactorWorker(worker);
+    auto command = context_base->CreateCommandBuffer();
+    ASSERT_TRUE(command);
+    auto owner = std::make_shared<int>(17);
+    witness = owner;
+    ASSERT_TRUE(command->TryRetainResource(owner));
+    ASSERT_TRUE(context_base->EnqueueCommandBuffer(command));
+    owner.reset();
+    command.reset();
+    EXPECT_FALSE(witness.expired());
+  }
+  EXPECT_TRUE(witness.expired());
+}
+
 TEST(CommandBufferGLES, BorrowedTargetCollectionFollowsQueuedSourceReferences) {
   auto implementation = std::make_unique<::testing::NiceMock<MockGLESImpl>>();
   auto& gl = *implementation;
