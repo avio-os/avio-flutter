@@ -499,6 +499,7 @@ if (enable_unittests) {
       deps = [
         ":embedder",
         ":embedder_gpu_configuration",
+        ":fixtures",
         "//flutter/impeller/display_list",
         "//flutter/impeller/renderer/backend/gles",
         "//flutter/impeller/renderer/backend/gles:mock_gles",
