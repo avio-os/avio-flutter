@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -900,6 +901,45 @@ TEST_F(CanvasCoverageFramebufferTest, BlurUVsUseEvaluatedSnapshotTexelsOnce) {
     EXPECT_NEAR(uvs[3].x, 46.f / size.width, 1e-6f);
     EXPECT_NEAR(uvs[3].y, 38.f / size.height, 1e-6f);
   }
+}
+
+TEST(GaussianBlurTextureCopyUniforms, ClearsStaleSamplingAndCoverageModes) {
+  TextureFillFragmentShader::FragInfo uniforms = {};
+  uniforms.image_sample_rect = Vector4(1, 2, 3, 4);
+  uniforms.image_edge_rect = Vector4(5, 6, 7, 8);
+  uniforms.continuous_image_edge = 1e30f;
+  uniforms.analytic_quad = 2.f;
+  uniforms.alpha = .125f;
+  uniforms.external_linear_backdrop = 1.f;
+
+  gaussian_blur_internal::InitializeTextureCopyUniforms(uniforms);
+
+  EXPECT_EQ(uniforms.image_sample_rect, Vector4());
+  EXPECT_EQ(uniforms.image_edge_rect, Vector4());
+  EXPECT_EQ(uniforms.continuous_image_edge, 0.f);
+  EXPECT_EQ(uniforms.analytic_quad, 0.f);
+  EXPECT_EQ(uniforms.external_linear_backdrop, 0.f);
+  EXPECT_EQ(uniforms.alpha, 1.f);
+}
+
+TEST(GaussianBlurTextureCopyUniforms, ClearsNonfinitePriorPacketValues) {
+  TextureFillFragmentShader::FragInfo uniforms = {};
+  const Scalar poison = std::numeric_limits<Scalar>::quiet_NaN();
+  uniforms.image_sample_rect = Vector4(poison, poison, poison, poison);
+  uniforms.image_edge_rect = Vector4(poison, poison, poison, poison);
+  uniforms.continuous_image_edge = poison;
+  uniforms.analytic_quad = poison;
+  uniforms.alpha = poison;
+  uniforms.external_linear_backdrop = poison;
+
+  gaussian_blur_internal::InitializeTextureCopyUniforms(uniforms);
+
+  EXPECT_EQ(uniforms.image_sample_rect, Vector4());
+  EXPECT_EQ(uniforms.image_edge_rect, Vector4());
+  EXPECT_EQ(uniforms.continuous_image_edge, 0.f);
+  EXPECT_EQ(uniforms.analytic_quad, 0.f);
+  EXPECT_EQ(uniforms.external_linear_backdrop, 0.f);
+  EXPECT_EQ(uniforms.alpha, 1.f);
 }
 
 }  // namespace testing

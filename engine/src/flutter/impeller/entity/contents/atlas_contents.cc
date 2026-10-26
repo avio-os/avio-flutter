@@ -189,12 +189,12 @@ bool AtlasContents::Render(const ContentContext& renderer,
     pass.SetCommandLabel("DrawAtlas");
 #endif  // IMPELLER_DEBUG
 
-    VS::FrameInfo frame_info;
+    VS::FrameInfo frame_info = {};
     frame_info.mvp = entity.GetShaderTransform(pass);
 
     VS::BindFrameInfo(pass, data_host_buffer.EmplaceUniform(frame_info));
 
-    FS::FragInfo frag_info;
+    FS::FragInfo frag_info = {};
     frag_info.alpha = alpha_;
     FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform((frag_info)));
     FS::BindTextureSampler(pass, geometry_->GetAtlas(), dst_sampler);

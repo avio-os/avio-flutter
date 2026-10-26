@@ -9,9 +9,15 @@
 #include "impeller/entity/contents/content_context.h"
 #include "impeller/entity/contents/filters/filter_contents.h"
 #include "impeller/entity/geometry/geometry.h"
+#include "impeller/entity/texture_fill.frag.h"
 #include "impeller/geometry/color.h"
 
 namespace impeller {
+
+namespace gaussian_blur_internal {
+void InitializeTextureCopyUniforms(
+    TextureFillFragmentShader::FragInfo& uniforms);
+}
 
 // Comes from gaussian.frag.
 static constexpr int32_t kGaussianBlurMaxKernelSize = 50;

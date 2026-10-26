@@ -579,12 +579,12 @@ static std::optional<Entity> PipelineBlend(
       pass.SetVertexBuffer(
           CreateVertexBuffer(vertices, renderer.GetTransientsDataBuffer()));
 
-      VS::FrameInfo frame_info;
+      VS::FrameInfo frame_info = {};
       frame_info.mvp = pass.GetOrthographicTransform() *
                        Matrix::MakeTranslation(-subpass_coverage.GetOrigin()) *
                        input->transform;
 
-      FS::FragInfo frag_info;
+      FS::FragInfo frag_info = {};
       frag_info.alpha =
           absorb_opacity == ColorFilterContents::AbsorbOpacity::kYes
               ? input->opacity
@@ -708,10 +708,10 @@ std::optional<Entity> BlendFilterContents::CreateFramebufferAdvancedBlend(
       pipeline_options.primitive_type = PrimitiveType::kTriangleStrip;
       pass.SetPipeline(renderer.GetTexturePipeline(pipeline_options));
 
-      VS::FrameInfo frame_info;
+      VS::FrameInfo frame_info = {};
       frame_info.mvp = Matrix::MakeOrthographic(ISize(1, 1));
 
-      FS::FragInfo frag_info;
+      FS::FragInfo frag_info = {};
       frag_info.alpha = 1.0;
 
       auto uv_rect = Rect::MakeSize(dst_snapshot->texture->GetSize())

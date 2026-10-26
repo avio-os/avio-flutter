@@ -24,6 +24,12 @@ namespace impeller {
 using GaussianBlurVertexShader = GaussianBlurPipeline::VertexShader;
 using GaussianBlurFragmentShader = GaussianBlurPipeline::FragmentShader;
 
+void gaussian_blur_internal::InitializeTextureCopyUniforms(
+    TextureFillFragmentShader::FragInfo& uniforms) {
+  uniforms = {};
+  uniforms.alpha = 1.f;
+}
+
 namespace {
 
 constexpr Scalar kMaxSigma = 500.0f;
@@ -412,11 +418,11 @@ fml::StatusOr<RenderTarget> MakeDownsampleSubpass(
           pipeline_options.primitive_type = PrimitiveType::kTriangleStrip;
           pass.SetPipeline(renderer.GetTexturePipeline(pipeline_options));
 
-          TextureFillVertexShader::FrameInfo frame_info;
+          TextureFillVertexShader::FrameInfo frame_info = {};
           frame_info.mvp = Matrix::MakeOrthographic(ISize(1, 1));
 
           TextureFillFragmentShader::FragInfo frag_info;
-          frag_info.alpha = 1.0;
+          gaussian_blur_internal::InitializeTextureCopyUniforms(frag_info);
 
           const Quad& uvs = pass_args.uvs;
           std::array<VS::PerVertexData, 4> vertices = {
@@ -492,7 +498,7 @@ fml::StatusOr<RenderTarget> MakeDownsampleSubpass(
 #endif  // IMPELLER_ENABLE_OPENGLES
           }
 
-          TextureFillVertexShader::FrameInfo frame_info;
+          TextureFillVertexShader::FrameInfo frame_info = {};
           frame_info.mvp = Matrix::MakeOrthographic(ISize(1, 1));
 
           TextureDownsampleFragmentShader::FragInfo frag_info;
