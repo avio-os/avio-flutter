@@ -18,6 +18,32 @@ namespace impeller {
 
 struct CoverageRecorderBankTestPeer {
   using Sequence = CoverageTiledRenderPass::PacketSequence;
+  using Bindings = CoverageTiledRenderPass::BindingSequence;
+  static size_t Offset(const CoverageTiledRenderPass::Binding& binding) {
+    return std::get<CoverageTiledRenderPass::BufferBinding>(binding)
+        .view.GetRange()
+        .offset;
+  }
+  static bool Bind(CoverageRecorderStorage& storage,
+                   Bindings& sequence,
+                   BufferView view) {
+    CoverageTiledRenderPass::BufferBinding binding{};
+    binding.view = std::move(view);
+    return storage.AppendBinding(sequence, std::move(binding));
+  }
+  static bool Publish(CoverageRecorderStorage& storage,
+                      Sequence& sequence,
+                      Bindings& bindings) {
+    auto reservation = storage.ReserveDraw(sequence.size(), 0, 0);
+    if (!reservation) {
+      return false;
+    }
+    CoverageTiledRenderPass::DrawPacket packet;
+    packet.bindings = bindings;
+    reservation->Commit(sequence, std::move(packet), {}, {});
+    bindings = {};
+    return true;
+  }
   static bool Record(CoverageRecorderStorage& storage,
                      Sequence& sequence,
                      uint32_t identity,
@@ -159,6 +185,7 @@ TEST(CoverageRecorderBankTest, FixedVectorFailsClosedAndDestroysExplicitly) {
 }
 
 TEST(CoverageRecorderBankTest, CapsAreFixedAddressSpaceNotResidentMemory) {
+  static_assert(sizeof(CoverageRecorderStorage) <= 20624480);
   static_assert(decltype(CoverageRecorderStorage::controls)::capacity() == 64);
   static_assert(decltype(CoverageRecorderStorage::packets)::capacity() == 8192);
   static_assert(decltype(CoverageRecorderStorage::bindings)::capacity() ==
@@ -344,6 +371,78 @@ TEST(CoverageRecorderBankTest, BusyAdmissionRefusesWithoutWaitingOrMutation) {
   EXPECT_EQ(storage->packets.size(), 0u);
   storage->Unlock();
   EXPECT_TRUE(Claim(storage));
+}
+
+TEST(CoverageRecorderBankTest, StagedBindingsShareTheUnchangedAggregateLimit) {
+  auto storage = CoverageTiledRenderPass::CreateStorage();
+  auto first = Claim(storage);
+  auto second = Claim(storage);
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  auto buffer = std::make_shared<BankBuffer>();
+  std::weak_ptr<BankBuffer> witness = buffer;
+  CoverageRecorderBankTestPeer::Bindings first_bindings;
+  CoverageRecorderBankTestPeer::Bindings second_bindings;
+  CoverageFixedStorageUsage before;
+  storage->AccumulateStorageUsage(before);
+  for (size_t index = 0; index < 16384; index++) {
+    ASSERT_TRUE(CoverageRecorderBankTestPeer::Bind(
+        *storage, first_bindings, BufferView(buffer, Range{0, 8})));
+    ASSERT_TRUE(CoverageRecorderBankTestPeer::Bind(
+        *storage, second_bindings, BufferView(buffer, Range{8, 8})));
+  }
+  const auto* first_address = &*first_bindings.begin();
+  EXPECT_EQ(storage->bindings.size(), 32768u);
+  EXPECT_FALSE(CoverageRecorderBankTestPeer::Bind(
+      *storage, first_bindings, BufferView(buffer, Range{0, 8})));
+  EXPECT_EQ(first_bindings.size(), 16384u);
+  EXPECT_EQ(second_bindings.size(), 16384u);
+  EXPECT_EQ(storage->packets.size(), 0u);
+  CoverageRecorderBankTestPeer::Sequence first_packets;
+  first_packets.storage = storage.get();
+  CoverageRecorderBankTestPeer::Sequence second_packets;
+  second_packets.storage = storage.get();
+  ASSERT_TRUE(CoverageRecorderBankTestPeer::Publish(*storage, second_packets,
+                                                    second_bindings));
+  ASSERT_TRUE(CoverageRecorderBankTestPeer::Publish(*storage, first_packets,
+                                                    first_bindings));
+  EXPECT_EQ(&*first_packets.front().bindings.begin(), first_address);
+  EXPECT_EQ(first_packets.front().bindings.size(), 16384u);
+  EXPECT_EQ(second_packets.front().bindings.size(), 16384u);
+  EXPECT_EQ(storage->bindings.size(), 32768u);
+  for (const auto& binding : first_packets.front().bindings) {
+    EXPECT_EQ(CoverageRecorderBankTestPeer::Offset(binding), 0u);
+  }
+  for (const auto& binding : second_packets.front().bindings) {
+    EXPECT_EQ(CoverageRecorderBankTestPeer::Offset(binding), 8u);
+  }
+  CoverageFixedStorageUsage after;
+  storage->AccumulateStorageUsage(after);
+  EXPECT_EQ(after.capacity_bytes, before.capacity_bytes);
+  EXPECT_EQ(storage->bindings.high_water(), 32768u);
+  buffer.reset();
+  first.reset();
+  EXPECT_FALSE(witness.expired());
+  second.reset();
+  EXPECT_TRUE(witness.expired());
+  EXPECT_EQ(storage->bindings.size(), 0u);
+}
+
+TEST(CoverageRecorderBankTest, PendingBindingContentionRefusesBeforeMutation) {
+  auto storage = CoverageTiledRenderPass::CreateStorage();
+  auto owner = Claim(storage);
+  ASSERT_TRUE(owner);
+  auto buffer = std::make_shared<BankBuffer>();
+  CoverageRecorderBankTestPeer::Bindings bindings;
+  ASSERT_TRUE(storage->TryLock());
+  EXPECT_FALSE(CoverageRecorderBankTestPeer::Bind(
+      *storage, bindings, BufferView(buffer, Range{0, 16})));
+  EXPECT_TRUE(bindings.empty());
+  EXPECT_EQ(storage->bindings.size(), 0u);
+  storage->Unlock();
+  EXPECT_TRUE(CoverageRecorderBankTestPeer::Bind(
+      *storage, bindings, BufferView(buffer, Range{0, 16})));
+  EXPECT_EQ(bindings.size(), 1u);
 }
 
 TEST(CoverageRecorderBankTest, FinalReleaseCompletesCleanupBeforeNextClaim) {

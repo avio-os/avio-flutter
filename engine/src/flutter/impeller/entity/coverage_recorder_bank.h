@@ -50,6 +50,10 @@ class CoverageRecorderStorage {
     Pass::DrawPacket draw;
     uint32_t next = Pass::PacketSequence::kEnd;
   };
+  struct BindingRecord {
+    Pass::Binding value;
+    uint32_t next = Pass::BindingSequence::kEnd;
+  };
   using IndexChunk = std::array<uint32_t, 64>;
 
   // User-provided, so std::make_shared does not zero-initialize the bank.
@@ -60,7 +64,7 @@ class CoverageRecorderStorage {
   // while the bank lives; allocators address them by index.
   CoverageFixedVector<Control, kControls> controls;
   CoverageFixedVector<Packet, kPackets> packets;
-  CoverageFixedVector<Pass::Binding, kBindings> bindings;
+  CoverageFixedVector<BindingRecord, kBindings> bindings;
   CoverageFixedVector<BufferView, kVertices> vertices;
   CoverageFixedVector<IndexChunk, kIndexChunks> ordinal_indices;
 
@@ -145,6 +149,27 @@ class CoverageRecorderStorage {
            vertex_views <= vertices.capacity() - vertices.size() &&
            resource_bindings <= bindings.capacity() - bindings.size();
   }
+  bool AppendBinding(Pass::BindingSequence& sequence, Pass::Binding binding) {
+    if (!TryLock()) {
+      return false;
+    }
+    if (bindings.size() == bindings.capacity()) {
+      Unlock();
+      return false;
+    }
+    const auto index = static_cast<uint32_t>(bindings.size());
+    bindings.emplace_back(BindingRecord{std::move(binding)});
+    if (sequence.empty()) {
+      sequence.storage = this;
+      sequence.head = index;
+    } else {
+      bindings[sequence.tail].next = index;
+    }
+    sequence.tail = index;
+    sequence.count++;
+    Unlock();
+    return true;
+  }
   struct Reservation {
     CoverageRecorderStorage& storage;
     uint32_t index;
@@ -159,12 +184,20 @@ class CoverageRecorderStorage {
         storage.vertices[vertex_start + i] = std::move(vertex_views[i]);
       }
       for (size_t i = 0; i < resource_bindings.size(); i++) {
-        storage.bindings[binding_start + i] = std::move(resource_bindings[i]);
+        auto& record = storage.bindings[binding_start + i];
+        record.value = std::move(resource_bindings[i]);
+        if (i + 1 < resource_bindings.size()) {
+          record.next = static_cast<uint32_t>(binding_start + i + 1);
+        }
       }
       draw.vertices = {storage.vertices.data() + vertex_start,
                        vertex_views.size()};
-      draw.bindings = {storage.bindings.data() + binding_start,
-                       resource_bindings.size()};
+      if (!resource_bindings.empty()) {
+        draw.bindings = {
+            &storage, static_cast<uint32_t>(binding_start),
+            static_cast<uint32_t>(binding_start + resource_bindings.size() - 1),
+            resource_bindings.size()};
+      }
       storage.packets[index].draw = std::move(draw);
       if (sequence.empty()) {
         sequence.head = index;

@@ -486,6 +486,8 @@ if (enable_unittests) {
       defines = [ "FLUTTER_ENGINE_NO_PROTOTYPES" ]
       sources = [
         "//flutter/impeller/display_list/canvas_gles_unittests.cc",
+        "//flutter/impeller/entity/coverage_recorder_bank_unittests.cc",
+        "//flutter/impeller/entity/coverage_tiled_render_pass_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/command_buffer_gles_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/native_coverage_gles_unittests.cc",
         "//flutter/impeller/renderer/backend/gles/render_pass_gles_unittests.cc",
@@ -503,6 +505,7 @@ if (enable_unittests) {
         "//flutter/impeller/display_list",
         "//flutter/impeller/renderer/backend/gles",
         "//flutter/impeller/renderer/backend/gles:mock_gles",
+        "//flutter/impeller/renderer/testing:mocks",
         "//flutter/testing",
       ]
     }

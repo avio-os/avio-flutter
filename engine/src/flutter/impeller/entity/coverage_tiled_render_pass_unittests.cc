@@ -10,6 +10,7 @@
 #include "gtest/gtest.h"
 #include "impeller/entity/avio_coverage_region.h"
 #include "impeller/entity/contents/content_context.h"
+#include "impeller/entity/coverage_recorder_bank.h"
 #include "impeller/renderer/testing/mocks.h"
 
 namespace impeller {
@@ -164,6 +165,7 @@ class CoverageTiledRenderPassTest : public ::testing::Test {
 
   RenderTarget MakeTarget(ISize size, SampleCount samples) {
     TextureDescriptor desc;
+    desc.storage_mode = StorageMode::kDevicePrivate;
     desc.size = size;
     desc.format = PixelFormat::kB8G8R8A8UNormInt;
     desc.sample_count = samples;
@@ -174,7 +176,9 @@ class CoverageTiledRenderPassTest : public ::testing::Test {
     ColorAttachment colour;
     colour.texture = texture;
     colour.load_action = LoadAction::kLoad;
-    colour.store_action = StoreAction::kStore;
+    colour.store_action = samples == SampleCount::kCount1
+                              ? StoreAction::kStore
+                              : StoreAction::kMultisampleResolve;
     RenderTarget target;
     if (samples != SampleCount::kCount1) {
       desc.sample_count = SampleCount::kCount1;
@@ -299,6 +303,103 @@ TEST_F(CoverageTiledRenderPassTest, DynamicBindingsOwnMetadataNamesAndBuffer) {
   EXPECT_TRUE(packets[1].bindings.empty());
   pass.reset();
   EXPECT_TRUE(weak_buffer.expired());
+}
+
+TEST_F(CoverageTiledRenderPassTest,
+       InterleavedRuntimeUniformsUseAggregateBindingCapacity) {
+  auto other =
+      CoverageTiledRenderPassTestPeer::Make(*renderer, parent, island, command);
+  ASSERT_TRUE(other);
+  DeviceBufferDescriptor desc;
+  desc.size = 1280;
+  auto buffer = std::make_shared<::testing::NiceMock<MockDeviceBuffer>>(desc);
+  std::weak_ptr<const DeviceBuffer> witness = buffer;
+  for (size_t draw = 0; draw < 2; draw++) {
+    for (size_t uniform = 0; uniform < 80; uniform++) {
+      std::string name = "runtime_uniform_" + std::to_string(uniform);
+      ShaderUniformSlot slot{name.c_str(), 0, 0,
+                             static_cast<uint32_t>(uniform)};
+      auto first_metadata = std::make_unique<ShaderMetadata>();
+      first_metadata->name = "first";
+      ASSERT_TRUE(pass->BindDynamicResource(
+          ShaderStage::kFragment, DescriptorType::kUniformBuffer, slot,
+          std::move(first_metadata),
+          BufferView(buffer, Range{uniform * 16, 16})));
+      auto second_metadata = std::make_unique<ShaderMetadata>();
+      second_metadata->name = "second";
+      ASSERT_TRUE(other->BindDynamicResource(
+          ShaderStage::kFragment, DescriptorType::kUniformBuffer, slot,
+          std::move(second_metadata),
+          BufferView(buffer, Range{uniform * 16, 16})));
+      name.assign("caller_changed");
+    }
+    other->SetPipeline(pipeline);
+    other->SetElementCount(3);
+    ASSERT_TRUE(other->Draw().ok());
+    RecordDraw();
+  }
+  buffer.reset();
+  for (size_t draw = 0; draw < 2; draw++) {
+    EXPECT_EQ(
+        CoverageTiledRenderPassTestPeer::Packets(*pass)[draw].bindings.size(),
+        80u);
+    for (size_t uniform = 0; uniform < 80; uniform++) {
+      const auto& first =
+          CoverageTiledRenderPassTestPeer::Buffer(*pass, draw, uniform);
+      const auto& second =
+          CoverageTiledRenderPassTestPeer::Buffer(*other, draw, uniform);
+      EXPECT_EQ(first.slot.binding, uniform);
+      EXPECT_EQ(second.slot.binding, uniform);
+      EXPECT_EQ(std::string_view(*first.slot_name),
+                "runtime_uniform_" + std::to_string(uniform));
+      EXPECT_EQ(first.metadata, first.owned_metadata.get());
+      EXPECT_EQ(first.metadata->name, "first");
+      EXPECT_EQ(second.metadata, second.owned_metadata.get());
+      EXPECT_EQ(second.metadata->name, "second");
+      EXPECT_EQ(first.view.GetRange().offset, uniform * 16);
+      EXPECT_EQ(second.view.GetRange().offset, uniform * 16);
+    }
+  }
+  EXPECT_FALSE(witness.expired());
+  pass.reset();
+  EXPECT_FALSE(witness.expired());
+  other.reset();
+  EXPECT_TRUE(witness.expired());
+}
+
+TEST_F(CoverageTiledRenderPassTest,
+       ExhaustedBindingBankPoisonsOnlyTheRefusedRecorder) {
+  auto other =
+      CoverageTiledRenderPassTestPeer::Make(*renderer, parent, island, command);
+  ASSERT_TRUE(other);
+  auto storage = renderer->GetCoverageRecorderStorage();
+  ASSERT_TRUE(storage);
+  DeviceBufferDescriptor desc;
+  desc.size = 16;
+  auto buffer = std::make_shared<::testing::NiceMock<MockDeviceBuffer>>(desc);
+  ShaderUniformSlot slot{"uniform", 0, 0, 0};
+  for (size_t index = 0; index < 32768; index++) {
+    ASSERT_TRUE(pass->BindResource(ShaderStage::kFragment,
+                                   DescriptorType::kUniformBuffer, slot,
+                                   nullptr, BufferView(buffer, Range{0, 16})));
+  }
+  EXPECT_EQ(storage->bindings.size(), 32768u);
+  EXPECT_FALSE(pass->BindResource(ShaderStage::kFragment,
+                                  DescriptorType::kUniformBuffer, slot, nullptr,
+                                  BufferView(buffer, Range{0, 16})));
+  EXPECT_EQ(storage->bindings.size(), 32768u);
+  EXPECT_EQ(storage->packets.size(), 0u);
+  EXPECT_FALSE(pass->IsValid());
+  EXPECT_FALSE(pass->Draw().ok());
+  other->SetPipeline(pipeline);
+  other->SetElementCount(3);
+  ASSERT_TRUE(other->Draw().ok());
+  EXPECT_TRUE(other->IsValid());
+  EXPECT_EQ(storage->packets.size(), 1u);
+  pass.reset();
+  EXPECT_EQ(storage->bindings.size(), 32768u);
+  other.reset();
+  EXPECT_EQ(storage->bindings.size(), 0u);
 }
 
 TEST_F(CoverageTiledRenderPassTest, IndexAndVertexViewsStayOwnedUntilEncoding) {

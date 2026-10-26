@@ -145,13 +145,34 @@ class CoverageTiledRenderPass final : public RenderPass {
     std::optional<Name> slot_name;
   };
   using Binding = std::variant<BufferBinding, TextureBinding>;
+  struct BindingSequence {
+    static constexpr uint32_t kEnd = UINT32_MAX;
+    struct Iterator {
+      CoverageRecorderStorage* storage;
+      uint32_t index;
+      const Binding& operator*() const;
+      Iterator& operator++();
+      bool operator!=(const Iterator& other) const {
+        return index != other.index;
+      }
+    };
+    CoverageRecorderStorage* storage = nullptr;
+    uint32_t head = kEnd;
+    uint32_t tail = kEnd;
+    size_t count = 0;
+    bool empty() const { return count == 0; }
+    size_t size() const { return count; }
+    Iterator begin() const { return {storage, head}; }
+    Iterator end() const { return {storage, kEnd}; }
+    const Binding& operator[](size_t index) const;
+  };
   struct DrawPacket {
     PipelineRef pipeline;
     std::shared_ptr<Pipeline<PipelineDescriptor>> pipeline_owner;
     std::span<BufferView> vertices;
     BufferView indices;
     IndexType index_type = IndexType::kNone;
-    std::span<Binding> bindings;
+    BindingSequence bindings;
     std::optional<Viewport> viewport;
     std::optional<IRect32> scissor;
     std::optional<Rect> coverage;
@@ -294,7 +315,7 @@ class CoverageTiledRenderPass final : public RenderPass {
   mutable std::shared_ptr<const AvioSample4ClipDescriptor> native_start_clip_;
   DrawPacket pending_;
   CoverageFixedVector<BufferView, 16> pending_vertices_;
-  CoverageFixedVector<Binding, 32> pending_bindings_;
+  BindingSequence pending_bindings_;
   CoverageFixedVector<std::shared_ptr<void>, 64> logical_owners_;
   struct ClipBuffer {
     std::shared_ptr<const AvioContinuousClipExpression> expression;

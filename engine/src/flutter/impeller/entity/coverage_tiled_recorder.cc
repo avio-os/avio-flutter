@@ -69,6 +69,25 @@ bool CompatibleColourFormats(PixelFormat a, PixelFormat b) {
 
 }  // namespace
 
+const CoverageTiledRenderPass::Binding&
+CoverageTiledRenderPass::BindingSequence::Iterator::operator*() const {
+  return storage->bindings[index].value;
+}
+CoverageTiledRenderPass::BindingSequence::Iterator&
+CoverageTiledRenderPass::BindingSequence::Iterator::operator++() {
+  index = storage->bindings[index].next;
+  return *this;
+}
+const CoverageTiledRenderPass::Binding&
+CoverageTiledRenderPass::BindingSequence::operator[](size_t index) const {
+  FML_CHECK(index < count);
+  auto position = begin();
+  for (size_t ordinal = 0; ordinal < index; ordinal++) {
+    ++position;
+  }
+  return *position;
+}
+
 const CoverageTiledRenderPass::DrawPacket&
 CoverageTiledRenderPass::PacketSequence::Iterator::operator*() const {
   return storage->packets[index].draw;
@@ -190,6 +209,7 @@ CoverageTiledRenderPass::CoverageTiledRenderPass(
       storage_(std::move(storage)),
       control_slot_(control_slot) {
   packets_.storage = storage_.get();
+  pending_bindings_.storage = storage_.get();
   RetainResource(parent.GetResourceOwner());
 }
 
@@ -388,13 +408,13 @@ fml::Status CoverageTiledRenderPass::Draw() {
     pending_ = DrawPacket{};
     sample4_source_proof_.reset();
     pending_vertices_.clear();
-    pending_bindings_.clear();
+    pending_bindings_ = {storage_.get()};
     return {};
   }
   // Claim the entire immutable packet and its resource ranges before any
   // expression upload. Failed admission leaves no partially recorded draw.
-  auto reservation = storage_->ReserveDraw(
-      packets_.size(), pending_vertices_.size(), pending_bindings_.size());
+  auto reservation =
+      storage_->ReserveDraw(packets_.size(), pending_vertices_.size(), 0);
   if (!reservation) {
     valid_ = false;
     return {fml::StatusCode::kResourceExhausted,
@@ -466,12 +486,13 @@ fml::Status CoverageTiledRenderPass::Draw() {
     }
   }
   pending_.stencil_reference = stencil_reference_;
+  pending_.bindings = pending_bindings_;
   reservation->Commit(packets_, std::move(pending_), pending_vertices_.span(),
-                      pending_bindings_.span());
+                      {});
   pending_ = DrawPacket{};
   sample4_source_proof_.reset();
   pending_vertices_.clear();
-  pending_bindings_.clear();
+  pending_bindings_ = {storage_.get()};
   return fml::Status();
 }
 
@@ -483,15 +504,15 @@ bool CoverageTiledRenderPass::BindResource(ShaderStage stage,
   if (!AcceptMutation()) {
     return false;
   }
-  if (!view || !ValidSlotName(slot.name) ||
-      pending_bindings_.size() == pending_bindings_.capacity()) {
+  if (!view || !ValidSlotName(slot.name)) {
     valid_ = false;
     return false;
   }
-  pending_bindings_.emplace_back(BufferBinding{stage, type, slot, metadata,
-                                               nullptr, std::move(view),
-                                               CopySlotName(slot.name)});
-  return true;
+  valid_ = storage_->AppendBinding(
+      pending_bindings_,
+      BufferBinding{stage, type, slot, metadata, nullptr, std::move(view),
+                    CopySlotName(slot.name)});
+  return valid_;
 }
 
 bool CoverageTiledRenderPass::BindResource(
@@ -505,15 +526,15 @@ bool CoverageTiledRenderPass::BindResource(
     return false;
   }
   if (!texture || !texture->IsValid() || !sampler ||
-      !ValidSlotName(slot.name) ||
-      pending_bindings_.size() == pending_bindings_.capacity()) {
+      !ValidSlotName(slot.name)) {
     valid_ = false;
     return false;
   }
-  pending_bindings_.emplace_back(
+  valid_ = storage_->AppendBinding(
+      pending_bindings_,
       TextureBinding{stage, type, slot, metadata, nullptr, std::move(texture),
                      sampler, CopySlotName(slot.name)});
-  return true;
+  return valid_;
 }
 
 bool CoverageTiledRenderPass::BindDynamicResource(
@@ -525,17 +546,17 @@ bool CoverageTiledRenderPass::BindDynamicResource(
   if (!AcceptMutation()) {
     return false;
   }
-  if (!view || !metadata || !ValidSlotName(slot.name) ||
-      pending_bindings_.size() == pending_bindings_.capacity()) {
+  if (!view || !metadata || !ValidSlotName(slot.name)) {
     valid_ = false;
     return false;
   }
   std::unique_ptr<const ShaderMetadata> owner(std::move(metadata));
   const auto* pointer = owner.get();
-  pending_bindings_.emplace_back(
+  valid_ = storage_->AppendBinding(
+      pending_bindings_,
       BufferBinding{stage, type, slot, pointer, std::move(owner),
                     std::move(view), CopySlotName(slot.name)});
-  return true;
+  return valid_;
 }
 
 bool CoverageTiledRenderPass::BindDynamicResource(
@@ -549,17 +570,17 @@ bool CoverageTiledRenderPass::BindDynamicResource(
     return false;
   }
   if (!texture || !texture->IsValid() || !sampler || !metadata ||
-      !ValidSlotName(slot.name) ||
-      pending_bindings_.size() == pending_bindings_.capacity()) {
+      !ValidSlotName(slot.name)) {
     valid_ = false;
     return false;
   }
   std::unique_ptr<const ShaderMetadata> owner(std::move(metadata));
   const auto* pointer = owner.get();
-  pending_bindings_.emplace_back(
+  valid_ = storage_->AppendBinding(
+      pending_bindings_,
       TextureBinding{stage, type, slot, pointer, std::move(owner),
                      std::move(texture), sampler, CopySlotName(slot.name)});
-  return true;
+  return valid_;
 }
 
 void CoverageTiledRenderPass::OnSetLabel(std::string_view label) {
