@@ -15,6 +15,7 @@ extern "C" {
 
 #include "flutter/shell/platform/linux/fl_accessible_node.h"
 #include "flutter/shell/platform/linux/fl_accessible_text_field.h"
+#include "flutter/shell/platform/linux/fl_engine_private.h"
 #include "flutter/shell/platform/linux/fl_view_accessible.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_value.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_view.h"
@@ -34,6 +35,21 @@ struct _FlViewAccessible {
 
   // Flag to track when root node is created.
   gboolean root_node_created;
+
+  // The engine's semantics demand this view follows, and its handler.
+  GWeakRef demand;
+  gulong demand_handler;
+
+  // Whether the engine builds semantics. An update that arrives while it
+  // does not was sent before semantics were disabled and is dropped.
+  gboolean semantics_enabled;
+
+  // Nodes whose children name an ID that has no node. The tree is complete
+  // when the root exists and no node is here.
+  GHashTable* unresolved;
+
+  // ATK_STATE_BUSY: semantics are enabled and the tree is not yet complete.
+  gboolean busy;
 };
 
 G_DEFINE_TYPE(FlViewAccessible,
@@ -65,6 +81,60 @@ static FlAccessibleNode* create_node(FlViewAccessible* self,
 static FlAccessibleNode* lookup_node(FlViewAccessible* self, int32_t id) {
   return FL_ACCESSIBLE_NODE(
       g_hash_table_lookup(self->semantics_nodes_by_id, GINT_TO_POINTER(id)));
+}
+
+// Something read this view: semantics demand when it serves an assistive
+// client's request.
+static void note_read(FlViewAccessible* self) {
+  g_autoptr(FlEngine) engine = FL_ENGINE(g_weak_ref_get(&self->engine));
+  if (engine != nullptr) {
+    fl_engine_note_semantics_read(engine);
+  }
+}
+
+// Reports BUSY whenever the view holds no complete tree, while semantics are
+// off and until the first complete tree after they turn on, so a reader that
+// finds no children knows a tree comes once it asks.
+static void update_busy(FlViewAccessible* self) {
+  gboolean complete = lookup_node(self, kRootSemanticsNodeId) != nullptr &&
+                      g_hash_table_size(self->unresolved) == 0;
+  gboolean busy = !complete;
+  if (self->busy == busy) {
+    return;
+  }
+  self->busy = busy;
+  atk_object_notify_state_change(ATK_OBJECT(self), ATK_STATE_BUSY, busy);
+}
+
+// Drops the whole tree. Nothing of a tree the engine no longer maintains
+// stays readable; the next read asks for semantics again.
+static void clear_tree(FlViewAccessible* self) {
+  g_hash_table_remove_all(self->unresolved);
+  FlAccessibleNode* root = lookup_node(self, kRootSemanticsNodeId);
+  if (root == nullptr) {
+    g_hash_table_remove_all(self->semantics_nodes_by_id);
+    return;
+  }
+  g_autoptr(FlAccessibleNode) removed = FL_ACCESSIBLE_NODE(g_object_ref(root));
+  g_hash_table_remove_all(self->semantics_nodes_by_id);
+  self->root_node_created = FALSE;
+  g_signal_emit_by_name(self, "children-changed::remove", 0, removed, nullptr);
+}
+
+static void set_semantics_enabled(FlViewAccessible* self, gboolean enabled) {
+  if (self->semantics_enabled != enabled) {
+    self->semantics_enabled = enabled;
+    if (!enabled) {
+      clear_tree(self);
+    }
+  }
+  update_busy(self);
+}
+
+static void demand_changed_cb(FlViewAccessible* self,
+                              GParamSpec* pspec,
+                              FlSemanticsDemand* demand) {
+  set_semantics_enabled(self, fl_semantics_demand_get_enabled(demand));
 }
 
 // Gets the ATK node for the given id.
@@ -99,6 +169,7 @@ static FlAccessibleNode* get_node(FlViewAccessible* self,
 // Implements AtkObject::get_n_children
 static gint fl_view_accessible_get_n_children(AtkObject* accessible) {
   FlViewAccessible* self = FL_VIEW_ACCESSIBLE(accessible);
+  note_read(self);
   FlAccessibleNode* node = lookup_node(self, 0);
 
   if (node == nullptr) {
@@ -111,6 +182,7 @@ static gint fl_view_accessible_get_n_children(AtkObject* accessible) {
 // Implements AtkObject::ref_child
 static AtkObject* fl_view_accessible_ref_child(AtkObject* accessible, gint i) {
   FlViewAccessible* self = FL_VIEW_ACCESSIBLE(accessible);
+  note_read(self);
   FlAccessibleNode* node = lookup_node(self, 0);
 
   if (i != 0 || node == nullptr) {
@@ -125,9 +197,29 @@ static AtkRole fl_view_accessible_get_role(AtkObject* accessible) {
   return ATK_ROLE_PANEL;
 }
 
+// Implements AtkObject::ref_state_set. GTK owns the container's states;
+// this view adds BUSY while its tree is being built.
+static AtkStateSet* fl_view_accessible_ref_state_set(AtkObject* accessible) {
+  FlViewAccessible* self = FL_VIEW_ACCESSIBLE(accessible);
+  note_read(self);
+  AtkStateSet* states = ATK_OBJECT_CLASS(fl_view_accessible_parent_class)
+                            ->ref_state_set(accessible);
+  if (self->busy) {
+    atk_state_set_add_state(states, ATK_STATE_BUSY);
+  }
+  return states;
+}
+
 static void fl_view_accessible_dispose(GObject* object) {
   FlViewAccessible* self = FL_VIEW_ACCESSIBLE(object);
 
+  g_autoptr(GObject) demand = G_OBJECT(g_weak_ref_get(&self->demand));
+  if (demand != nullptr && self->demand_handler != 0) {
+    g_signal_handler_disconnect(demand, self->demand_handler);
+  }
+  self->demand_handler = 0;
+  g_weak_ref_clear(&self->demand);
+  g_clear_pointer(&self->unresolved, g_hash_table_unref);
   g_clear_pointer(&self->semantics_nodes_by_id, g_hash_table_unref);
 
   g_weak_ref_clear(&self->engine);
@@ -139,12 +231,15 @@ static void fl_view_accessible_class_init(FlViewAccessibleClass* klass) {
   ATK_OBJECT_CLASS(klass)->get_n_children = fl_view_accessible_get_n_children;
   ATK_OBJECT_CLASS(klass)->ref_child = fl_view_accessible_ref_child;
   ATK_OBJECT_CLASS(klass)->get_role = fl_view_accessible_get_role;
+  ATK_OBJECT_CLASS(klass)->ref_state_set = fl_view_accessible_ref_state_set;
 
   G_OBJECT_CLASS(klass)->dispose = fl_view_accessible_dispose;
 }
 
 static void fl_view_accessible_init(FlViewAccessible* self) {
   g_weak_ref_init(&self->engine, nullptr);
+  g_weak_ref_init(&self->demand, nullptr);
+  self->unresolved = g_hash_table_new(g_direct_hash, g_direct_equal);
   self->semantics_nodes_by_id = g_hash_table_new_full(
       g_direct_hash, g_direct_equal, nullptr, g_object_unref);
 }
@@ -164,6 +259,19 @@ void fl_view_accessible_set_engine(FlViewAccessible* self,
   g_return_if_fail(FL_IS_ENGINE(engine));
   g_weak_ref_set(&self->engine, engine);
   self->view_id = view_id;
+
+  FlSemanticsDemand* demand = fl_engine_get_semantics_demand(engine);
+  g_autoptr(GObject) previous = G_OBJECT(g_weak_ref_get(&self->demand));
+  if (previous != G_OBJECT(demand)) {
+    if (previous != nullptr && self->demand_handler != 0) {
+      g_signal_handler_disconnect(previous, self->demand_handler);
+    }
+    self->demand_handler = g_signal_connect_object(
+        demand, "notify::enabled", G_CALLBACK(demand_changed_cb), self,
+        G_CONNECT_SWAPPED);
+    g_weak_ref_set(&self->demand, demand);
+  }
+  set_semantics_enabled(self, fl_semantics_demand_get_enabled(demand));
 }
 
 // Drops |node| and every descendant still parented to it. A descendant that
@@ -185,6 +293,7 @@ static void remove_subtree(FlViewAccessible* self, FlAccessibleNode* node) {
     }
     // The map's reference keeps |current| alive until here; its children
     // queued above are still held by the map.
+    g_hash_table_remove(self->unresolved, current);
     g_hash_table_remove(
         self->semantics_nodes_by_id,
         GINT_TO_POINTER(fl_accessible_node_get_node_id(current)));
@@ -195,6 +304,9 @@ void fl_view_accessible_handle_update_semantics(
     FlViewAccessible* self,
     const FlutterSemanticsUpdate2* update) {
   g_return_if_fail(FL_IS_VIEW_ACCESSIBLE(self));
+  if (!self->semantics_enabled) {
+    return;
+  }
 
   // Flutter's update carries only the nodes that changed. A node leaves the
   // tree when an updated parent stops naming it, and every parent whose
@@ -257,10 +369,12 @@ void fl_view_accessible_handle_update_semantics(
         fl_value_get_int32_list(static_cast<FlValue*>(value));
 
     g_autoptr(GPtrArray) children = g_ptr_array_new();
+    gboolean resolved = TRUE;
     for (size_t i = 0; i < child_count; i++) {
       FlAccessibleNode* child =
           lookup_node(self, children_in_traversal_order[i]);
       if (child == nullptr) {
+        resolved = FALSE;
         continue;
       }
       g_hash_table_add(named, GINT_TO_POINTER(children_in_traversal_order[i]));
@@ -268,6 +382,11 @@ void fl_view_accessible_handle_update_semantics(
       g_ptr_array_add(children, child);
     }
     fl_accessible_node_set_children(parent, children);
+    if (resolved) {
+      g_hash_table_remove(self->unresolved, parent);
+    } else {
+      g_hash_table_add(self->unresolved, parent);
+    }
   }
 
   for (guint i = 0; i < candidates->len; i++) {
@@ -278,6 +397,7 @@ void fl_view_accessible_handle_update_semantics(
       remove_subtree(self, node);
     }
   }
+  update_busy(self);
 }
 
 void fl_view_accessible_send_announcement(FlViewAccessible* self,

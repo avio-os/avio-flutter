@@ -99,6 +99,7 @@ already ancestors of the selected main target under their original commits.
 | 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
 | 55a | Prewarm the pipelines Avio's SDF and single-sample patches use | permanent startup-latency extension (tied to patches 48, 50 and 52) | none — upstream compiles every variant on first use |
 | 67 | GTK semantics: an update releases the nodes it detaches | upstreamable bugfix (latent upstream: `FlViewAccessible` never removed a node) | submit upstream |
+| 68 | GTK builds semantics only while something reads them | permanent embedder policy (Avio's semantics-demand contract) | none — upstream enables semantics unconditionally |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -2055,6 +2056,49 @@ another parent in the same update keeps its new place. The work is bounded by
 the update, not the tree. `get_node` no longer stores a node it failed to
 create. Regressions: `ReleasesNodesThatLeaveTheTree`,
 `KeepsNoNodeThatNoParentNames`.
+
+### Patch 68: GTK semantics on demand
+
+Upstream `fl_engine_start` called `UpdateSemanticsEnabled(TRUE)`
+unconditionally, so every GTK app paid for Flutter's semantics tree on the UI
+thread whether or not anything read it (Avio Files: 325-386 ms of UI time over
+a first deep scroll, 15-23 frame intervals over 25 ms). Avio's contract
+(engine-contract, Semantics on demand) builds the tree only while something
+reads it. `FlSemanticsDemand`, owned by `FlEngine`, is the one authority: it
+enables semantics while `org.a11y.Status.ScreenReaderEnabled` is true, while
+the AT-SPI registry lists an event listener for every application or for this
+one, and for a five-minute hold after an assistive client read a view's
+accessible or after the last standing source ended. `IsEnabled` is not a
+signal: Avio sets it at every login.
+
+`FlAtspiMonitor` reports the standing sources. The registry answers
+`GetRegisteredEvents` with global listeners plus those scoped to the asking
+connection, so the monitor asks on the connection GTK's ATK bridge publishes
+on (libatspi's shared `atspi_get_a11y_bus()`, checked to be on the same bus by
+server GUID). The registry's change signals, which the bridge's own filter
+consumes, reach the monitor's own GDBus connection and only prompt the
+question again. Where nothing hosts accessibility (no launcher on the session
+bus, an accessibility bus that refuses connections, a bridge without a
+connection) no client can read the app, so there is no demand; a source that
+cannot otherwise be established counts as demand, which keeps upstream's
+always-on tree. `NO_AT_BRIDGE=1` watches nothing.
+
+A read is `get_n_children`, `ref_child` or `ref_state_set` on a view's
+`FlViewAccessible`, counted only while the bridge's connection dispatches an
+AT-SPI client's method call: a libdbus filter marks each incoming call, and a
+high-priority idle ends the mark before libatspi dispatches the next message.
+GTK's bridge builds its own cache, walking its whole tree, in every
+application whenever a listener appears anywhere on the bus (measured with
+at-spi2-core 2.60.5); those walks are not demand. A counted read enables
+semantics synchronously. The view reports `ATK_STATE_BUSY` whenever it holds
+no complete tree (the root present and no node naming a child that has no
+node): while semantics are off and until the first complete tree after they
+turn on. When semantics turn off the view drops its tree and any update still
+in flight; Flutter rebuilds a re-enabled tree with new node ids, which is why
+the hold outlasts an agent's turn. Regressions: `FlSemanticsDemandTest.*`,
+`AReadRequestsSemanticsAndReportsBusy`, `DropsItsTreeWhenSemanticsTurnOff`,
+`FlEngineTest.SemanticsFollowDemand`. `FlViewTest.SemanticsUpdate*` read the
+view before feeding an update.
 
 ## Evaluated Gaussian snapshot coordinates (local VM repair)
 

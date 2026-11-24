@@ -117,6 +117,8 @@ TEST_F(FlViewTest, SemanticsUpdate) {
 
   FlEngine* engine = fl_view_get_engine(view);
   StartEngine(engine);
+  // The engine sends updates only while something reads its semantics.
+  fl_semantics_demand_note_read(fl_engine_get_semantics_demand(engine));
 
   FlutterSemanticsFlags flags = {};
   FlutterSemanticsNode2 root_node = {
@@ -139,6 +141,8 @@ TEST_F(FlViewTest, SemanticsUpdateOtherView) {
 
   FlEngine* engine = fl_view_get_engine(view);
   StartEngine(engine);
+  // The engine sends updates only while something reads its semantics.
+  fl_semantics_demand_note_read(fl_engine_get_semantics_demand(engine));
 
   FlutterSemanticsFlags flags = {};
   FlutterSemanticsNode2 root_node = {

@@ -104,7 +104,10 @@ source_set("flutter_linux_sources") {
              "fl_window_state_monitor.h",
            ]
 
-  configs += [ "//flutter/shell/platform/linux/config:gtk" ]
+  configs += [
+    "//flutter/shell/platform/linux/config:atspi",
+    "//flutter/shell/platform/linux/config:gtk",
+  ]
 
   public_configs = [ ":disable_warnings" ]
 
@@ -114,6 +117,7 @@ source_set("flutter_linux_sources") {
     "fl_accessible_node.cc",
     "fl_accessible_text_field.cc",
     "fl_application.cc",
+    "fl_atspi_monitor.cc",
     "fl_basic_message_channel.cc",
     "fl_binary_codec.cc",
     "fl_binary_messenger.cc",
@@ -154,6 +158,7 @@ source_set("flutter_linux_sources") {
     "fl_pointer_manager.cc",
     "fl_renderable.cc",
     "fl_scrolling_manager.cc",
+    "fl_semantics_demand.cc",
     "fl_settings.cc",
     "fl_settings_channel.cc",
     "fl_settings_handler.cc",
@@ -262,6 +267,7 @@ executable("flutter_linux_unittests") {
     "fl_plugin_registrar_test.cc",
     "fl_pointer_manager_test.cc",
     "fl_scrolling_manager_test.cc",
+    "fl_semantics_demand_test.cc",
     "fl_settings_handler_test.cc",
     "fl_settings_portal_test.cc",
     "fl_standard_message_codec_test.cc",

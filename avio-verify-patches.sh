@@ -1045,6 +1045,18 @@ need "a semantics update releases the nodes it detaches" \
 need "detached nodes are released (test)" \
   "$F/shell/platform/linux/fl_view_accessible_test.cc" 'ReleasesNodesThatLeaveTheTree'
 
+need "semantics are not enabled unconditionally at start" \
+  "$F/shell/platform/linux/fl_engine.cc" 'Semantics are built only while something reads them'
+need "one semantics-demand authority" \
+  "$F/shell/platform/linux/fl_semantics_demand.cc" 'fl_semantics_demand_note_read'
+need "listeners are asked on the ATK bridge's connection" \
+  "$F/shell/platform/linux/fl_atspi_monitor.cc" 'atspi_get_a11y_bus\(\)'
+need "only reads for a client's request are demand" \
+  "$F/shell/platform/linux/fl_atspi_monitor.cc" 'dbus_connection_add_filter\(self->bridge, request_filter'
+need "a view read is semantics demand and reports BUSY (test)" \
+  "$F/shell/platform/linux/fl_view_accessible_test.cc" 'AReadRequestsSemanticsAndReportsBusy'
+need "semantics follow demand (test)" \
+  "$F/shell/platform/linux/fl_engine_test.cc" 'SemanticsFollowDemand'
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"

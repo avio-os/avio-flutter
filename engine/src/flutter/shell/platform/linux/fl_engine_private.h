@@ -13,6 +13,7 @@
 #include "flutter/shell/platform/linux/fl_mouse_cursor_handler.h"
 #include "flutter/shell/platform/linux/fl_opengl_manager.h"
 #include "flutter/shell/platform/linux/fl_renderable.h"
+#include "flutter/shell/platform/linux/fl_semantics_demand.h"
 #include "flutter/shell/platform/linux/fl_task_runner.h"
 #include "flutter/shell/platform/linux/fl_text_input_handler.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_dart_project.h"
@@ -456,6 +457,27 @@ gboolean fl_engine_send_key_event_finish(FlEngine* engine,
                                          GAsyncResult* result,
                                          gboolean* handled,
                                          GError** error);
+
+/**
+ * fl_engine_get_semantics_demand:
+ * @engine: an #FlEngine.
+ *
+ * Gets the authority that decides whether @engine builds semantics. Views'
+ * accessibles report reads to it and follow its decision.
+ *
+ * Returns: an #FlSemanticsDemand.
+ */
+FlSemanticsDemand* fl_engine_get_semantics_demand(FlEngine* engine);
+
+/**
+ * fl_engine_note_semantics_read:
+ * @engine: an #FlEngine.
+ *
+ * Records that a view's accessible was read. A read made while GTK's ATK
+ * bridge serves an AT-SPI client's request is semantics demand; the bridge's
+ * own cache walks are not.
+ */
+void fl_engine_note_semantics_read(FlEngine* engine);
 
 /**
  * fl_engine_dispatch_semantics_action:

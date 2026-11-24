@@ -6,6 +6,8 @@
 #include "flutter/shell/platform/linux/testing/linux_test.h"
 #include "gtest/gtest.h"
 
+#include <vector>
+
 #include "flutter/shell/platform/embedder/test_utils/proc_table_replacement.h"
 #include "flutter/shell/platform/linux/fl_engine_private.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_engine.h"
@@ -1038,6 +1040,64 @@ TEST_F(FlEngineTest, ChildObjects) {
   EXPECT_NE(fl_engine_get_task_runner(engine), nullptr);
   EXPECT_NE(fl_engine_get_keyboard_manager(engine), nullptr);
   EXPECT_NE(fl_engine_get_mouse_cursor_handler(engine), nullptr);
+}
+
+// The engine builds semantics only while its demand wants them, and starts
+// without them.
+namespace {
+
+// Sets an environment variable for its scope, then restores what was there.
+class ScopedEnv {
+ public:
+  ScopedEnv(const gchar* name, const gchar* value)
+      : name_(name), previous_(g_strdup(g_getenv(name))) {
+    g_setenv(name, value, TRUE);
+  }
+  ~ScopedEnv() {
+    if (previous_ != nullptr) {
+      g_setenv(name_, previous_, TRUE);
+    } else {
+      g_unsetenv(name_);
+    }
+    g_free(previous_);
+  }
+
+ private:
+  const gchar* name_;
+  gchar* previous_;
+};
+
+}  // namespace
+
+TEST_F(FlEngineTest, SemanticsFollowDemand) {
+  // The software renderer starts against the mock engine; NO_AT_BRIDGE keeps
+  // the AT-SPI monitor from reporting the test host's buses.
+  g_autoptr(FlEngine) software = nullptr;
+  {
+    ScopedEnv renderer("FLUTTER_LINUX_RENDERER", "software");
+    software = fl_engine_new(project);
+  }
+  std::vector<bool> updates;
+  fl_engine_get_embedder_api(software)->UpdateSemanticsEnabled =
+      MOCK_ENGINE_PROC(UpdateSemanticsEnabled,
+                       ([&updates](auto engine, bool enabled) {
+                         updates.push_back(enabled);
+                         return kSuccess;
+                       }));
+  {
+    ScopedEnv no_bridge("NO_AT_BRIDGE", "1");
+    StartEngine(software);
+  }
+  EXPECT_TRUE(updates.empty());
+
+  FlSemanticsDemand* demand = fl_engine_get_semantics_demand(software);
+  fl_semantics_demand_set_hold(demand, 0);
+  fl_semantics_demand_note_read(demand);
+  EXPECT_EQ(updates, std::vector<bool>({true}));
+  for (int i = 0; i < 1000 && fl_semantics_demand_get_enabled(demand); i++) {
+    g_main_context_iteration(nullptr, TRUE);
+  }
+  EXPECT_EQ(updates, std::vector<bool>({true, false}));
 }
 
 // NOLINTEND(clang-analyzer-core.StackAddressEscape)

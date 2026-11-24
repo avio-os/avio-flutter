@@ -6,6 +6,7 @@
 #include "flutter/shell/platform/linux/testing/linux_test.h"
 #include "gtest/gtest.h"
 
+#include "flutter/shell/platform/linux/fl_engine_private.h"
 #include "flutter/shell/platform/linux/fl_view_accessible.h"
 #include "flutter/shell/platform/linux/fl_view_private.h"
 #include "flutter/shell/platform/linux/public/flutter_linux/fl_engine.h"
@@ -13,6 +14,27 @@
 #include "flutter/shell/platform/linux/testing/mock_signal_handler.h"
 
 class FlViewAccessibleTest : public flutter::testing::LinuxTest {};
+
+namespace {
+
+// A view publishes a tree only while its engine builds semantics.
+void enable_semantics(FlEngine* engine) {
+  fl_semantics_demand_note_read(fl_engine_get_semantics_demand(engine));
+}
+
+gboolean is_busy(AtkObject* accessible) {
+  g_autoptr(AtkStateSet) states = atk_object_ref_state_set(accessible);
+  return atk_state_set_contains_state(states, ATK_STATE_BUSY);
+}
+
+void count_children_removed(AtkObject* accessible,
+                            guint index,
+                            gpointer child,
+                            gpointer user_data) {
+  (*static_cast<int*>(user_data))++;
+}
+
+}  // namespace
 
 TEST_F(FlViewAccessibleTest, GtkViewExposesSemanticTreeDirectly) {
   g_autoptr(FlView) view = fl_view_new(project);
@@ -86,6 +108,7 @@ TEST_F(FlViewAccessibleTest, GtkViewExposesSemanticTreeDirectly) {
 
 TEST_F(FlViewAccessibleTest, BuildTree) {
   g_autoptr(FlViewAccessible) accessible = fl_view_accessible_new(engine, 456);
+  enable_semantics(engine);
 
   int32_t children[] = {111, 222};
   FlutterSemanticsFlags flags = {};
@@ -124,6 +147,7 @@ TEST_F(FlViewAccessibleTest, BuildTree) {
 
 TEST_F(FlViewAccessibleTest, AddRemoveChildren) {
   g_autoptr(FlViewAccessible) accessible = fl_view_accessible_new(engine, 456);
+  enable_semantics(engine);
 
   FlutterSemanticsFlags flags = {};
   FlutterSemanticsNode2 root_node = {
@@ -238,6 +262,7 @@ TEST_F(FlViewAccessibleTest, AddRemoveChildren) {
 // every semantics id the view had ever seen (engine-contract §11.6).
 TEST_F(FlViewAccessibleTest, ReleasesNodesThatLeaveTheTree) {
   g_autoptr(FlViewAccessible) accessible = fl_view_accessible_new(engine, 456);
+  enable_semantics(engine);
 
   FlutterSemanticsFlags flags = {};
   int32_t root_children[] = {1, 2};
@@ -311,6 +336,7 @@ TEST_F(FlViewAccessibleTest, ReleasesNodesThatLeaveTheTree) {
 // so a later reference to its id cannot resurrect it.
 TEST_F(FlViewAccessibleTest, KeepsNoNodeThatNoParentNames) {
   g_autoptr(FlViewAccessible) accessible = fl_view_accessible_new(engine, 456);
+  enable_semantics(engine);
 
   FlutterSemanticsFlags flags = {};
   FlutterSemanticsNode2 root = {.id = 0, .label = "root", .flags2 = &flags};
@@ -329,4 +355,91 @@ TEST_F(FlViewAccessibleTest, KeepsNoNodeThatNoParentNames) {
   g_autoptr(AtkObject) root_object =
       atk_object_ref_accessible_child(ATK_OBJECT(accessible), 0);
   EXPECT_EQ(atk_object_get_n_accessible_children(root_object), 0);
+}
+
+// Reading the view is semantics demand. Until its first complete tree the
+// view reports BUSY: a tree whose nodes name a child that has not arrived is
+// not complete.
+TEST_F(FlViewAccessibleTest, AReadRequestsSemanticsAndReportsBusy) {
+  ::testing::NiceMock<flutter::testing::MockGtk> mock_gtk;
+  FlSemanticsDemand* demand = fl_engine_get_semantics_demand(engine);
+  // Without a tree the view is busy from the start.
+  EXPECT_CALL(mock_gtk, atk_object_notify_state_change(::testing::_,
+                                                       ATK_STATE_BUSY, TRUE));
+  g_autoptr(FlViewAccessible) accessible = fl_view_accessible_new(engine, 456);
+  ASSERT_FALSE(fl_semantics_demand_get_enabled(demand));
+
+  EXPECT_TRUE(is_busy(ATK_OBJECT(accessible)));
+  EXPECT_TRUE(fl_semantics_demand_get_enabled(demand));
+  EXPECT_EQ(atk_object_get_n_accessible_children(ATK_OBJECT(accessible)), 0);
+
+  FlutterSemanticsFlags flags = {};
+  int32_t children[] = {1, 2};
+  FlutterSemanticsNode2 root = {.id = 0,
+                                .label = "root",
+                                .child_count = 2,
+                                .children_in_traversal_order = children,
+                                .flags2 = &flags};
+  FlutterSemanticsNode2 one = {.id = 1, .label = "one", .flags2 = &flags};
+  FlutterSemanticsNode2 two = {.id = 2, .label = "two", .flags2 = &flags};
+  FlutterSemanticsNode2* partial_nodes[] = {&root, &one};
+  FlutterSemanticsUpdate2 partial = {.node_count = 2, .nodes = partial_nodes};
+  fl_view_accessible_handle_update_semantics(accessible, &partial);
+  EXPECT_TRUE(is_busy(ATK_OBJECT(accessible)));
+
+  EXPECT_CALL(mock_gtk, atk_object_notify_state_change(ATK_OBJECT(accessible),
+                                                       ATK_STATE_BUSY, FALSE));
+  FlutterSemanticsNode2* complete_nodes[] = {&root, &two};
+  FlutterSemanticsUpdate2 complete = {.node_count = 2, .nodes = complete_nodes};
+  fl_view_accessible_handle_update_semantics(accessible, &complete);
+  EXPECT_FALSE(is_busy(ATK_OBJECT(accessible)));
+  g_autoptr(AtkObject) root_object =
+      atk_object_ref_accessible_child(ATK_OBJECT(accessible), 0);
+  EXPECT_EQ(atk_object_get_n_accessible_children(root_object), 2);
+}
+
+// When semantics turn off the view drops its tree, and an update still in
+// flight from before is dropped too. The next read asks for semantics again.
+TEST_F(FlViewAccessibleTest, DropsItsTreeWhenSemanticsTurnOff) {
+  FlSemanticsDemand* demand = fl_engine_get_semantics_demand(engine);
+  fl_semantics_demand_set_hold(demand, 0);
+  g_autoptr(FlViewAccessible) accessible = fl_view_accessible_new(engine, 456);
+  enable_semantics(engine);
+
+  FlutterSemanticsFlags flags = {};
+  int32_t children[] = {1};
+  FlutterSemanticsNode2 root = {.id = 0,
+                                .label = "root",
+                                .child_count = 1,
+                                .children_in_traversal_order = children,
+                                .flags2 = &flags};
+  FlutterSemanticsNode2 one = {.id = 1, .label = "one", .flags2 = &flags};
+  FlutterSemanticsNode2* nodes[] = {&root, &one};
+  FlutterSemanticsUpdate2 update = {.node_count = 2, .nodes = nodes};
+  fl_view_accessible_handle_update_semantics(accessible, &update);
+
+  AtkObject* root_object = nullptr;
+  {
+    g_autoptr(AtkObject) object =
+        atk_object_ref_accessible_child(ATK_OBJECT(accessible), 0);
+    ASSERT_NE(object, nullptr);
+    root_object = object;
+  }
+  g_object_add_weak_pointer(G_OBJECT(root_object),
+                            reinterpret_cast<gpointer*>(&root_object));
+  int removed = 0;
+  g_signal_connect(accessible, "children-changed::remove",
+                   G_CALLBACK(count_children_removed), &removed);
+
+  for (int i = 0; i < 1000 && fl_semantics_demand_get_enabled(demand); i++) {
+    g_main_context_iteration(nullptr, TRUE);
+  }
+  ASSERT_FALSE(fl_semantics_demand_get_enabled(demand));
+  EXPECT_EQ(root_object, nullptr);
+  EXPECT_EQ(removed, 1);
+
+  fl_view_accessible_handle_update_semantics(accessible, &update);
+  EXPECT_EQ(atk_object_get_n_accessible_children(ATK_OBJECT(accessible)), 0);
+  EXPECT_TRUE(fl_semantics_demand_get_enabled(demand));
+  EXPECT_TRUE(is_busy(ATK_OBJECT(accessible)));
 }

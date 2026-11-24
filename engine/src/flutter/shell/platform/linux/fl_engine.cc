@@ -13,6 +13,7 @@
 #include "flutter/shell/platform/common/engine_switches.h"
 #include "flutter/shell/platform/embedder/embedder.h"
 #include "flutter/shell/platform/linux/fl_accessibility_handler.h"
+#include "flutter/shell/platform/linux/fl_atspi_monitor.h"
 #include "flutter/shell/platform/linux/fl_binary_messenger_private.h"
 #include "flutter/shell/platform/linux/fl_display_monitor.h"
 #include "flutter/shell/platform/linux/fl_engine_private.h"
@@ -69,6 +70,13 @@ struct _FlEngine {
   // Implements the flutter/accessibility channel.
   FlAccessibilityHandler* accessibility_handler;
 
+  // Decides whether the engine builds semantics, from what the monitor and
+  // the views' accessibles report.
+  FlSemanticsDemand* semantics_demand;
+
+  // Reports the session's standing semantics demand once the engine runs.
+  FlAtspiMonitor* atspi_monitor;
+
   // Process keyboard events.
   FlKeyboardManager* keyboard_manager;
 
@@ -114,6 +122,12 @@ struct _FlEngine {
 };
 
 G_DEFINE_QUARK(fl_engine_error_quark, fl_engine_error)
+
+// How long semantics stay built after the last read of a view or the end of
+// a standing demand. Flutter rebuilds a disabled tree with new node ids, so
+// the hold outlasts an agent's turn between observing a control and acting
+// on it.
+static constexpr guint kSemanticsDemandHoldMs = 5 * 60 * 1000;
 
 static void fl_engine_plugin_registry_iface_init(
     FlPluginRegistryInterface* iface);
@@ -526,6 +540,23 @@ static void fl_engine_update_semantics_cb(const FlutterSemanticsUpdate2* update,
   g_signal_emit(self, fl_engine_signals[SIGNAL_UPDATE_SEMANTICS], 0, update);
 }
 
+// Tells the running engine whether to build semantics.
+static void update_semantics_enabled(FlEngine* self) {
+  if (self->engine == nullptr) {
+    return;
+  }
+  gboolean enabled = fl_semantics_demand_get_enabled(self->semantics_demand);
+  g_debug("Semantics %s", enabled ? "enabled" : "disabled");
+  if (self->embedder_api.UpdateSemanticsEnabled(self->engine, enabled) !=
+      kSuccess) {
+    g_warning("Failed to update semantics on Flutter engine");
+  }
+}
+
+static void semantics_demand_changed_cb(FlEngine* self) {
+  update_semantics_enabled(self);
+}
+
 static void setup_keyboard(FlEngine* self) {
   g_clear_object(&self->keyboard_manager);
   self->keyboard_manager = fl_keyboard_manager_new(self);
@@ -618,6 +649,12 @@ static void fl_engine_dispose(GObject* object) {
 
   fl_binary_messenger_shutdown(self->binary_messenger);
   fl_texture_registrar_shutdown(self->texture_registrar);
+
+  g_clear_object(&self->atspi_monitor);
+  if (self->semantics_demand != nullptr) {
+    g_signal_handlers_disconnect_by_data(self->semantics_demand, self);
+  }
+  g_clear_object(&self->semantics_demand);
 
   g_clear_object(&self->project);
   g_clear_object(&self->display_monitor);
@@ -729,6 +766,9 @@ static FlEngine* fl_engine_new_full(FlDartProject* project,
   self->mouse_cursor_handler =
       fl_mouse_cursor_handler_new(self->binary_messenger);
   self->accessibility_handler = fl_accessibility_handler_new(self);
+  self->semantics_demand = fl_semantics_demand_new(kSemanticsDemandHoldMs);
+  g_signal_connect_swapped(self->semantics_demand, "notify::enabled",
+                           G_CALLBACK(semantics_demand_changed_cb), self);
 
   return self;
 }
@@ -974,14 +1014,31 @@ gboolean fl_engine_start(FlEngine* self, GError** error) {
 
   setup_keyboard(self);
 
-  result = self->embedder_api.UpdateSemanticsEnabled(self->engine, TRUE);
-  if (result != kSuccess) {
-    g_warning("Failed to enable accessibility features on Flutter engine");
+  // Semantics are built only while something reads them.
+  if (fl_semantics_demand_get_enabled(self->semantics_demand)) {
+    update_semantics_enabled(self);
+  }
+  if (self->atspi_monitor == nullptr) {
+    self->atspi_monitor = fl_atspi_monitor_new(self->semantics_demand);
+    fl_atspi_monitor_start(self->atspi_monitor);
   }
 
   fl_display_monitor_start(self->display_monitor);
 
   return TRUE;
+}
+
+void fl_engine_note_semantics_read(FlEngine* self) {
+  g_return_if_fail(FL_IS_ENGINE(self));
+  if (self->atspi_monitor == nullptr ||
+      fl_atspi_monitor_serving_request(self->atspi_monitor)) {
+    fl_semantics_demand_note_read(self->semantics_demand);
+  }
+}
+
+FlSemanticsDemand* fl_engine_get_semantics_demand(FlEngine* self) {
+  g_return_val_if_fail(FL_IS_ENGINE(self), nullptr);
+  return self->semantics_demand;
 }
 
 FlutterEngineProcTable* fl_engine_get_embedder_api(FlEngine* self) {

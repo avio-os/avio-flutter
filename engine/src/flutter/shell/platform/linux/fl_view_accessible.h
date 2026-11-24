@@ -60,7 +60,11 @@ void fl_view_accessible_set_engine(FlViewAccessible* accessible,
  * @accessible: an #FlViewAccessible.
  * @update: semantic update information.
  *
- * Handle a semantics update from Flutter.
+ * Handle a semantics update from Flutter. The view follows its engine's
+ * #FlSemanticsDemand: while semantics are disabled it publishes no tree and
+ * drops updates. It reports %ATK_STATE_BUSY whenever it holds no complete
+ * tree. Reading its children or states for an assistive client is semantics
+ * demand.
  */
 void fl_view_accessible_handle_update_semantics(
     FlViewAccessible* accessible,
