@@ -1039,6 +1039,12 @@ need "hit-region negotiation (test)" \
 need "frame-carried hit-region ABI is documented" \
   AVIO_PATCHES.md 'Patch 66: embedder ABI 10 delivers hit regions with their revision'
 
+echo "--- GTK accessibility ---"
+need "a semantics update releases the nodes it detaches" \
+  "$F/shell/platform/linux/fl_view_accessible.cc" 'remove_subtree\(self, node\)'
+need "detached nodes are released (test)" \
+  "$F/shell/platform/linux/fl_view_accessible_test.cc" 'ReleasesNodesThatLeaveTheTree'
+
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"

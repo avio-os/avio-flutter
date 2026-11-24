@@ -28,7 +28,8 @@ struct _FlViewAccessible {
 
   FlutterViewId view_id;
 
-  // Semantics nodes keyed by ID
+  // The nodes of the published tree, keyed by ID. Holds exactly the nodes
+  // reachable from the root: an update drops every node it detaches.
   GHashTable* semantics_nodes_by_id;
 
   // Flag to track when root node is created.
@@ -76,6 +77,9 @@ static FlAccessibleNode* get_node(FlViewAccessible* self,
   }
 
   node = create_node(self, semantics);
+  if (node == nullptr) {
+    return nullptr;
+  }
   if (semantics->id == kRootSemanticsNodeId) {
     fl_accessible_node_set_parent(node, ATK_OBJECT(self), 0);
   }
@@ -162,17 +166,57 @@ void fl_view_accessible_set_engine(FlViewAccessible* self,
   self->view_id = view_id;
 }
 
+// Drops |node| and every descendant still parented to it. A descendant that
+// this update moved under another parent keeps its new place.
+static void remove_subtree(FlViewAccessible* self, FlAccessibleNode* node) {
+  g_autoptr(GPtrArray) pending = g_ptr_array_new();
+  g_ptr_array_add(pending, node);
+  while (pending->len > 0) {
+    FlAccessibleNode* current = FL_ACCESSIBLE_NODE(
+        g_ptr_array_remove_index_fast(pending, pending->len - 1));
+    gint n_children = atk_object_get_n_accessible_children(ATK_OBJECT(current));
+    for (gint i = 0; i < n_children; i++) {
+      g_autoptr(AtkObject) child =
+          atk_object_ref_accessible_child(ATK_OBJECT(current), i);
+      if (FL_IS_ACCESSIBLE_NODE(child) &&
+          atk_object_get_parent(child) == ATK_OBJECT(current)) {
+        g_ptr_array_add(pending, child);
+      }
+    }
+    // The map's reference keeps |current| alive until here; its children
+    // queued above are still held by the map.
+    g_hash_table_remove(
+        self->semantics_nodes_by_id,
+        GINT_TO_POINTER(fl_accessible_node_get_node_id(current)));
+  }
+}
+
 void fl_view_accessible_handle_update_semantics(
     FlViewAccessible* self,
     const FlutterSemanticsUpdate2* update) {
   g_return_if_fail(FL_IS_VIEW_ACCESSIBLE(self));
+
+  // Flutter's update carries only the nodes that changed. A node leaves the
+  // tree when an updated parent stops naming it, and every parent whose
+  // children change is in the update, so a node stays exactly when an updated
+  // parent names it. These candidates are every child an updated parent
+  // named before this update, and every node this update created.
+  g_autoptr(GArray) candidates = g_array_new(FALSE, FALSE, sizeof(int32_t));
+  g_autoptr(GHashTable) named = g_hash_table_new(g_direct_hash, g_direct_equal);
 
   g_autoptr(GHashTable) pending_children =
       g_hash_table_new_full(g_direct_hash, g_direct_equal, nullptr,
                             reinterpret_cast<GDestroyNotify>(fl_value_unref));
   for (size_t i = 0; i < update->node_count; i++) {
     FlutterSemanticsNode2* node = update->nodes[i];
+    if (lookup_node(self, node->id) == nullptr &&
+        node->id != kRootSemanticsNodeId) {
+      g_array_append_val(candidates, node->id);
+    }
     FlAccessibleNode* atk_node = get_node(self, node);
+    if (atk_node == nullptr) {
+      continue;
+    }
 
     fl_accessible_node_set_flags(atk_node, node->flags2);
     fl_accessible_node_set_actions(atk_node, node->actions);
@@ -191,32 +235,49 @@ void fl_view_accessible_handle_update_semantics(
     g_hash_table_insert(pending_children, atk_node, children);
   }
 
-  g_hash_table_foreach_remove(
-      pending_children,
-      [](gpointer key, gpointer value, gpointer user_data) -> gboolean {
-        FlViewAccessible* self = FL_VIEW_ACCESSIBLE(user_data);
+  GHashTableIter iter;
+  gpointer key, value;
+  g_hash_table_iter_init(&iter, pending_children);
+  while (g_hash_table_iter_next(&iter, &key, &value)) {
+    FlAccessibleNode* parent = FL_ACCESSIBLE_NODE(key);
 
-        FlAccessibleNode* parent = FL_ACCESSIBLE_NODE(key);
+    gint n_previous = atk_object_get_n_accessible_children(ATK_OBJECT(parent));
+    for (gint i = 0; i < n_previous; i++) {
+      g_autoptr(AtkObject) previous =
+          atk_object_ref_accessible_child(ATK_OBJECT(parent), i);
+      if (FL_IS_ACCESSIBLE_NODE(previous)) {
+        int32_t id =
+            fl_accessible_node_get_node_id(FL_ACCESSIBLE_NODE(previous));
+        g_array_append_val(candidates, id);
+      }
+    }
 
-        size_t child_count = fl_value_get_length(static_cast<FlValue*>(value));
-        const int32_t* children_in_traversal_order =
-            fl_value_get_int32_list(static_cast<FlValue*>(value));
+    size_t child_count = fl_value_get_length(static_cast<FlValue*>(value));
+    const int32_t* children_in_traversal_order =
+        fl_value_get_int32_list(static_cast<FlValue*>(value));
 
-        g_autoptr(GPtrArray) children = g_ptr_array_new();
-        for (size_t i = 0; i < child_count; i++) {
-          FlAccessibleNode* child =
-              lookup_node(self, children_in_traversal_order[i]);
-          if (child == nullptr) {
-            continue;
-          }
-          fl_accessible_node_set_parent(child, ATK_OBJECT(parent), i);
-          g_ptr_array_add(children, child);
-        }
-        fl_accessible_node_set_children(parent, children);
+    g_autoptr(GPtrArray) children = g_ptr_array_new();
+    for (size_t i = 0; i < child_count; i++) {
+      FlAccessibleNode* child =
+          lookup_node(self, children_in_traversal_order[i]);
+      if (child == nullptr) {
+        continue;
+      }
+      g_hash_table_add(named, GINT_TO_POINTER(children_in_traversal_order[i]));
+      fl_accessible_node_set_parent(child, ATK_OBJECT(parent), i);
+      g_ptr_array_add(children, child);
+    }
+    fl_accessible_node_set_children(parent, children);
+  }
 
-        return TRUE;
-      },
-      self);
+  for (guint i = 0; i < candidates->len; i++) {
+    int32_t id = g_array_index(candidates, int32_t, i);
+    FlAccessibleNode* node = lookup_node(self, id);
+    if (node != nullptr && id != kRootSemanticsNodeId &&
+        !g_hash_table_contains(named, GINT_TO_POINTER(id))) {
+      remove_subtree(self, node);
+    }
+  }
 }
 
 void fl_view_accessible_send_announcement(FlViewAccessible* self,

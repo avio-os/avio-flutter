@@ -564,6 +564,12 @@ FlAccessibleNode* fl_accessible_node_new(FlEngine* engine,
   return self;
 }
 
+int32_t fl_accessible_node_get_node_id(FlAccessibleNode* self) {
+  g_return_val_if_fail(FL_IS_ACCESSIBLE_NODE(self), -1);
+  FlAccessibleNodePrivate* priv = FL_ACCESSIBLE_NODE_GET_PRIVATE(self);
+  return priv->node_id;
+}
+
 void fl_accessible_node_set_parent(FlAccessibleNode* self,
                                    AtkObject* parent,
                                    gint index) {

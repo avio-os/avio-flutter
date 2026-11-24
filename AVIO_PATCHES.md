@@ -98,6 +98,7 @@ already ancestors of the selected main target under their original commits.
 | 52 | SDF colour sources: no mask when the shape contains the clip; single-sample snapshots otherwise | upstreamable memory/performance fix | submit upstream |
 | 50 | cherry-pick: shade linear and radial gradients inside UberSDF (flutter#192124, #192962) | temporary backport — drop at the next rebase onto a base that contains #192124 and #192962, after re-checking the two Avio deltas below | merged upstream: flutter/flutter#192124, #192962 |
 | 55a | Prewarm the pipelines Avio's SDF and single-sample patches use | permanent startup-latency extension (tied to patches 48, 50 and 52) | none — upstream compiles every variant on first use |
+| 67 | GTK semantics: an update releases the nodes it detaches | upstreamable bugfix (latent upstream: `FlViewAccessible` never removed a node) | submit upstream |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -2038,6 +2039,22 @@ without the change. `hitRegionOnlyChangeOnRootTargetCarriesTheNewClaim`,
 unselected targets) fails without the shortcut change;
 `HitRegionsWithoutEmptyFramesFailBeforeLaunch` and
 `HitRegionsCanBeNegotiatedWithEmptyFrames` cover negotiation.
+
+### Patch 67: GTK semantics nodes leave with the tree
+
+Upstream `FlViewAccessible` only ever inserted into `semantics_nodes_by_id`,
+so every semantics id a view had seen kept its ATK object for the life of the
+view: unbounded engine-owned map growth (engine-contract §11.6), and a later
+reference to a reused id resurrected a stale node. Flutter's
+`FlutterSemanticsUpdate2` carries only changed nodes, and every parent whose
+children change is in it, so a node stays exactly when an updated parent
+names it. The update collects as candidates every child its updated parents
+named before and every node it created, then drops each candidate no updated
+parent names, with the descendants still parented to it; a node moved under
+another parent in the same update keeps its new place. The work is bounded by
+the update, not the tree. `get_node` no longer stores a node it failed to
+create. Regressions: `ReleasesNodesThatLeaveTheTree`,
+`KeepsNoNodeThatNoParentNames`.
 
 ## Evaluated Gaussian snapshot coordinates (local VM repair)
 

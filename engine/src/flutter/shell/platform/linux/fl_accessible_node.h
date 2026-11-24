@@ -68,6 +68,14 @@ FlAccessibleNode* fl_accessible_node_new(FlEngine* engine,
                                          int32_t node_id);
 
 /**
+ * fl_accessible_node_get_node_id:
+ * @node: an #FlAccessibleNode.
+ *
+ * Returns: the semantics node ID this object represents.
+ */
+int32_t fl_accessible_node_get_node_id(FlAccessibleNode* node);
+
+/**
  * fl_accessible_node_set_parent:
  * @node: an #FlAccessibleNode.
  * @parent: an #AtkObject.

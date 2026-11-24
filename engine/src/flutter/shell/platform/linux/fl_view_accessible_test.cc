@@ -232,3 +232,101 @@ TEST_F(FlViewAccessibleTest, AddRemoveChildren) {
 
   EXPECT_EQ(atk_object_get_n_accessible_children(root_object), 0);
 }
+
+// An update that detaches a node releases it with its subtree, and a node it
+// moves keeps its place. Retaining detached nodes grew the view's map by
+// every semantics id the view had ever seen (engine-contract §11.6).
+TEST_F(FlViewAccessibleTest, ReleasesNodesThatLeaveTheTree) {
+  g_autoptr(FlViewAccessible) accessible = fl_view_accessible_new(engine, 456);
+
+  FlutterSemanticsFlags flags = {};
+  int32_t root_children[] = {1, 2};
+  int32_t one_children[] = {3};
+  FlutterSemanticsNode2 root = {.id = 0,
+                                .label = "root",
+                                .child_count = 2,
+                                .children_in_traversal_order = root_children,
+                                .flags2 = &flags};
+  FlutterSemanticsNode2 one = {.id = 1,
+                               .label = "one",
+                               .child_count = 1,
+                               .children_in_traversal_order = one_children,
+                               .flags2 = &flags};
+  FlutterSemanticsNode2 two = {.id = 2, .label = "two", .flags2 = &flags};
+  FlutterSemanticsNode2 three = {.id = 3, .label = "three", .flags2 = &flags};
+  FlutterSemanticsNode2* first_nodes[] = {&root, &one, &two, &three};
+  FlutterSemanticsUpdate2 first = {.node_count = 4, .nodes = first_nodes};
+  fl_view_accessible_handle_update_semantics(accessible, &first);
+
+  AtkObject* root_object = nullptr;
+  AtkObject* one_object = nullptr;
+  AtkObject* two_object = nullptr;
+  AtkObject* three_object = nullptr;
+  {
+    g_autoptr(AtkObject) r =
+        atk_object_ref_accessible_child(ATK_OBJECT(accessible), 0);
+    g_autoptr(AtkObject) o = atk_object_ref_accessible_child(r, 0);
+    g_autoptr(AtkObject) t = atk_object_ref_accessible_child(r, 1);
+    g_autoptr(AtkObject) h = atk_object_ref_accessible_child(o, 0);
+    ASSERT_NE(h, nullptr);
+    EXPECT_STREQ(atk_object_get_name(h), "three");
+    root_object = r;
+    one_object = o;
+    two_object = t;
+    three_object = h;
+  }
+  g_object_add_weak_pointer(G_OBJECT(one_object),
+                            reinterpret_cast<gpointer*>(&one_object));
+  g_object_add_weak_pointer(G_OBJECT(three_object),
+                            reinterpret_cast<gpointer*>(&three_object));
+
+  // "one" leaves the root, and "three" moves from "one" to "two".
+  int32_t root_after[] = {2};
+  int32_t two_after[] = {3};
+  root.child_count = 1;
+  root.children_in_traversal_order = root_after;
+  two.child_count = 1;
+  two.children_in_traversal_order = two_after;
+  FlutterSemanticsNode2* second_nodes[] = {&root, &two};
+  FlutterSemanticsUpdate2 second = {.node_count = 2, .nodes = second_nodes};
+  fl_view_accessible_handle_update_semantics(accessible, &second);
+
+  EXPECT_EQ(one_object, nullptr);
+  ASSERT_NE(three_object, nullptr);
+  EXPECT_EQ(atk_object_get_parent(three_object), two_object);
+  EXPECT_EQ(atk_object_get_n_accessible_children(root_object), 1);
+  EXPECT_EQ(atk_object_get_n_accessible_children(two_object), 1);
+
+  // "two" and "three" leave together.
+  root.child_count = 0;
+  root.children_in_traversal_order = nullptr;
+  FlutterSemanticsNode2* third_nodes[] = {&root};
+  FlutterSemanticsUpdate2 third = {.node_count = 1, .nodes = third_nodes};
+  fl_view_accessible_handle_update_semantics(accessible, &third);
+  EXPECT_EQ(three_object, nullptr);
+  EXPECT_EQ(atk_object_get_n_accessible_children(root_object), 0);
+}
+
+// The map holds only the published tree: a node no parent names is not kept,
+// so a later reference to its id cannot resurrect it.
+TEST_F(FlViewAccessibleTest, KeepsNoNodeThatNoParentNames) {
+  g_autoptr(FlViewAccessible) accessible = fl_view_accessible_new(engine, 456);
+
+  FlutterSemanticsFlags flags = {};
+  FlutterSemanticsNode2 root = {.id = 0, .label = "root", .flags2 = &flags};
+  FlutterSemanticsNode2 orphan = {.id = 4, .label = "orphan", .flags2 = &flags};
+  FlutterSemanticsNode2* first_nodes[] = {&root, &orphan};
+  FlutterSemanticsUpdate2 first = {.node_count = 2, .nodes = first_nodes};
+  fl_view_accessible_handle_update_semantics(accessible, &first);
+
+  int32_t root_children[] = {4};
+  root.child_count = 1;
+  root.children_in_traversal_order = root_children;
+  FlutterSemanticsNode2* second_nodes[] = {&root};
+  FlutterSemanticsUpdate2 second = {.node_count = 1, .nodes = second_nodes};
+  fl_view_accessible_handle_update_semantics(accessible, &second);
+
+  g_autoptr(AtkObject) root_object =
+      atk_object_ref_accessible_child(ATK_OBJECT(accessible), 0);
+  EXPECT_EQ(atk_object_get_n_accessible_children(root_object), 0);
+}
