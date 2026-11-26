@@ -403,6 +403,8 @@ if (enable_unittests) {
     include_dirs = [ "." ]
 
     sources = [
+      "tests/avio_frame_conservation_unittests.cc",
+      "tests/avio_raster_conservation_unittests.cc",
       "tests/embedder_frozen_unittests.cc",
       "tests/embedder_unittests.cc",
       "tests/vsync_waiter_embedder_unittests.cc",

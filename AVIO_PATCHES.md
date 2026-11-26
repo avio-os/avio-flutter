@@ -101,6 +101,7 @@ already ancestors of the selected main target under their original commits.
 | 67 | GTK semantics: an update releases the nodes it detaches | upstreamable bugfix (latent upstream: `FlViewAccessible` never removed a node) | submit upstream |
 | 68 | GTK builds semantics only while something reads them | permanent embedder policy (Avio's semantics-demand contract) | none — upstream enables semantics unconditionally |
 | 69 | A display that returns before its owed baton settles schedules again | permanent correctness fix to patch 5's per-display scheduling | none |
+| 70 | Frame-opportunity conservation tests for several views on one display | test-only (patches 5, 12 and 69) | none |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -2137,6 +2138,29 @@ removed. Regressions, all failing on the previous code:
 `RetiredDisplaySettlesWithATransportLostBaton`. Found by reading during the
 2026-11-25 whole-shell freeze investigation; it is not that freeze's cause (no
 display or view topology change preceded it).
+
+### Patch 70: frame-opportunity conservation tests
+
+`AvioFrameConservation.*` (embedder_unittests) drives the real `Animator`,
+`VsyncWaiterEmbedder` and `FrameOpportunityRegistry` with five views on one
+display. The UI queue is stepped one task at a time from fixed seeds (2000 per
+configuration, about 2 s each), so host grants, scoped and unscoped requests,
+texture frames, visibility, configure frames, view removal and re-add, display
+updates and host cancellation interleave inside every window the engine leaves
+open; a raster FIFO gives each layer-tree task exactly one terminal. Every
+display target must terminalize once the engine quiesces.
+`DisplayLeavesAndReturnsWhileFramesAreOwed` adds the display leaving and
+returning around owed batons, with views re-homed before or after it returns,
+and requires every visible view the framework dirtied to have been built; it
+fails on the code before patch 69. `GlobalLaneLentDisplayTargets` checks that
+the harness sees the strand a host makes when it lends display targets to the
+global lane, which never renders them.
+
+`EmbedderTest.AvioExactTargetsTerminalizeThroughRealRaster` drives the same
+shape through the public ABI, Dart, the Rasterizer and root render-target
+delivery with software targets for 1000 display grants, refusing a fifth of
+acquisitions with every typed outcome and one present in twenty. The Vulkan
+selected-target raster path has no such harness yet.
 
 ## Evaluated Gaussian snapshot coordinates (local VM repair)
 

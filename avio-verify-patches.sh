@@ -1072,6 +1072,15 @@ need "display retirement regressions" \
   $F/shell/common/animator_unittests.cc 'ReAddedDisplaySchedulesAgainAfterItsOwedBaton'
 need "re-registered view demand regression" \
   $F/shell/common/animator_unittests.cc 'ReRegisteredViewKeepsItsDemandPastTheRemovedTerminal'
+echo "--- Frame-opportunity conservation ---"
+need "conservation tests build with embedder_unittests" \
+  $F/shell/platform/embedder/BUILD.gn 'tests/avio_frame_conservation_unittests\.cc'
+need "display churn keeps every dirty visible view built (test)" \
+  $F/shell/platform/embedder/tests/avio_frame_conservation_unittests.cc \
+  'DisplayLeavesAndReturnsWhileFramesAreOwed'
+need "exact targets terminalize through real raster (test)" \
+  $F/shell/platform/embedder/tests/avio_raster_conservation_unittests.cc \
+  'AvioExactTargetsTerminalizeThroughRealRaster'
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"
