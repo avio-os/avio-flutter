@@ -100,6 +100,7 @@ already ancestors of the selected main target under their original commits.
 | 55a | Prewarm the pipelines Avio's SDF and single-sample patches use | permanent startup-latency extension (tied to patches 48, 50 and 52) | none — upstream compiles every variant on first use |
 | 67 | GTK semantics: an update releases the nodes it detaches | upstreamable bugfix (latent upstream: `FlViewAccessible` never removed a node) | submit upstream |
 | 68 | GTK builds semantics only while something reads them | permanent embedder policy (Avio's semantics-demand contract) | none — upstream enables semantics unconditionally |
+| 69 | A display that returns before its owed baton settles schedules again | permanent correctness fix to patch 5's per-display scheduling | none |
 
 Patch #5 also owns the later exact empty-frame and global-request corrections:
 global requests may not be consumed by a display-scoped frame; sibling-render,
@@ -2099,6 +2100,43 @@ the hold outlasts an agent's turn. Regressions: `FlSemanticsDemandTest.*`,
 `AReadRequestsSemanticsAndReportsBusy`, `DropsItsTreeWhenSemanticsTurnOff`,
 `FlEngineTest.SemanticsFollowDemand`. `FlViewTest.SemanticsUpdate*` read the
 view before feeding an update.
+
+### Patch 69: one owner retires a display's frame state
+
+`RemoveDisplay` keeps a display that still owes a baton as a retired state, so
+that baton can terminalize the targets its pending request named. Three paths
+treated that state as registered: `AddDisplay` returned it without clearing
+`retired`, `BindViewToDisplay` homed views into it, and frame requests latched
+onto it. When the owed baton arrived, the retired branch erased the state with
+the returned display's views and demand in it: the display never asked for a
+frame again and its views were homed on nothing. A transport-lost cancellation
+left a retired state behind for good.
+
+`retired` is now set only by `RemoveDisplay` and cleared only by `AddDisplay`.
+`GetRegisteredDisplayState` is the one lookup that binding, requests,
+visibility, view removal and display removal use, so a retired display holds no
+views and takes no demand; a view homed on it waits on the default state until
+the display returns. `ReleaseRetiredDisplay` alone erases display state, once
+no baton is owed, including after a transport-lost cancellation.
+`RemoveDisplay` clears the pending request it converted into removed targets,
+so a returning display starts without demand.
+
+The owed baton still terminalizes the targets named at removal as
+`kTargetRemoved`: it was admitted for the registration that ended. A target
+removed and registered again before its opportunity reached the UI (a re-added
+view, or a view on a display that left and returned) terminalizes the same
+way, and the demand its new registration latched asks for a fresh opportunity
+once the turn settles, as backpressure retries do. Before, the stale
+opportunity consumed that demand and dropped it. Homing a view on the display
+it already lives on moves nothing and no longer names its admitted target
+removed. Regressions, all failing on the previous code:
+`ReAddedDisplaySchedulesAgainAfterItsOwedBaton`,
+`ViewHomedOnRetiredDisplayWaitsForTheDisplayToReturn`,
+`ReRegisteredViewKeepsItsDemandPastTheRemovedTerminal`,
+`RehomingAViewOnItsOwnDisplayKeepsItsAdmittedTarget`,
+`RetiredDisplaySettlesWithATransportLostBaton`. Found by reading during the
+2026-11-25 whole-shell freeze investigation; it is not that freeze's cause (no
+display or view topology change preceded it).
 
 ## Evaluated Gaussian snapshot coordinates (local VM repair)
 

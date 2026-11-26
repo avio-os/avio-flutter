@@ -65,6 +65,11 @@ class ManualDisplayVsyncWaiter final : public VsyncWaiter {
                  opportunity_id, std::move(opportunity_target_ids));
   }
 
+  // Cancels the pending baton for |display_id| before it is returned.
+  bool CancelDisplay(DisplayId display_id, CancellationReason reason) {
+    return CancelCallback(display_id, reason, [] {});
+  }
+
   size_t request_count() const { return request_count_; }
   size_t display_request_count(DisplayId display) const {
     const auto found = display_request_counts_.find(display);
@@ -683,6 +688,251 @@ TEST_F(ShellTest, DisplayRemovalTerminatesOnlyPendingTargets) {
   PostTaskSync(task_runners.GetUITaskRunner(),
                [waiter] { waiter->FireDisplay(15, 99, {115}); });
   PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+// Observes the display frame lifecycle for the display retirement tests.
+class DisplayLifecycleDelegate final : public FakeAnimatorDelegate {
+ public:
+  MOCK_METHOD(void,
+              OnAnimatorBeginFrameForDisplay,
+              (fml::TimePoint frame_target_time,
+               uint64_t frame_number,
+               int64_t display_id,
+               const std::set<int64_t>& view_ids),
+              (override));
+  MOCK_METHOD(void,
+              OnAnimatorEmptyFrameForDisplay,
+              (int64_t display_id, const std::set<int64_t>& view_ids),
+              (override));
+  MOCK_METHOD(bool,
+              OnAnimatorFrameOpportunityOutcome,
+              (FrameOpportunityId opportunity_id,
+               int64_t display_id,
+               int64_t target_id,
+               FrameOpportunityOutcome outcome),
+              (override));
+};
+
+// Homes |view_id| on a new |display_id|, drains the bootstrap frame and arms
+// one view-scoped baton, so the display owes exactly one frame.
+static void ArmOwedDisplayFrame(const TaskRunners& task_runners,
+                                DisplayLifecycleDelegate& delegate,
+                                std::shared_ptr<Animator>& animator,
+                                ManualDisplayVsyncWaiter*& waiter,
+                                int64_t display_id,
+                                int64_t view_id) {
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    auto owned_waiter =
+        std::make_unique<ManualDisplayVsyncWaiter>(task_runners);
+    waiter = owned_waiter.get();
+    animator = std::make_unique<Animator>(delegate, task_runners,
+                                          std::move(owned_waiter));
+    animator->AddDisplay(display_id, 60.0);
+    animator->SetViewDisplay(view_id, display_id);
+  });
+  EXPECT_CALL(delegate, OnAnimatorBeginFrameForDisplay(
+                            ::testing::_, ::testing::_, display_id,
+                            std::set<int64_t>({view_id})));
+  EXPECT_CALL(delegate, OnAnimatorEmptyFrameForDisplay(
+                            display_id, std::set<int64_t>({view_id})));
+  PostTaskSync(task_runners.GetUITaskRunner(),
+               [waiter, display_id] { waiter->FireDisplay(display_id); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  ::testing::Mock::VerifyAndClearExpectations(&delegate);
+
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_TRUE(animator->RequestFrameForDisplayViews(display_id, {view_id}));
+  });
+  ASSERT_EQ(waiter->display_request_count(display_id), 2u);
+}
+
+// Requires the display's next exact opportunity to build |view_id|.
+static void ExpectDisplayBuildsView(const TaskRunners& task_runners,
+                                    DisplayLifecycleDelegate& delegate,
+                                    ManualDisplayVsyncWaiter* waiter,
+                                    int64_t display_id,
+                                    int64_t view_id,
+                                    FrameOpportunityId opportunity_id) {
+  EXPECT_CALL(delegate, OnAnimatorBeginFrameForDisplay(
+                            ::testing::_, ::testing::_, display_id,
+                            std::set<int64_t>({view_id})));
+  EXPECT_CALL(delegate, OnAnimatorFrameOpportunityOutcome(
+                            opportunity_id, display_id, view_id,
+                            FrameOpportunityOutcome::kNoVisualChange))
+      .WillOnce(::testing::Return(true));
+  EXPECT_CALL(delegate, OnAnimatorEmptyFrameForDisplay(
+                            display_id, std::set<int64_t>({view_id})));
+  PostTaskSync(task_runners.GetUITaskRunner(),
+               [waiter, display_id, view_id, opportunity_id] {
+                 waiter->FireDisplay(display_id, opportunity_id, {view_id});
+               });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  ::testing::Mock::VerifyAndClearExpectations(&delegate);
+}
+
+TEST_F(ShellTest, ReAddedDisplaySchedulesAgainAfterItsOwedBaton) {
+  DisplayLifecycleDelegate delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::shared_ptr<Animator> animator;
+  ManualDisplayVsyncWaiter* waiter = nullptr;
+  ArmOwedDisplayFrame(task_runners, delegate, animator, waiter, 16, 116);
+
+  // The display leaves and returns before the baton it owes comes back, and
+  // the embedder homes the view on it again.
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    animator->RemoveDisplay(16);
+    animator->AddDisplay(16, 60.0);
+    animator->SetViewDisplay(116, 16);
+  });
+  EXPECT_EQ(waiter->display_request_count(16), 2u);
+
+  // The owed baton was admitted for the display that left, so its target
+  // terminalizes as removed and builds nothing.
+  EXPECT_CALL(delegate, OnAnimatorBeginFrameForDisplay).Times(0);
+  EXPECT_CALL(delegate,
+              OnAnimatorFrameOpportunityOutcome(
+                  77, 16, 116, FrameOpportunityOutcome::kTargetRemoved))
+      .WillOnce(::testing::Return(true));
+  EXPECT_CALL(delegate,
+              OnAnimatorEmptyFrameForDisplay(16, std::set<int64_t>({116})));
+  PostTaskSync(task_runners.GetUITaskRunner(),
+               [waiter] { waiter->FireDisplay(16, 77, {116}); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  ::testing::Mock::VerifyAndClearExpectations(&delegate);
+
+  // The returned display keeps the demand the view brought back and asks for
+  // the next frame itself.
+  EXPECT_EQ(waiter->display_request_count(16), 3u);
+  ExpectDisplayBuildsView(task_runners, delegate, waiter, 16, 116, 78);
+
+  // It stays registered: later requests still schedule.
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    EXPECT_TRUE(animator->RequestFrameForDisplayViews(16, {116}));
+  });
+  EXPECT_EQ(waiter->display_request_count(16), 4u);
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+TEST_F(ShellTest, ViewHomedOnRetiredDisplayWaitsForTheDisplayToReturn) {
+  DisplayLifecycleDelegate delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::shared_ptr<Animator> animator;
+  ManualDisplayVsyncWaiter* waiter = nullptr;
+  ArmOwedDisplayFrame(task_runners, delegate, animator, waiter, 18, 118);
+
+  // The embedder re-homes the view before the display list brings the display
+  // back. The retired display is not registered, so the view waits.
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    animator->RemoveDisplay(18);
+    animator->SetViewDisplay(118, 18);
+  });
+  EXPECT_EQ(waiter->display_request_count(18), 2u);
+
+  EXPECT_CALL(delegate, OnAnimatorBeginFrameForDisplay).Times(0);
+  EXPECT_CALL(delegate,
+              OnAnimatorFrameOpportunityOutcome(
+                  79, 18, 118, FrameOpportunityOutcome::kTargetRemoved))
+      .WillOnce(::testing::Return(true));
+  EXPECT_CALL(delegate,
+              OnAnimatorEmptyFrameForDisplay(18, std::set<int64_t>({118})));
+  PostTaskSync(task_runners.GetUITaskRunner(),
+               [waiter] { waiter->FireDisplay(18, 79, {118}); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  ::testing::Mock::VerifyAndClearExpectations(&delegate);
+
+  // The display returns and the engine's display update asks for a frame.
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    animator->AddDisplay(18, 60.0);
+    animator->RequestFrameForDisplay(18);
+  });
+  EXPECT_EQ(waiter->display_request_count(18), 3u);
+  ExpectDisplayBuildsView(task_runners, delegate, waiter, 18, 118, 80);
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+TEST_F(ShellTest, ReRegisteredViewKeepsItsDemandPastTheRemovedTerminal) {
+  DisplayLifecycleDelegate delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::shared_ptr<Animator> animator;
+  ManualDisplayVsyncWaiter* waiter = nullptr;
+  ArmOwedDisplayFrame(task_runners, delegate, animator, waiter, 19, 119);
+
+  // The view is removed and registered again with the same id while its
+  // display owes a baton, then asks for its first frame.
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    animator->RemoveView(119);
+    EXPECT_TRUE(animator->RegisterInitialViewDisplay(119, 19));
+    EXPECT_TRUE(animator->RequestFrameForDisplayViews(19, {119}));
+  });
+  EXPECT_EQ(waiter->display_request_count(19), 2u);
+
+  EXPECT_CALL(delegate, OnAnimatorBeginFrameForDisplay).Times(0);
+  EXPECT_CALL(delegate,
+              OnAnimatorFrameOpportunityOutcome(
+                  81, 19, 119, FrameOpportunityOutcome::kTargetRemoved))
+      .WillOnce(::testing::Return(true));
+  EXPECT_CALL(delegate,
+              OnAnimatorEmptyFrameForDisplay(19, std::set<int64_t>({119})));
+  PostTaskSync(task_runners.GetUITaskRunner(),
+               [waiter] { waiter->FireDisplay(19, 81, {119}); });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+  ::testing::Mock::VerifyAndClearExpectations(&delegate);
+
+  // The new registration's first frame gets its own opportunity.
+  EXPECT_EQ(waiter->display_request_count(19), 3u);
+  ExpectDisplayBuildsView(task_runners, delegate, waiter, 19, 119, 82);
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+TEST_F(ShellTest, RehomingAViewOnItsOwnDisplayKeepsItsAdmittedTarget) {
+  DisplayLifecycleDelegate delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::shared_ptr<Animator> animator;
+  ManualDisplayVsyncWaiter* waiter = nullptr;
+  ArmOwedDisplayFrame(task_runners, delegate, animator, waiter, 22, 122);
+
+  // The embedder asserts the home the view already has. Nothing moved, so the
+  // owed baton still builds the view instead of naming it removed.
+  PostTaskSync(task_runners.GetUITaskRunner(),
+               [&] { animator->SetViewDisplay(122, 22); });
+  EXPECT_EQ(waiter->display_request_count(22), 2u);
+  EXPECT_CALL(delegate,
+              OnAnimatorFrameOpportunityOutcome(
+                  84, 22, 122, FrameOpportunityOutcome::kTargetRemoved))
+      .Times(0);
+  ExpectDisplayBuildsView(task_runners, delegate, waiter, 22, 122, 84);
+  EXPECT_EQ(waiter->display_request_count(22), 2u);
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
+}
+
+TEST_F(ShellTest, RetiredDisplaySettlesWithATransportLostBaton) {
+  DisplayLifecycleDelegate delegate;
+  TaskRunners task_runners = {"test", CreateNewThread(), CreateNewThread(),
+                              CreateNewThread(), CreateNewThread()};
+  std::shared_ptr<Animator> animator;
+  ManualDisplayVsyncWaiter* waiter = nullptr;
+  ArmOwedDisplayFrame(task_runners, delegate, animator, waiter, 20, 120);
+
+  // The owed baton is lost with its transport after the display left.
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    animator->RemoveDisplay(20);
+    EXPECT_TRUE(waiter->CancelDisplay(
+        20, VsyncWaiter::CancellationReason::kTransportLost));
+  });
+  PostTaskSync(task_runners.GetUITaskRunner(), [] {});
+
+  // The display returns as a fresh registration and schedules normally.
+  PostTaskSync(task_runners.GetUITaskRunner(), [&] {
+    animator->AddDisplay(20, 60.0);
+    animator->SetViewDisplay(120, 20);
+  });
+  EXPECT_EQ(waiter->display_request_count(20), 3u);
+  ExpectDisplayBuildsView(task_runners, delegate, waiter, 20, 120, 83);
   PostTaskSync(task_runners.GetUITaskRunner(), [&] { animator.reset(); });
 }
 

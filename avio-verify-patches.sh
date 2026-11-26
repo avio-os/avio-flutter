@@ -1057,6 +1057,21 @@ need "a view read is semantics demand and reports BUSY (test)" \
   "$F/shell/platform/linux/fl_view_accessible_test.cc" 'AReadRequestsSemanticsAndReportsBusy'
 need "semantics follow demand (test)" \
   "$F/shell/platform/linux/fl_engine_test.cc" 'SemanticsFollowDemand'
+echo "--- Display retirement ---"
+need "a returning display is registered again" \
+  $F/shell/common/animator.cc 'state\.retired = false;'
+need "one place erases display frame state" \
+  $F/shell/common/animator.cc 'void Animator::ReleaseRetiredDisplay'
+need "views and requests attach only to registered displays" \
+  $F/shell/common/animator.cc 'GetRegisteredDisplayState\(display_id\)'
+need "re-registered demand asks for a fresh opportunity" \
+  $F/shell/common/animator.cc 'RequestFrameForDisplayViews\(display_id, reregistered_target_ids\)'
+absent_in "display state erased outside its one owner" \
+  $F/shell/common/animator.cc 'display_states_\.erase\(display_id\)'
+need "display retirement regressions" \
+  $F/shell/common/animator_unittests.cc 'ReAddedDisplaySchedulesAgainAfterItsOwedBaton'
+need "re-registered view demand regression" \
+  $F/shell/common/animator_unittests.cc 'ReRegisteredViewKeepsItsDemandPastTheRemovedTerminal'
 echo
 [ $fail -eq 0 ] && echo "ALL PATCHES PRESERVED" || echo "FAILURES DETECTED"
 exit "$fail"

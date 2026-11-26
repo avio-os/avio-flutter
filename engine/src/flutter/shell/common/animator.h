@@ -156,6 +156,10 @@ class Animator final {
     // opportunity reached its UI callback remain named until that opportunity
     // terminalizes them.
     std::set<int64_t> removed_target_ids;
+    // Set only by RemoveDisplay and cleared only by AddDisplay. A retired
+    // state is not a registered display: views and requests never attach to
+    // it, it lives only until the baton it still owes settles, and
+    // ReleaseRetiredDisplay alone erases it.
     bool retired = false;
     bool frame_scheduled = false;
     bool frame_in_progress = false;
@@ -335,6 +339,15 @@ class Animator final {
 
   /// Returns the DisplayFrameState for the given display, or nullptr.
   DisplayFrameState* GetDisplayState(int64_t display_id);
+
+  /// Returns the state of a registered display, or nullptr. A display removed
+  /// while it still owes a baton keeps its state until that baton settles,
+  /// but it is not registered.
+  DisplayFrameState* GetRegisteredDisplayState(int64_t display_id);
+
+  /// Erases a retired display once it no longer owes a baton. This is the
+  /// only place a display's frame state is erased.
+  void ReleaseRetiredDisplay(int64_t display_id);
 
   /// Returns the display ID for the given view.
   int64_t GetDisplayForView(int64_t view_id) const;

@@ -537,6 +537,10 @@ void Animator::AddDisplay(int64_t display_id, double refresh_rate) {
   auto& state = display_states_[display_id];
   state.display_id = display_id;
   state.refresh_rate = refresh_rate;
+  // A display that returns before the baton it owed has settled is registered
+  // again. That baton still terminalizes the targets named at removal; demand
+  // latched from here on belongs to the returned display.
+  state.retired = false;
 
   // Displays schedule frames independently, but rasterization still drains on
   // one thread and the downstream pipeline pressure logic assumes a shared
@@ -570,12 +574,12 @@ void Animator::RemoveDisplay(int64_t display_id) {
   TRACE_EVENT1("flutter", "Animator::RemoveDisplay", "display_id",
                display_id_str.c_str());
 
-  auto it = display_states_.find(display_id);
-  if (it == display_states_.end()) {
+  DisplayFrameState* registered = GetRegisteredDisplayState(display_id);
+  if (!registered) {
     return;
   }
 
-  DisplayFrameState& state = it->second;
+  DisplayFrameState& state = *registered;
   FML_DCHECK(!state.frame_in_progress)
       << "Display removal cannot interrupt a synchronous UI frame";
 
@@ -599,20 +603,22 @@ void Animator::RemoveDisplay(int64_t display_id) {
       default_state_.renderable_view_ids.insert(view_id);
     }
   }
+  // The pending request now lives only as removed_target_ids, so a display
+  // that returns before its owed baton settles starts without demand.
   state.view_ids.clear();
   state.renderable_view_ids.clear();
   state.pending_frame_view_ids.clear();
+  state.pending_frame_all_views = false;
+  state.pending_regenerate_layer_trees = false;
   state.current_frame_view_ids.clear();
 
-  if (!state.frame_scheduled) {
-    display_states_.erase(it);
-  }
+  ReleaseRetiredDisplay(display_id);
 }
 
 void Animator::RemoveStaleDisplays(const std::set<int64_t>& active_ids) {
   std::vector<int64_t> to_remove;
   for (auto& [display_id, state] : display_states_) {
-    if (active_ids.find(display_id) == active_ids.end()) {
+    if (!state.retired && active_ids.find(display_id) == active_ids.end()) {
       to_remove.push_back(display_id);
     }
   }
@@ -652,7 +658,7 @@ bool Animator::IsViewHidden(int64_t view_id) const {
   auto mapping = view_to_display_.find(view_id);
   if (mapping != view_to_display_.end()) {
     auto display = display_states_.find(mapping->second);
-    if (display != display_states_.end()) {
+    if (display != display_states_.end() && !display->second.retired) {
       state = &display->second;
     }
   }
@@ -673,6 +679,13 @@ bool Animator::RegisterInitialViewDisplay(int64_t view_id, int64_t display_id) {
 }
 
 bool Animator::BindViewToDisplay(int64_t view_id, int64_t display_id) {
+  // Homing a view on the registered display it already lives on moves nothing:
+  // its registration continues, so its admitted target is not removed.
+  if (const DisplayFrameState* home = GetRegisteredDisplayState(display_id);
+      home && home->view_ids.count(view_id) > 0) {
+    return home->renderable_view_ids.count(view_id) > 0;
+  }
+
   // Preserve render relevance while moving the view between displays. A new
   // view is visible by default until the embedder supplies an explicit state.
   bool is_renderable = true;
@@ -684,10 +697,10 @@ bool Animator::BindViewToDisplay(int64_t view_id, int64_t display_id) {
   // Remove from previous display if mapped.
   auto prev_it = view_to_display_.find(view_id);
   if (prev_it != view_to_display_.end()) {
-    int64_t prev_display = prev_it->second;
-    auto state_it = display_states_.find(prev_display);
-    if (state_it != display_states_.end()) {
-      DisplayFrameState& prev_state = state_it->second;
+    // A retired display holds no views; a view bound to it while it was
+    // retired waits on the default state like any unregistered display's.
+    if (DisplayFrameState* prev = GetRegisteredDisplayState(prev_it->second)) {
+      DisplayFrameState& prev_state = *prev;
       was_registered = prev_state.view_ids.count(view_id) > 0;
       if (was_registered) {
         is_renderable = prev_state.renderable_view_ids.count(view_id) > 0;
@@ -719,18 +732,18 @@ bool Animator::BindViewToDisplay(int64_t view_id, int64_t display_id) {
   default_state_.renderable_view_ids.erase(view_id);
 
   // Add to new display.
-  auto state_it = display_states_.find(display_id);
-  if (state_it != display_states_.end()) {
-    state_it->second.view_ids.insert(view_id);
+  if (DisplayFrameState* target = GetRegisteredDisplayState(display_id)) {
+    target->view_ids.insert(view_id);
     if (!was_registered || is_renderable) {
-      state_it->second.renderable_view_ids.insert(view_id);
+      target->renderable_view_ids.insert(view_id);
     }
     view_to_display_[view_id] = display_id;
 
     return !was_registered || is_renderable;
   } else {
-    // Display not registered yet; record the intended display so that
-    // AddDisplay can move this view when the display arrives.
+    // Display not registered yet (or retired until its owed baton settles);
+    // record the intended display so that AddDisplay can move this view when
+    // the display arrives.
     view_to_display_[view_id] = display_id;
     default_state_.view_ids.insert(view_id);
     if (!was_registered || is_renderable) {
@@ -744,9 +757,9 @@ bool Animator::SetViewVisibility(int64_t view_id, ViewVisibility visibility) {
   DisplayFrameState* state = &default_state_;
   auto mapping_it = view_to_display_.find(view_id);
   if (mapping_it != view_to_display_.end()) {
-    auto state_it = display_states_.find(mapping_it->second);
-    if (state_it != display_states_.end()) {
-      state = &state_it->second;
+    if (DisplayFrameState* registered =
+            GetRegisteredDisplayState(mapping_it->second)) {
+      state = registered;
     }
   }
   if (state->view_ids.count(view_id) == 0) {
@@ -795,12 +808,12 @@ void Animator::RemoveView(int64_t view_id) {
   int64_t display_id = mapping_it->second;
   view_to_display_.erase(mapping_it);
 
-  auto state_it = display_states_.find(display_id);
-  if (state_it == display_states_.end()) {
+  DisplayFrameState* registered = GetRegisteredDisplayState(display_id);
+  if (!registered) {
     return;
   }
 
-  DisplayFrameState& state = state_it->second;
+  DisplayFrameState& state = *registered;
   if (state.frame_in_progress &&
       state.current_frame_view_ids.count(view_id) > 0) {
     CompleteFrameOpportunity(state, {view_id},
@@ -873,8 +886,9 @@ void Animator::CancelFrameOpportunity(int64_t display_id,
 bool Animator::RequestFrameForDisplayInternal(int64_t display_id,
                                               const std::set<int64_t>* view_ids,
                                               bool regenerate_layer_trees) {
-  // Only proceed if the display has been explicitly registered.
-  if (display_states_.find(display_id) == display_states_.end()) {
+  // Only proceed if the display has been explicitly registered. A retired
+  // display owes only its last baton and takes no new demand.
+  if (!GetRegisteredDisplayState(display_id)) {
     // A view-scoped request against an unknown display can never produce a
     // frame. Complete it through the legacy empty-frame compatibility path.
     if (view_ids != nullptr && !view_ids->empty()) {
@@ -987,9 +1001,7 @@ void Animator::OnDisplayVsync(int64_t display_id,
       }
       state->frame_timings_recorder = nullptr;
       state->current_opportunity_id = std::nullopt;
-      if (state->retired) {
-        display_states_.erase(display_id);
-      }
+      ReleaseRetiredDisplay(display_id);
       return;
     }
   }
@@ -1004,7 +1016,7 @@ void Animator::OnDisplayVsync(int64_t display_id,
     if (!retired_targets.empty()) {
       delegate_.OnAnimatorEmptyFrameForDisplay(display_id, retired_targets);
     }
-    display_states_.erase(display_id);
+    ReleaseRetiredDisplay(display_id);
     return;
   }
 
@@ -1021,11 +1033,20 @@ void Animator::OnDisplayVsync(int64_t display_id,
         std::inserter(requested_view_ids, requested_view_ids.end()));
   }
 
+  // A target removed and registered again before this opportunity reached the
+  // UI terminalizes as removed: the opportunity was admitted for the
+  // registration that ended. Demand latched by the new registration is a
+  // separate edge and asks for a fresh opportunity once this turn settles.
+  std::set<int64_t> reregistered_target_ids;
   if (frame_opportunity.has_value()) {
     FML_DCHECK(!frame_opportunity->target_ids.empty());
     const ReconciledFrameTargets targets =
         ReconcileFrameTargets(frame_opportunity->target_ids, requested_view_ids,
                               state->view_ids, state->removed_target_ids);
+    std::set_intersection(
+        targets.removed.begin(), targets.removed.end(),
+        requested_view_ids.begin(), requested_view_ids.end(),
+        std::inserter(reregistered_target_ids, reregistered_target_ids.end()));
     state->current_frame_view_ids = targets.render;
     state->pending_frame_all_views = false;
     state->pending_frame_view_ids.clear();
@@ -1062,10 +1083,14 @@ void Animator::OnDisplayVsync(int64_t display_id,
     }
     state->frame_timings_recorder = nullptr;
     state->current_opportunity_id = std::nullopt;
-    return;
+  } else {
+    BeginFrameForDisplay(*state);
   }
 
-  BeginFrameForDisplay(*state);
+  if (!reregistered_target_ids.empty()) {
+    static_cast<void>(
+        RequestFrameForDisplayViews(display_id, reregistered_target_ids));
+  }
 }
 
 void Animator::OnDisplayVsyncCancelled(
@@ -1089,7 +1114,9 @@ void Animator::OnDisplayVsyncCancelled(
   if (cancellation_reason == VsyncWaiter::CancellationReason::kTransportLost) {
     // Demand remains latched but intentionally unarmed. A new transport epoch
     // or a later explicit framework request is the only event allowed to ask
-    // for another platform baton.
+    // for another platform baton. A retired display has no demand of its own
+    // to keep, so its state settles with the baton.
+    ReleaseRetiredDisplay(display_id);
     return;
   }
 
@@ -1097,9 +1124,7 @@ void Animator::OnDisplayVsyncCancelled(
   state->pending_frame_all_views = false;
   state->pending_regenerate_layer_trees = false;
   state->removed_target_ids.clear();
-  if (state->retired) {
-    display_states_.erase(display_id);
-  }
+  ReleaseRetiredDisplay(display_id);
 }
 
 std::set<int64_t> Animator::CompleteFrameOpportunity(
@@ -1305,6 +1330,23 @@ Animator::DisplayFrameState* Animator::GetDisplayState(int64_t display_id) {
   }
 
   return nullptr;
+}
+
+Animator::DisplayFrameState* Animator::GetRegisteredDisplayState(
+    int64_t display_id) {
+  auto it = display_states_.find(display_id);
+  if (it == display_states_.end() || it->second.retired) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+void Animator::ReleaseRetiredDisplay(int64_t display_id) {
+  auto it = display_states_.find(display_id);
+  if (it != display_states_.end() && it->second.retired &&
+      !it->second.frame_scheduled) {
+    display_states_.erase(it);
+  }
 }
 
 int64_t Animator::GetDisplayForView(int64_t view_id) const {
